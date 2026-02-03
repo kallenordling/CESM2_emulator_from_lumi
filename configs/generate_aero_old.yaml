@@ -1,0 +1,95 @@
+# Where to put checkpoints, logs, and a copy of this config
+output_dir: runs/test_run
+seed: 1337
+
+# Accelerate initialization kwargs (see HuggingFace Accelerate)
+accelerator:
+  mixed_precision: bf16
+  split_batches: False
+  gradient_accumulation_steps: 4
+  log_with: Null
+
+# Datasets
+data:
+  train:
+    seq_len: 1
+    _target_: data.climate_dataset.ClimateDataset
+    data_dir: /scratch/project_462001112/emulator_data/       # e.g. tas, pr
+    realizations: ['r10i1181p1f1','r10i1231p1f1','r10i1251p1f1','r10i1281p1f1','r10i1301p1f1','r1i1001p1f1','r1i1231p1f1','r1i1251p1f1']
+    cond_file: emissions.nc  # e.g. ghg, aerosol, sst, etc.
+    target_vars: ["TREFHT"]
+    cond_vars: ["CO2_em_anthro",'sul']
+
+# Model (your diffusion / UNet wrapper that exposes loss_components or loss)
+
+  
+model:
+    _target_: models.video_net.UNetModel3D
+    in_channels: 3
+    out_channels: 1
+    dim_mults: [1, 2, 3,4, 8]
+#   time_dim: 264
+    resnet_groups: 8
+#   dropout: 0.0
+    attn_dim_head: 32
+    attn_heads: 8
+    init_kernel_size: 7
+    model_dim: 64
+
+# Optional noise scheduler for sampling (if your model uses one externally)
+# Remove this block if not needed by your code.
+scheduler:
+    _target_: custom_diffusers.continuous_ddpm.ContinuousDDPM
+    beta_schedule: linear
+    prediction_type: v_prediction
+    clip_sample: false
+    clip_range:
+      - 0
+      - null
+
+
+# (Optional) Define optimizer here if you want to pass a prebuilt optimizer to the trainer.
+# If omitted, the trainer will build AdamW from its internal cfg.
+# optimizer:
+#   _target_: torch.optim:AdamW
+#   lr: 0.0002
+#   betas: [0.9, 0.999]
+#   weight_decay: 0.0001
+
+# Trainer block mirrors trainers/unet_trainer.TrainerConfig
+trainer:
+  _target_: trainer.unetTrainer.UNetTrainer
+
+
+  hyperparameters:
+    max_epochs: 10000
+    sample_every: 500
+    save_every: 10
+    batch_size: 8
+    save_dir: runs/
+    save_name: run_test_aero2.pt
+    load_path: 0 #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_113.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_89.pt # The path to checkpoint to load from
+    lr: 0.00001 #0.0001
+    sample_steps: 250
+
+  dataloader:
+    _target_: data.climate_dataset.ClimateDataLoader
+    _partial_: True
+    shuffle: True
+    num_workers: 0
+    pin_memory: false
+    drop_last: false
+
+  optimizer:
+    _target_: torch.optim.Adam
+    _partial_: True
+    betas: [0.9, 0.99]
+
+
+  accelerator:
+    mixed_precision: bf16
+    split_batches: False
+    gradient_accumulation_steps: 4
+    device_placement: True
+    sync_batchnorm: True
+    #dynamo_backend: none

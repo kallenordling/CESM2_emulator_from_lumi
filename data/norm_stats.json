@@ -1,0 +1,19 @@
+{
+  "CO2_em_anthro": {
+    "method": "zscore",
+    "log1p": true,
+    "mean": 9.326351513297488e-07,
+    "std": 1.0322127643503296e-05,
+    "eps": 1e-06,
+    "clip": null
+  },
+  "sul": {
+    "method": "zscore",
+    "log1p": true,
+    "mean": 5.0473719258691065e-11,
+    "std": 4.5504227439266297e-10,
+    "eps": 1e-06,
+    "clip": null,
+    "notes": "zscore computed on x>0 after log1p (fallback to all if too few)"
+  }
+}
