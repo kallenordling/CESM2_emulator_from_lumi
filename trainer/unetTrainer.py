@@ -194,6 +194,8 @@ class UNetTrainer:
         # Sanity check the validation loop and sampling before training
         for epoch in range(self.first_epoch, self.max_epochs):
             #print(epoch)
+            epoch_losses = []  # ← RIGHT HERE (line 196 in your file)
+
             for step, (batch,cond) in enumerate(self.train_loader.generate()):
                 #print(step)
                 #print(len(batch),batch[0].shape,batch[1].shape)
@@ -208,6 +210,7 @@ class UNetTrainer:
                     continue
                 #print("COND SHAPE in train",cond.shape)
                 loss = self.get_loss(batch,cond)
+                epoch_losses.append(loss.detach().item())  # ← After line 210
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -231,6 +234,9 @@ class UNetTrainer:
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict,{"Epoch": epoch},)
+                    if self.accelerator.is_main_process:
+                        avg_loss = sum(epoch_losses) / len(epoch_losses)
+                        print(f"Epoch {epoch}: Loss = {avg_loss:.4f}")
                     #progress_bar.set_postfix(**log_dict)
 
             #progress_bar.close()
