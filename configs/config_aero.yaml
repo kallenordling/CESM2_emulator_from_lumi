@@ -68,8 +68,8 @@ trainer:
     batch_size: 8
     save_dir: runs/
     save_name: run_test_aero_standard1.pt
-    load_path: 0 #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero_standard1_77.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_113.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_89.pt # The path to checkpoint to load from
-    lr: 0.00001 #0.0001
+    load_path: /projappl/project_462001112/CESM_emulatorV2/run_test_aero_standard1_151.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_113.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_89.pt # The path to checkpoint to load from
+    lr: 0.000001 #0.0001
     sample_steps: 250
 
   dataloader:
