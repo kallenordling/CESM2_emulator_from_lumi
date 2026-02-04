@@ -19,13 +19,24 @@ PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
 fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
 
 # Normalization and Inverse Normalization functions
-NORM_FN = {
-    "TREFHT": lambda x: (x - 4.5) / 21.0,
-    "pr": lambda x: np.cbrt(x),
-}
+#NORM_FN = {
+#    "TREFHT": lambda x: (x - 4.5) / 21.0,
+#    "pr": lambda x: np.cbrt(x),
+#}
+#DENORM_FN = {
+#    "TREFHT": lambda x: x * 21.0 + 4.5,
+#    "pr": lambda x: x**3,
+#}
+
+# To:
 DENORM_FN = {
-    "TREFHT": lambda x: x * 21.0 + 4.5,
+    "TREFHT": lambda x: (x + 1) * (60.0 - (-85.0)) / 2 + (-85.0),
     "pr": lambda x: x**3,
+}
+
+NORM_FN = {
+    "TREFHT": lambda x: 2 * (x - (-85.0)) / (60.0 - (-85.0)) - 1,
+    "pr": lambda x: np.cbrt(x),
 }
 
 # These functions transform the range of the data to [-1, 1]
@@ -103,6 +114,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
 
         # Compute stats only from masked region
         masked = ds.where(mask)
+        '''
         mean = masked.mean(skipna=True)
         std = masked.std(skipna=True)
 
@@ -114,13 +126,12 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
 
         norm_masked = (ds - mean) / std
         out = xr.where(mask, norm_masked, 0.0)
-        
+        '''
 
         
-        norm=scale_emis_m1_p1_log10(out,low_pct=10.0, high_pct=99.5,).fillna(0)
+        norm=scale_emis_m1_p1_log10(masked,low_pct=1.0, high_pct=99.5,).fillna(0)
         return norm
-    if ds.name in ['SO2']:
-       return ds.fillna(0)
+
     # Muut muuttujat käyttävät valmiita normalisointifunktioita
     norm = NORM_FN[ds.name](ds)
     return norm.fillna(0)
