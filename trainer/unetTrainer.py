@@ -1,7 +1,7 @@
 import os
 import random
 from typing import Any, Callable
-
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch
 from accelerate import Accelerator
 from diffusers import SchedulerMixin
@@ -13,7 +13,6 @@ from tqdm import tqdm
 from einops import reduce
 #import wandb
 from ema_pytorch import EMA
-
 #from utils.viz_utils import create_gif
 from data.climate_dataset import ClimateDataset, ClimateDataLoader
 from models.video_net import UNetModel3D
@@ -118,7 +117,14 @@ class UNetTrainer:
         self.optimizer = optimizer(
             self.model.parameters(), lr=self.lr * self.accelerator.num_processes
         )
-
+        self.lr_scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.5,
+            patience=20,
+            min_lr=1e-7,
+            verbose=True
+        )
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
             self.accelerator,
@@ -223,12 +229,16 @@ class UNetTrainer:
                         #if self.global_step % self.sample_every == 0:
                         #    self.sample()
                         epoch_losses.append(loss.detach().item())
-                        avg_loss = sum(epoch_losses) / len(epoch_losses)
-                        print(f"Epoch {epoch}: Loss = {avg_loss:.4f}")
+                        #avg_loss = sum(epoch_losses) / len(epoch_losses)
+                        #print(f"Epoch {epoch}: Loss = {avg_loss:.4f}")
                         # Check to see if we need to save our model
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
-
+                    if self.accelerator.is_main_process and len(epoch_losses) > 0:
+                        avg_loss = sum(epoch_losses) / len(epoch_losses)
+                        self.lr_scheduler.step(avg_loss)
+                        current_lr = self.optimizer.param_groups[0]['lr']
+                        print(f"Epoch {epoch}: Loss={avg_loss:.4f}, LR={current_lr:.2e}")
                     # Metric calculation and logging
                     #avg_loss = self.accelerator.gather_for_metrics(loss).mean()
                     #log_dict = {"Training/Loss": avg_loss.detach().item()}
@@ -385,6 +395,8 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
+                "LR_Scheduler": self.lr_scheduler.state_dict(),
+
             }
 
             # If the directory doesn't exist already create it
@@ -466,6 +478,8 @@ class UNetTrainer:
                 print(f"[WARN] Could not load optimizer state: {e}")
 
         # Restore global step
+        if "LR_Scheduler" in checkpoint:
+            self.lr_scheduler.load_state_dict(checkpoint["LR_Scheduler"])
         self.global_step = checkpoint.get("Global Step", 0)
         print(self.global_step,self.accelerator.gradient_accumulation_steps)
         self.resume_global_step = (
