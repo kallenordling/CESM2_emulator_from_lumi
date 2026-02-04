@@ -118,7 +118,7 @@ def main(config: DictConfig) -> None:
         config.dataset,
         data_dir=config.data_dir,
         realizations=[realization_dict[config.gen_mode]],
-        target_vars=config.variables,cond_vars=["CO2_em_anthro",'sul'],cond_file=config.cond_file
+        target_vars=config.variables,cond_vars=["CO2",'SO2'],cond_file=config.cond_file
 
     )
     scheduler: ContinuousDDPM = instantiate(config.scheduler)
