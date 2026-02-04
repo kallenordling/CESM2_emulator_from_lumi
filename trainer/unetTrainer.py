@@ -210,7 +210,6 @@ class UNetTrainer:
                     continue
                 #print("COND SHAPE in train",cond.shape)
                 loss = self.get_loss(batch,cond)
-                epoch_losses.append(loss.detach().item())  # ← After line 210
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -223,20 +222,19 @@ class UNetTrainer:
                         # Check to see if we need to sample from our model
                         #if self.global_step % self.sample_every == 0:
                         #    self.sample()
-
+                        epoch_losses.append(loss.detach().item())
+                        avg_loss = sum(epoch_losses) / len(epoch_losses)
+                        print(f"Epoch {epoch}: Loss = {avg_loss:.4f}")
                         # Check to see if we need to save our model
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
 
                     # Metric calculation and logging
-                    avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-                    log_dict = {"Training/Loss": avg_loss.detach().item()}
-                    self.accelerator.log(log_dict, step=self.global_step)
-                    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
-                    self.accelerator.print(log_dict,{"Epoch": epoch},)
-                    if self.accelerator.is_main_process:
-                        avg_loss = sum(epoch_losses) / len(epoch_losses)
-                        print(f"Epoch {epoch}: Loss = {avg_loss:.4f}")
+                    #avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                    #log_dict = {"Training/Loss": avg_loss.detach().item()}
+                    #self.accelerator.log(log_dict, step=self.global_step)
+                    #self.accelerator.log({"Epoch": epoch}, step=self.global_step)
+
                     #progress_bar.set_postfix(**log_dict)
 
             #progress_bar.close()
