@@ -123,7 +123,6 @@ class UNetTrainer:
             factor=0.5,
             patience=20,
             min_lr=1e-7,
-            verbose=True
         )
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
