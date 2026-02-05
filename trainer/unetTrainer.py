@@ -232,19 +232,16 @@ class UNetTrainer:
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
 
-        # End of batch loop - log epoch summary ONCE per epoch
-        if self.accelerator.is_main_process and len(epoch_losses) > 0:
-            avg_loss = sum(epoch_losses) / len(epoch_losses)
-            min_loss = min(epoch_losses)
-            max_loss = max(epoch_losses)
-
-            # Update learning rate scheduler
-            self.lr_scheduler.step(avg_loss)
-
-            current_lr = self.optimizer.param_groups[0]['lr']
-
-            # Print epoch summary
-            print(f"Epoch {epoch:4d}: Avg={avg_loss:.4f}, Min={min_loss:.4f}, Max={max_loss:.4f}, LR={current_lr:.2e}")
+            # End of batch loop - log epoch summary ONCE per epoch
+            if self.accelerator.is_main_process and len(epoch_losses) > 0:
+                avg_loss = sum(epoch_losses) / len(epoch_losses)
+                min_loss = min(epoch_losses)
+                max_loss = max(epoch_losses)
+                # Update learning rate scheduler
+                self.lr_scheduler.step(avg_loss)
+                current_lr = self.optimizer.param_groups[0]['lr']
+                # Print epoch summary
+                print(f"Epoch {epoch:4d}: Avg={avg_loss:.4f}, Min={min_loss:.4f}, Max={max_loss:.4f}, LR={current_lr:.2e}")
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         
