@@ -2,12 +2,12 @@
 #SBATCH --job-name=diffusion_aero
 #SBATCH --account=project_462001112
 #SBATCH --partition=standard-g
-#SBATCH --nodes=10
+#SBATCH --nodes=50
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=128G
-#SBATCH --time=10:10:00
+#SBATCH --time=30:10:00
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail
