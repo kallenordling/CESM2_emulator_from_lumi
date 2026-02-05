@@ -198,55 +198,53 @@ class UNetTrainer:
     def train(self):
         # Sanity check the validation loop and sampling before training
         for epoch in range(self.first_epoch, self.max_epochs):
-            #print(epoch)
+            # print(epoch)
             epoch_losses = []  # ← RIGHT HERE (line 196 in your file)
 
-            for step, (batch,cond) in enumerate(self.train_loader.generate()):
-                #print(step)
-                #print(len(batch),batch[0].shape,batch[1].shape)
+            for step, (batch, cond) in enumerate(self.train_loader.generate()):
+                # print(step)
+                # print(len(batch),batch[0].shape,batch[1].shape)
                 self.model.train()
                 # Skip steps until we reach the resumed step
                 if (
-                    self.load_path
-                    and epoch == self.first_epoch
-                    and step < self.resume_step
+                        self.load_path
+                        and epoch == self.first_epoch
+                        and step < self.resume_step
                 ):
-
                     continue
-                #print("COND SHAPE in train",cond.shape)
-                loss = self.get_loss(batch,cond)
+                # print("COND SHAPE in train",cond.shape)
+                loss = self.get_loss(batch, cond)
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
                     # Update counts
-                    #progress_bar.update(1)
+                    # progress_bar.update(1)
                     self.global_step += 1
                     self.ema_model.update()
 
                     if self.accelerator.is_main_process:
                         # Check to see if we need to sample from our model
-                        #if self.global_step % self.sample_every == 0:
+                        # if self.global_step % self.sample_every == 0:
                         #    self.sample()
                         epoch_losses.append(loss.detach().item())
-                        #avg_loss = sum(epoch_losses) / len(epoch_losses)
-                        #print(f"Epoch {epoch}: Loss = {avg_loss:.4f}")
+
                         # Check to see if we need to save our model
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
-                if self.accelerator.is_main_process and len(epoch_losses) > 0:
-                    avg_loss = sum(epoch_losses) / len(epoch_losses)
-                    self.lr_scheduler.step(avg_loss)
-                    current_lr = self.optimizer.param_groups[0]['lr']
-                    self.accelerator.print(f"Epoch {epoch}: Loss={avg_loss:.4f}, LR={current_lr:.2e}")
-                    # Metric calculation and logging
-                    #avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-                    #log_dict = {"Training/Loss": avg_loss.detach().item()}
-                    #self.accelerator.log(log_dict, step=self.global_step)
-                    #self.accelerator.log({"Epoch": epoch}, step=self.global_step)
 
-                    #progress_bar.set_postfix(**log_dict)
+        # End of batch loop - log epoch summary ONCE per epoch
+        if self.accelerator.is_main_process and len(epoch_losses) > 0:
+            avg_loss = sum(epoch_losses) / len(epoch_losses)
+            min_loss = min(epoch_losses)
+            max_loss = max(epoch_losses)
 
-            #progress_bar.close()
+            # Update learning rate scheduler
+            self.lr_scheduler.step(avg_loss)
+
+            current_lr = self.optimizer.param_groups[0]['lr']
+
+            # Print epoch summary
+            print(f"Epoch {epoch:4d}: Avg={avg_loss:.4f}, Min={min_loss:.4f}, Max={max_loss:.4f}, LR={current_lr:.2e}")
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         
