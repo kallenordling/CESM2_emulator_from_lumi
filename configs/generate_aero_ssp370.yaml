@@ -20,7 +20,7 @@ sample_steps:  250
 start_year: 1850
 end_year: 2100
 save_name: ssp370_aero_v3 # Only set a save name if you want something special added to your save path
-samples_per: 10
+samples_per: 1
 cond_file: emissions_new.nc #emissions.nc
 sul_mul: 0
 co2_mul: 1
