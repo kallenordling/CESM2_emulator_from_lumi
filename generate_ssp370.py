@@ -18,10 +18,11 @@ import pandas as pd
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
 # Local imports
 from data.climate_dataset import ClimateDataset
-from utils.gen_utils import generate_samples,generate_samples2
+from utils.gen_utils import generate_samples, generate_samples2
 from omegaconf import OmegaConf
 from models.video_net import UNetModel3D
 from ema_pytorch import EMA
+
 Checkpoint = dict[str, Union[int, OrderedDict]]
 
 # Assumes that gen is conditioned on val, and the first realization
@@ -41,8 +42,8 @@ def get_starting_index(directory: str) -> int:
 
 
 def create_batches(
-    xr_ds: xr.Dataset,
-    dataset: ClimateDataset,
+        xr_ds: xr.Dataset,
+        dataset: ClimateDataset,
 ) -> list[xr.Dataset]:
     """Splits the dataset up into batches of size batch_size. This is helpful
     for when we perform multiprocessing, so we can distribute the batches to different
@@ -74,7 +75,7 @@ def create_batches(
 
 
 def custom_collate_fn(
-    batches: list[tuple[Tensor, xr.DataArray]],
+        batches: list[tuple[Tensor, xr.DataArray]],
 ) -> tuple[Tensor, list[xr.DataArray]]:
     """Collate function for the dataloader. This is necessary because we want to keep track of the time coordinates
     for each batch, so we can convert the generated tensors back into xarray datasets
@@ -108,7 +109,7 @@ def main(config: DictConfig) -> None:
 
     # Make sure num samples is 1 if gen mode is not gen
     assert (
-        config.samples_per == 1 or config.gen_mode == "gen"
+            config.samples_per == 1 or config.gen_mode == "gen"
     ), "Number of samples must be 1 for val and test"
 
     # Initialize all necessary objects
@@ -118,7 +119,7 @@ def main(config: DictConfig) -> None:
         config.dataset,
         data_dir=config.data_dir,
         realizations=[realization_dict[config.gen_mode]],
-        target_vars=config.variables,cond_vars=["CO2",'SO2'],cond_file=config.cond_file
+        target_vars=config.variables, cond_vars=["CO2", 'SO2'], cond_file=config.cond_file
 
     )
     scheduler: ContinuousDDPM = instantiate(config.scheduler)
@@ -130,19 +131,9 @@ def main(config: DictConfig) -> None:
     if config.gen_mode == "gen":
         # Load the model from the checkpoint
         chkpt: Checkpoint = torch.load(config.load_path, map_location="cpu", weights_only=False)
-        #model = chkpt["EMA"].eval()
-        #model = model.to(accelerator.device)
-        
+
         ema_model_sd = chkpt["EMA"]  # full EMA state dict (online_model + ema_model)
 
-        # Extract only EMA weights and strip "ema_model." prefix
-        #ema_model_sd = {
-        #  k.replace("ema_model.", ""): v
-        #  for k, v in ema_wrapped_sd.items()
-        #  if k.startswith("ema_model.")
-        #}
-
-        
         model = EMA(
             model_conf,
             beta=0.9999,  # exponential moving average factor
@@ -159,7 +150,7 @@ def main(config: DictConfig) -> None:
     xr_ds = dataset.dataset_cond.load()
     print(xr_ds)
     # Restrict days to the first 28 days of each month and select years
-    #xr_ds = xr_ds.sel(time=xr_ds.time.dt.day.isin(range(1, 29)))
+    # xr_ds = xr_ds.sel(time=xr_ds.time.dt.day.isin(range(1, 29)))
     xr_ds = xr_ds.sel(year=slice(str(config.start_year), str(config.end_year)))
 
     batches = create_batches(xr_ds, dataset)
@@ -175,27 +166,62 @@ def main(config: DictConfig) -> None:
         gen_samples = []
 
         for tensor_batch, coords in tqdm(
-            dataloader, disable=not accelerator.is_main_process
+                dataloader, disable=not accelerator.is_main_process
         ):
-            #print(i, "### I ####")
-            #print(tensor_batch.shape)
-            #print(coords)
             tensor_batch = tensor_batch.to(accelerator.device)
+
             if model is not None:
-                gen_months = generate_samples2(
-                    tensor_batch,tensor_batch,
+                # FIX: generate_samples2 returns (gen_sample, sal_co2, sal_sul)
+                # We only need the first return value
+                gen_months, sal_co2, sal_sul = generate_samples2(
+                    tensor_batch, tensor_batch,
                     scheduler=scheduler,
                     sample_steps=config.sample_steps,
                     model=model,
                     disable=True,
                 )
+
+                # Optional: save saliency maps if you want them
+                # if accelerator.is_main_process and sal_co2 is not None:
+                #     # Save sal_co2 and sal_sul somewhere
+                #     pass
             else:
                 gen_months = tensor_batch
 
+            # FIX: gen_months has shape (B, 1, T, H, W) from generate_samples2
+            # We need to convert it to (B, C, T, H, W) where C matches the number of variables
+            # The issue is that generate_samples2 only generates 1 channel (TREFHT)
+            # but convert_tensor_to_xarray expects all variables
+
             for i in range(len(gen_months)):
+                # gen_months[i] has shape (1, T, H, W)
+                # but convert_tensor_to_xarray expects (num_vars, T, H, W)
+                # where num_vars = len(dataset.vars)
+
+                # CRITICAL FIX: The sample needs to match the number of variables
+                # If you're only generating temperature (1 channel), you need to handle this
+                sample = gen_months[i]  # shape: (1, T, H, W)
+
+                # Debug print to see actual shape
+                print(f"Sample shape before conversion: {sample.shape}")
+                print(f"Expected variables: {dataset.vars}")
+                print(f"Number of variables: {len(dataset.vars)}")
+
+                # If the model only outputs 1 variable but dataset expects more,
+                # we need to either:
+                # 1. Only convert the variables that were generated, OR
+                # 2. Generate all variables
+
+                # Solution: Temporarily modify dataset to match what was generated
+                original_vars = dataset.vars
+                dataset.vars = dataset.vars[:sample.shape[0]]  # Only keep as many vars as channels
+
                 gen_samples.append(
-                    dataset.convert_tensor_to_xarray(gen_months[i], coords=coords[i])
+                    dataset.convert_tensor_to_xarray(sample, coords=coords[i])
                 )
+
+                # Restore original vars
+                dataset.vars = original_vars
 
         gen_samples = accelerator.gather_for_metrics(gen_samples)
         gen_samples = xr.concat(gen_samples, "year").sortby("year")
@@ -221,7 +247,7 @@ def main(config: DictConfig) -> None:
                     os.remove(save_path)
 
             # Save the generated samples
-            print('save file',save_path)
+            print('save file', save_path)
             gen_samples.to_netcdf(save_path)
 
             os.chmod(save_path, 0o770)
