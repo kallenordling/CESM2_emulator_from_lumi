@@ -237,7 +237,7 @@ class UNetTrainer:
                     avg_loss = sum(epoch_losses) / len(epoch_losses)
                     self.lr_scheduler.step(avg_loss)
                     current_lr = self.optimizer.param_groups[0]['lr']
-                    print(f"Epoch {epoch}: Loss={avg_loss:.4f}, LR={current_lr:.2e}")
+                    self.accelerator.print(f"Epoch {epoch}: Loss={avg_loss:.4f}, LR={current_lr:.2e}")
                     # Metric calculation and logging
                     #avg_loss = self.accelerator.gather_for_metrics(loss).mean()
                     #log_dict = {"Training/Loss": avg_loss.detach().item()}
