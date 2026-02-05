@@ -115,14 +115,14 @@ class UNetTrainer:
         self.weight_dtype = torch.float32
 
         self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr * self.accelerator.num_processes
+            self.model.parameters(), lr=self.lr
         )
         self.lr_scheduler = ReduceLROnPlateau(
             self.optimizer,
-            mode='min',
-            factor=0.5,
-            patience=20,
-            min_lr=1e-7,
+            patience=50,  # Was 20 → Wait longer
+            min_lr=1e-6,  # Was 1e-7 → Don't go too small
+            cooldown=20,  # Add this
+            threshold=0.0001  # Add this
         )
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
