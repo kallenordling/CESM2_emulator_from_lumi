@@ -2,7 +2,7 @@
 #SBATCH --job-name=diffusion_aero
 #SBATCH --account=project_462001112
 #SBATCH --partition=standard-g
-#SBATCH --nodes=50
+#SBATCH --nodes=3
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
@@ -25,17 +25,11 @@ export HYDRA_FULL_ERROR=1
 export PYTHONNOUSERSITE=1
 export MIOPEN_FIND_ENFORCE=1
 export MIOPEN_DEBUG_CONV_IMPLICIT_GEMM=0
-export NCCL_DEBUG=WARN
-export NCCL_IB_HCA=mlx5
-export NCCL_SOCKET_IFNAME=hsn
-export RCCL_ENABLE_SHARP=0
-export ACCELERATE_USE_FSDP=0
-export CUDA_LAUNCH_BLOCKING=0
-export NCCL_DEBUG=WARN
-export NCCL_SOCKET_IFNAME=hsn
-export NCCL_TIMEOUT=3600
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_DEBUG=INFO  # For debugging if it still fails
+export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
+export NCCL_NET_GDR_LEVEL=3
+export NCCL_CROSS_NIC=1
+export NCCL_TIMEOUT=7200
+
 NUM_PROCESSES=$(expr $SLURM_NNODES \* $SLURM_GPUS_PER_NODE)
 MAIN_PROCESS_IP=$(hostname -i)
 
