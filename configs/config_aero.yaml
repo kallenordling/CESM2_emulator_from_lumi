@@ -41,9 +41,6 @@ model:
 # Remove this block if not needed by your code.
 scheduler:
     _target_: custom_diffusers.continuous_ddpm.ContinuousDDPM
-    num_train_timesteps: 1000      # ← ADD THIS
-    beta_start: 0.0001             # ← ADD THIS
-    beta_end: 0.02                 # ← ADD THIS
     beta_schedule: linear
     prediction_type: v_prediction
     clip_sample: false
