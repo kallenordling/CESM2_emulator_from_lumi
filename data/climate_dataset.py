@@ -19,25 +19,25 @@ PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
 fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
 
 # Normalization and Inverse Normalization functions
-#NORM_FN = {
-#    "TREFHT": lambda x: (x - 4.5) / 21.0,
-#    "pr": lambda x: np.cbrt(x),
-#}
-#DENORM_FN = {
-#    "TREFHT": lambda x: x * 21.0 + 4.5,
-#    "pr": lambda x: x**3,
-#}
-
-# To:
+NORM_FN = {
+    "TREFHT": lambda x: (x - 4.5) / 21.0,
+    "pr": lambda x: np.cbrt(x),
+}
 DENORM_FN = {
-    "TREFHT": lambda x: (x + 1) * (60.0 - (-85.0)) / 2 + (-85.0),
+    "TREFHT": lambda x: x * 21.0 + 4.5,
     "pr": lambda x: x**3,
 }
 
-NORM_FN = {
-    "TREFHT": lambda x: 2 * (x - (-85.0)) / (60.0 - (-85.0)) - 1,
-    "pr": lambda x: np.cbrt(x),
-}
+# To:
+#DENORM_FN = {
+#    "TREFHT": lambda x: (x + 1) * (60.0 - (-85.0)) / 2 + (-85.0),
+#    "pr": lambda x: x**3,
+#}
+
+#NORM_FN = {
+#    "TREFHT": lambda x: 2 * (x - (-85.0)) / (60.0 - (-85.0)) - 1,
+#    "pr": lambda x: np.cbrt(x),
+#}
 
 # These functions transform the range of the data to [-1, 1]
 MIN_MAX_FN = {"TREFHT": lambda x: x}
