@@ -246,6 +246,14 @@ class UNetTrainer:
 
             # Calculate average epoch loss
             avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
+            min_epoch_loss = min(epoch_losses)
+            max_epoch_loss = max(epoch_losses)
+
+            # Print epoch summary (only on main process to avoid distributed hangs)
+            if self.accelerator.is_main_process:
+                current_lr = self.optimizer.param_groups[0]["lr"]
+                print(f"Epoch {epoch:4d}: Avg={avg_epoch_loss:.4f}, Min={min_epoch_loss:.4f}, "
+                      f"Max={max_epoch_loss:.4f}, LR={current_lr:.2e}")
 
             # Update learning rate scheduler
             self.lr_scheduler.step(avg_epoch_loss)
@@ -255,12 +263,17 @@ class UNetTrainer:
                 self.best_loss = avg_epoch_loss
                 self.best_epoch = epoch
                 if self.accelerator.is_main_process:
-                    print(f"New best model at epoch {epoch} with loss {avg_epoch_loss:.6f}")
+                    print(f"  → New best model! Saving checkpoint...")
                     self.save_best(epoch)
+                # Wait for main process to finish saving
+                self.accelerator.wait_for_everyone()
 
-            # Save regular checkpoint
+            # Save regular checkpoint (only on main process)
             if (epoch + 1) % self.save_every == 0:
-                self.save(epoch)
+                if self.accelerator.is_main_process:
+                    self.save(epoch)
+                # Wait for main process to finish saving
+                self.accelerator.wait_for_everyone()
 
             # If an error happened here, then the batch was empty leading to
             # division by zero
@@ -269,7 +282,8 @@ class UNetTrainer:
                 # self.validation_loop()
                 # self.sample()
 
-        print(f"Training completed! Best model was at epoch {self.best_epoch} with loss {self.best_loss:.6f}")
+        if self.accelerator.is_main_process:
+            print(f"\nTraining completed! Best model was at epoch {self.best_epoch} with loss {self.best_loss:.6f}")
 
     def get_original_sample(self, x_t, noise_pred, t):
         # Extract alpha values
