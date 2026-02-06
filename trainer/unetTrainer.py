@@ -231,12 +231,13 @@ class UNetTrainer:
                             self.save(epoch)
 
                     # Metric calculation and logging
-            avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-            log_dict = {"Training/Loss": avg_loss.detach().item()}
-            self.accelerator.log(log_dict, step=self.global_step)
-            self.accelerator.log({"Epoch": epoch}, step=self.global_step)
-            self.accelerator.print(log_dict, {"Epoch": epoch}, )
-                    # progress_bar.set_postfix(**log_dict)
+            if self.accelerator.is_main_process:
+                avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                log_dict = {"Training/Loss": avg_loss.detach().item()}
+                self.accelerator.log(log_dict, step=self.global_step)
+                self.accelerator.log({"Epoch": epoch}, step=self.global_step)
+                self.accelerator.print(log_dict, {"Epoch": epoch}, )
+                        # progress_bar.set_postfix(**log_dict)
 
             # progress_bar.close()
 
