@@ -9,7 +9,8 @@ from diffusers import DDPMScheduler
 from data.climate_dataset import ClimateDataset
 from trainer.unetTrainer import UNetTrainer
 from models.video_net import UNetModel3D
-
+import os
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.distributed')
 warnings.filterwarnings('ignore', category=FutureWarning)
