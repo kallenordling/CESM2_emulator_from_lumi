@@ -122,7 +122,7 @@ class UNetTrainer:
         self.weight_dtype = torch.float32
 
         self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr * self.accelerator.num_processes
+            self.model.parameters(), lr=self.lr
         )
 
         self.train_loader: ClimateDataLoader = dataloader(
