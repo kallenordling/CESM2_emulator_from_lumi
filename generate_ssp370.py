@@ -105,6 +105,7 @@ def main(config: DictConfig) -> None:
     # If we're generating, make sure we have a load path
     if config.gen_mode == "gen":
         assert config.load_path, "Must specify a load path"
+        print(config.load_path)
         assert os.path.isfile(config.load_path), "Invalid load path"
 
     # Make sure num samples is 1 if gen mode is not gen
