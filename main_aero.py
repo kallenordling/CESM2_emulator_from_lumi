@@ -10,7 +10,9 @@ from data.climate_dataset import ClimateDataset
 from trainer.unetTrainer import UNetTrainer
 from models.video_net import UNetModel3D
 
-
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='torch.distributed')
+warnings.filterwarnings('ignore', category=FutureWarning)
 @hydra.main(version_base=None, config_path="configs", config_name="config_aero.yaml")
 def main(cfg: DictConfig) -> None:
     """
