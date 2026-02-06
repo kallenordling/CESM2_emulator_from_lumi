@@ -208,12 +208,12 @@ class ClimateDataset(Dataset):
         #print(self.tensor_data.shape,'target_shape')
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
         """Generate a tensor of data from an xarray dataset"""
-
+        print(ds)
         # Stacks the data variables ('pr', 'tas', ...) into a single dimension
         stacked_ds = ds.to_stacked_array(
             new_dim="var", sample_dims=["year", "lon", "lat"]
         ).transpose("var", "year", "lat", "lon")
-
+        print(stacked_ds.to_numpy())
         # Convert the numpy array to a torch tensor
         tensor_data = torch.tensor(stacked_ds.to_numpy(), dtype=torch.float32)
 
