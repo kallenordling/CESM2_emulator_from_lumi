@@ -292,9 +292,18 @@ class UNetTrainer:
 
         bsz = batch.shape[0]
 
+        # Get num_train_timesteps from scheduler - handle different scheduler types
+        if hasattr(self.scheduler, 'num_train_timesteps'):
+            num_timesteps = self.scheduler.num_train_timesteps
+        elif hasattr(self.scheduler.config, 'num_train_timesteps'):
+            num_timesteps = self.scheduler.config.num_train_timesteps
+        else:
+            # Fallback for custom schedulers
+            num_timesteps = 1000
+
         timesteps = torch.randint(
             0,
-            self.scheduler.config.num_train_timesteps,
+            num_timesteps,
             (bsz,),
             device=batch.device,
         ).long()
@@ -312,9 +321,17 @@ class UNetTrainer:
             )
 
             # Make sure to get the right target for the loss
-            if self.scheduler.config.prediction_type == "epsilon":
+            # Get prediction_type from scheduler - handle different scheduler types
+            if hasattr(self.scheduler, 'prediction_type'):
+                prediction_type = self.scheduler.prediction_type
+            elif hasattr(self.scheduler.config, 'prediction_type'):
+                prediction_type = self.scheduler.config.prediction_type
+            else:
+                prediction_type = "epsilon"  # default
+
+            if prediction_type == "epsilon":
                 target = noise
-            elif self.scheduler.config.prediction_type == "v_prediction":
+            elif prediction_type == "v_prediction":
                 target = self.scheduler.get_velocity(clean_samples, noise, timesteps)
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
@@ -324,7 +341,7 @@ class UNetTrainer:
             # Calculate the avg conditional loss
             if hasattr(self.scheduler, "alphas_cumprod"):
                 pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
-            elif self.scheduler.config.prediction_type == "v_prediction":
+            elif prediction_type == "v_prediction":
                 pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
             else:
                 pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps, model_output)
