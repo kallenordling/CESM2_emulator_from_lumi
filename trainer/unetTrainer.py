@@ -1,7 +1,7 @@
 import os
 import random
 from typing import Any, Callable
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 import torch
 from accelerate import Accelerator
 from diffusers import SchedulerMixin
@@ -13,6 +13,7 @@ from tqdm import tqdm
 from einops import reduce
 # import wandb
 from ema_pytorch import EMA
+
 # from utils.viz_utils import create_gif
 from data.climate_dataset import ClimateDataset, ClimateDataLoader
 from models.video_net import UNetModel3D
@@ -121,15 +122,9 @@ class UNetTrainer:
         self.weight_dtype = torch.float32
 
         self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr
+            self.model.parameters(), lr=self.lr * self.accelerator.num_processes
         )
-        self.lr_scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            patience=50,  # Was 20 → Wait longer
-            min_lr=1e-6,  # Was 1e-7 → Don't go too small
-            cooldown=20,  # Add this
-            threshold=0.0001  # Add this
-        )
+
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
             self.accelerator,
@@ -148,10 +143,6 @@ class UNetTrainer:
         # Initialize counters
         self.global_step = 0
         self.first_epoch = 0
-
-        # Best model tracking
-        self.best_loss = float('inf')
-        self.best_epoch = -1
 
         # Keep track of important variables for logging
         self.total_batch_size = (
@@ -209,8 +200,6 @@ class UNetTrainer:
         # Sanity check the validation loop and sampling before training
         for epoch in range(self.first_epoch, self.max_epochs):
             # print(epoch)
-            epoch_losses = []  # ← RIGHT HERE (line 196 in your file)
-
             for step, (batch, cond) in enumerate(self.train_loader.generate()):
                 # print(step)
                 # print(len(batch),batch[0].shape,batch[1].shape)
@@ -222,109 +211,67 @@ class UNetTrainer:
                         and step < self.resume_step
                 ):
                     continue
+                # print("COND SHAPE in train",cond.shape)
+                loss = self.get_loss(batch, cond)
 
-                batch = batch.to(self.weight_dtype)
-                with self.accelerator.accumulate(self.model):
-                    loss = self.model_forward_pass(batch, cond)
-                    epoch_losses.append(loss.item())
-
-                self.ema_model.update()
-
-                # Gather our losses for logging
-                logs = {
-                    "Training/Loss": loss.detach().item(),
-                    "Learning Rate": self.optimizer.param_groups[0]["lr"],
-                    # "Pixel-wise error":pixel_loss.detach().item(),
-                    # "Masked loss":masked_loss.detach().item(),
-                }
-                # Log the loss to WANDB
-                self.accelerator.log(logs, step=self.global_step)
-
-                # Increment the global step (counts true iterations)
+                # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
+                    # Update counts
+                    # progress_bar.update(1)
                     self.global_step += 1
+                    self.ema_model.update()
 
-            # Calculate average epoch loss
-            avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
-            min_epoch_loss = min(epoch_losses)
-            max_epoch_loss = max(epoch_losses)
+                    if self.accelerator.is_main_process:
+                        # Check to see if we need to sample from our model
+                        # if self.global_step % self.sample_every == 0:
+                        #    self.sample()
 
-            # Print epoch summary (only on main process to avoid distributed hangs)
-            if self.accelerator.is_main_process:
-                current_lr = self.optimizer.param_groups[0]["lr"]
-                print(f"Epoch {epoch:4d}: Avg={avg_epoch_loss:.4f}, Min={min_epoch_loss:.4f}, "
-                      f"Max={max_epoch_loss:.4f}, LR={current_lr:.2e}")
+                        # Check to see if we need to save our model
+                        if self.global_step % self.save_every == 0:
+                            self.save(epoch)
 
-            # Update learning rate scheduler
-            self.lr_scheduler.step(avg_epoch_loss)
+                    # Metric calculation and logging
+                    avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                    log_dict = {"Training/Loss": avg_loss.detach().item()}
+                    self.accelerator.log(log_dict, step=self.global_step)
+                    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
+                    self.accelerator.print(log_dict, {"Epoch": epoch}, )
+                    # progress_bar.set_postfix(**log_dict)
 
-            # Check if this is the best epoch
-            if avg_epoch_loss < self.best_loss:
-                self.best_loss = avg_epoch_loss
-                self.best_epoch = epoch
-                if self.accelerator.is_main_process:
-                    print(f"  → New best model! Saving checkpoint...")
-                    self.save_best(epoch)
-                # Wait for main process to finish saving
-                self.accelerator.wait_for_everyone()
+            # progress_bar.close()
 
-            # Save regular checkpoint (only on main process)
-            if (epoch + 1) % self.save_every == 0:
-                if self.accelerator.is_main_process:
-                    self.save(epoch)
-                # Wait for main process to finish saving
-                self.accelerator.wait_for_everyone()
+    def get_original_sample(self, noisy_sample, model_output, timesteps):
 
-            # If an error happened here, then the batch was empty leading to
-            # division by zero
-            if (epoch + 1) % self.sample_every == 0:
-                pass
-                # self.validation_loop()
-                # self.sample()
+        alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+        beta_prod_t = 1 - alpha_prod_t
 
-        if self.accelerator.is_main_process:
-            print(f"\nTraining completed! Best model was at epoch {self.best_epoch} with loss {self.best_loss:.6f}")
+        pred_original_sample = (alpha_prod_t ** 0.5) * noisy_sample - (beta_prod_t ** 0.5) * model_output
 
-    def get_original_sample(self, x_t, noise_pred, t):
-        # Extract alpha values
-        alpha_t = self.scheduler.alphas_cumprod[t].view(-1, 1, 1, 1, 1)
-        sqrt_alpha_t = torch.sqrt(alpha_t)
-        sqrt_one_minus_alpha_t = torch.sqrt(1 - alpha_t)
+        return pred_original_sample
 
-        # Rearrange the formula: x_0 = (x_t - sqrt(1-alpha_t)*eps) / sqrt(alpha_t)
-        return (x_t - sqrt_one_minus_alpha_t * noise_pred) / sqrt_alpha_t
+    def get_loss(self, batch, cond_map):
+        clean_samples = batch.to(self.weight_dtype)
+        # cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
+        #    1, 1, clean_samples.shape[-3], 1, 1
+        # )
 
-    def model_forward_pass(self, batch: torch.Tensor, cond: torch.Tensor):
-        """Runs a single forward pass of the model and calculates loss.
+        # Sample noise that we'll add to the clean images
+        noise = torch.randn_like(clean_samples)
 
-        Args:
-            batch: A batch of training samples.
-        """
-        # Sample a random timestep for each sample in the batch
-        # sample noise that will be added to the samples
-        noise = torch.randn_like(batch.to(self.device))
-
-        bsz = batch.shape[0]
-
-        # Get num_train_timesteps from scheduler - handle different scheduler types
-        if hasattr(self.scheduler, 'num_train_timesteps'):
-            num_timesteps = self.scheduler.num_train_timesteps
-        elif hasattr(self.scheduler.config, 'num_train_timesteps'):
-            num_timesteps = self.scheduler.config.num_train_timesteps
+        # If we are doing continuous diffusion, timesteps need to be from 0 - 1
+        if isinstance(self.scheduler, ContinuousDDPM):
+            timesteps = torch.rand(clean_samples.shape[0], device=self.device)
+            timesteps = self.scheduler.log_snr(timesteps)
         else:
-            # Fallback for custom schedulers
-            num_timesteps = 1000
-
-        timesteps = torch.randint(
-            0,
-            num_timesteps,
-            (bsz,),
-            device=batch.device,
-        ).long()
-        clean_samples = batch
-        cond_map = cond.to(self.weight_dtype)
+            timesteps = torch.randint(
+                0,
+                self.scheduler.config.num_train_timesteps,
+                (clean_samples.shape[0],),
+                device=self.device,
+            ).long()
 
         # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
         with self.accelerator.accumulate(self.model):
@@ -335,17 +282,9 @@ class UNetTrainer:
             )
 
             # Make sure to get the right target for the loss
-            # Get prediction_type from scheduler - handle different scheduler types
-            if hasattr(self.scheduler, 'prediction_type'):
-                prediction_type = self.scheduler.prediction_type
-            elif hasattr(self.scheduler.config, 'prediction_type'):
-                prediction_type = self.scheduler.config.prediction_type
-            else:
-                prediction_type = "epsilon"  # default
-
-            if prediction_type == "epsilon":
+            if self.scheduler.config.prediction_type == "epsilon":
                 target = noise
-            elif prediction_type == "v_prediction":
+            elif self.scheduler.config.prediction_type == "v_prediction":
                 target = self.scheduler.get_velocity(clean_samples, noise, timesteps)
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
@@ -355,7 +294,7 @@ class UNetTrainer:
             # Calculate the avg conditional loss
             if hasattr(self.scheduler, "alphas_cumprod"):
                 pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
-            elif prediction_type == "v_prediction":
+            elif self.scheduler.config.prediction_type == "v_prediction":
                 pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
             else:
                 pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps, model_output)
@@ -432,33 +371,6 @@ class UNetTrainer:
                 {f"Original {var}": wandb.Video(gif, fps=4)}, step=self.global_step
             )
 
-    def save_best(self, epoch: int):
-        """Saves the best model checkpoint."""
-        if self.save_name is None:
-            return
-
-        state_dict = {
-            "EMA": self.ema_model.ema_model.state_dict(),
-            "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
-            "Optimizer": self.optimizer.state_dict(),
-            "Global Step": self.global_step,
-            "LR_Scheduler": self.lr_scheduler.state_dict(),
-            "Best Loss": self.best_loss,
-            "Best Epoch": epoch,
-        }
-
-        # If the directory doesn't exist already create it
-        os.makedirs(self.save_dir, exist_ok=True)
-
-        # Create the save filename for best model
-        base = self.save_name.split(".pt")[0]
-        best_save_name = f"{base}_best.pt"
-        best_save_path = os.path.join(self.save_dir, best_save_name)
-
-        # Save the best model
-        torch.save(state_dict, best_save_path, _use_new_zipfile_serialization=False)
-        print(f"[INFO] Saved best model at epoch {epoch} with loss {self.best_loss:.6f}")
-
     def save(self, epoch: int):
         """Saves the state of training to disk."""
         if self.save_name is None:
@@ -469,9 +381,6 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
-                "LR_Scheduler": self.lr_scheduler.state_dict(),
-                "Best Loss": self.best_loss,
-                "Best Epoch": self.best_epoch,
             }
 
             # If the directory doesn't exist already create it
@@ -490,7 +399,7 @@ class UNetTrainer:
             all_ckpts = [
                 os.path.join(self.save_dir, f)
                 for f in os.listdir(self.save_dir)
-                if f.startswith(base + "_") and f.endswith(".pt") and "_best.pt" not in f
+                if f.startswith(base + "_") and f.endswith(".pt")
             ]
 
             # Sort by epoch number extracted from filename
@@ -550,16 +459,7 @@ class UNetTrainer:
             except Exception as e:
                 print(f"[WARN] Could not load optimizer state: {e}")
 
-        # Restore learning rate scheduler
-        if "LR_Scheduler" in checkpoint:
-            self.lr_scheduler.load_state_dict(checkpoint["LR_Scheduler"])
-
-        # Restore best model tracking
-        if "Best Loss" in checkpoint:
-            self.best_loss = checkpoint["Best Loss"]
-        if "Best Epoch" in checkpoint:
-            self.best_epoch = checkpoint["Best Epoch"]
-
+        # Restore global step
         self.global_step = checkpoint.get("Global Step", 0)
         print(self.global_step, self.accelerator.gradient_accumulation_steps)
         self.resume_global_step = (
@@ -573,5 +473,3 @@ class UNetTrainer:
         self.first_epoch = self.global_step // self.num_steps_per_epoch
 
         print(f"[INFO] Loaded checkpoint from {path} (step {self.global_step})")
-        if hasattr(self, 'best_epoch') and self.best_epoch >= 0:
-            print(f"[INFO] Best model so far: epoch {self.best_epoch} with loss {self.best_loss:.6f}")
