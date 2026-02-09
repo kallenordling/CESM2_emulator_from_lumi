@@ -114,7 +114,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
 
         # Compute stats only from masked region
         masked = ds.where(mask)
-        '''
+
         mean = masked.mean(skipna=True)
         std = masked.std(skipna=True)
 
@@ -126,11 +126,11 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
 
         norm_masked = (ds - mean) / std
         out = xr.where(mask, norm_masked, 0.0)
-        '''
+
 
         
         norm=scale_emis_m1_p1_log10(masked,low_pct=1.0, high_pct=99.5,).fillna(0)
-        return norm
+        return out
 
     # Muut muuttujat käyttävät valmiita normalisointifunktioita
     norm = NORM_FN[ds.name](ds)
