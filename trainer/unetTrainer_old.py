@@ -180,7 +180,6 @@ class UNetTrainer:
         self.num_steps_per_epoch = (
             len(self.train_loader)
             // self.accelerator.gradient_accumulation_steps
-            // self.accelerator.num_processes
         )
         self.max_train_steps = self.max_epochs * self.num_steps_per_epoch
 
