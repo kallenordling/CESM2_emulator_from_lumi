@@ -3,6 +3,7 @@ import random
 from typing import Any
 from functools import lru_cache
 
+from fontTools.otlLib.optimize.gpos import cluster_pairs_by_class2_coverage_custom_cost
 from omegaconf import OmegaConf
 import torch
 import numpy as np
@@ -17,7 +18,7 @@ MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
 # Convert from kelvin to celsius and from kg/m^2/s to mm/day
 PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
 fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
-
+'''
 # Normalization and Inverse Normalization functions
 NORM_FN = {
     "TREFHT": lambda x: (x - 4.5) / 21.0,
@@ -27,6 +28,17 @@ DENORM_FN = {
     "TREFHT": lambda x: x * 21.0 + 4.5,
     "pr": lambda x: x**3,
 }
+'''
+
+NORM_FN = {
+    "TREFHT": lambda x: 2 * (x - (-85.0)) / (60.0 - (-85.0)) - 1,
+    "pr": lambda x: np.cbrt(x),
+}
+DENORM_FN = {
+    "TREFHT": lambda x: (x + 1) * (60.0 - (-85.0)) / 2 + (-85.0),
+    "pr": lambda x: x**3,
+}
+
 
 # To:
 #DENORM_FN = {
