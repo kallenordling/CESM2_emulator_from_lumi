@@ -125,7 +125,7 @@ fig, ax = plt.subplots(figsize=(7.2, 4.2))
 
 plot_experiment(
     ax,
-    "aero_standard1",
+    "aero",
     color="#aa002b",
     label="SSP3–7.0 (ensemble) CO₂ + sulfate (boosting)",
 )
