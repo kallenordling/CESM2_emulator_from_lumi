@@ -241,6 +241,7 @@ class UNetTrainer:
                     if avg_loss.detach().item() < best_loss:
                         self.accelerator.print(avg_loss.detach().item(), {"Best LOSS Epoch": epoch})
                         self.save_best(epoch)
+                        best_loss=avg_loss.detach().item()
                 log_dict = {"Training/Loss": avg_loss.detach().item()}
             #    self.accelerator.log(log_dict, step=self.global_step)
             #    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
