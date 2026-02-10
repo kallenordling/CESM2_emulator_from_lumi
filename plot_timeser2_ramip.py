@@ -20,23 +20,25 @@ plt.rcParams.update({
     "grid.alpha": 0.25,
 })
 
-BASELINE = slice(1850, 1900)        # reference period
-YR_MIN, YR_MAX = 1850, 2100        # x-axis limits
+BASELINE = slice(1850, 1900)  # reference period
+YR_MIN, YR_MAX = 1850, 2100  # x-axis limits
 VAR = "TREFHT"
+
 
 def calcmean(da: xr.DataArray) -> xr.DataArray:
     """Area-weighted mean over lat/lon (cos(lat) weighting)."""
     weights = np.cos(np.deg2rad(da["lat"]))
     return da.weighted(weights).mean(("lon", "lat"))
 
+
 def load_anomalies(dir_path: Path) -> xr.DataArray:
     """Load all members from dir, compute area mean + baseline anomalies."""
     series = []
     years = None
-    for nc_path in sorted(dir_path.glob("member_[0-9].nc")):
+    for nc_path in sorted(dir_path.glob("member_*.nc")):
         print("open", nc_path)
         ds = xr.open_dataset(nc_path)
-        da = calcmean(ds[VAR])+273.15
+        da = calcmean(ds[VAR]) + 273.15
 
         # guard for baseline existence
         base = da.sel(year=BASELINE)
@@ -60,12 +62,13 @@ def load_anomalies(dir_path: Path) -> xr.DataArray:
     ens = xr.concat(series, dim="member").isel(time=0)
     return ens
 
+
 def plot_experiment(
-    ax,
-    experiment: str,
-    *,
-    color: str = "#aa002b",
-    label: str | None = None,
+        ax,
+        experiment: str,
+        *,
+        color: str = "#aa002b",
+        label: str | None = None,
 ):
     """
     Load emulator anomalies for a given experiment and plot ensemble.
@@ -81,9 +84,8 @@ def plot_experiment(
         Legend label (defaults to experiment name)
     """
 
-
-    data_dir = Path("/scratch/project_462001112/emulator_data/gen_ssp370_"+experiment+"_TREFHT_1850-2100")
-    print("/scratch/project_462001112/emulator_data/gen_ssp370_"+experiment+"_TREFHT_1850-2100")
+    data_dir = Path("/scratch/project_462001112/emulator_data/gen_ssp370_" + experiment + "_TREFHT_1850-2100")
+    print("/scratch/project_462001112/emulator_data/gen_ssp370_" + experiment + "_TREFHT_1850-2100")
     ens = load_anomalies(data_dir)
 
     plot_ensemble(
@@ -94,6 +96,7 @@ def plot_experiment(
     )
 
     return ens
+
 
 def plot_ensemble(ax, ens: xr.DataArray, color, label):
     """Plot members (light), mean (bold), and 5–95% band."""
@@ -110,7 +113,6 @@ def plot_ensemble(ax, ens: xr.DataArray, color, label):
     print(q05)
     ax.fill_between(years, q05, q95, alpha=0.15, linewidth=0, color=color)
     ax.plot(years, mean, lw=2.2, color=color, label=label)
-
 
 
 # ---------- plot ----------
@@ -145,7 +147,7 @@ ax.axhline(0, lw=1.0, color="0.2", alpha=0.6)
 ax.set_xlim(YR_MIN, YR_MAX)
 ax.set_xlabel("Year")
 # Note: anomalies of K == °C, so label °C
-ax.set_ylabel("Global mean T anomaly (°C relative to 1850–1900)",fontsize=8)
+ax.set_ylabel("Global mean T anomaly (°C relative to 1850–1900)", fontsize=8)
 
 ax.margins(x=0)
 
@@ -175,16 +177,17 @@ ax.plot(cmip_ssp1.year, cmip_ssp1.mean('member').tas, lw=2.2, linestyle='--', co
 
 ##PLOT training data
 
-data_dir = "//scratch/project_462001112/emulator_data/"       # e.g. tas, pr
-realizations = ['r10i1181p1f1','r10i1231p1f1','r10i1251p1f1','r10i1281p1f1','r10i1301p1f1','r1i1001p1f1','r1i1231p1f1','r1i1251p1f1']
-for i,r in enumerate(realizations):
-    ds=xr.open_mfdataset(data_dir+r+"/*.nc")
-    ds=calcmean(ds)
-    ds=ds-ds.sel(year=BASELINE).mean('year')
-    if i==0:
-        ax.plot(ds.year,ds.TREFHT,'k',linewidth=0.5,label="Training dataset")    
+data_dir = "//scratch/project_462001112/emulator_data/"  # e.g. tas, pr
+realizations = ['r10i1181p1f1', 'r10i1231p1f1', 'r10i1251p1f1', 'r10i1281p1f1', 'r10i1301p1f1', 'r1i1001p1f1',
+                'r1i1231p1f1', 'r1i1251p1f1']
+for i, r in enumerate(realizations):
+    ds = xr.open_mfdataset(data_dir + r + "/*.nc")
+    ds = calcmean(ds)
+    ds = ds - ds.sel(year=BASELINE).mean('year')
+    if i == 0:
+        ax.plot(ds.year, ds.TREFHT, 'k', linewidth=0.5, label="Training dataset")
     else:
-        ax.plot(ds.year,ds.TREFHT,'k',linewidth=0.5)
+        ax.plot(ds.year, ds.TREFHT, 'k', linewidth=0.5)
 '''
 ##ramip
 ds=xr.open_dataset('/scratch/project_462001112/emulator_data/tas_Amon_CESM2_ssp370-126aer_r1i1p1f1_gn_201501-207912.nc').groupby('time.year').mean()#.isel(member=0)
