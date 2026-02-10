@@ -474,6 +474,12 @@ class UNetTrainer:
                 self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
         )
 
-        self.first_epoch = self.global_step // self.num_steps_per_epoch
+        # Extract epoch from checkpoint filename (pattern: {base}_{epoch}.pt)
+        try:
+            self.first_epoch = int(os.path.basename(path).split("_")[-1].split(".")[0])
+        except (ValueError, IndexError):
+            self.first_epoch = 0
 
+        # Resume from the start of the next epoch (no mid-epoch resume)
+        self.resume_step = 0
         print(f"[INFO] Loaded checkpoint from {path} (step {self.global_step})")
