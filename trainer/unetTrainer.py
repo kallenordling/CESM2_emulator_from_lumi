@@ -199,6 +199,8 @@ class UNetTrainer:
         # Sanity check the validation loop and sampling before training
         for epoch in range(self.first_epoch, self.max_epochs):
             # print(epoch)
+            loss = None  # Add this line
+
             for step, (batch, cond) in enumerate(self.train_loader.generate()):
                 # print(step)
                 # print(len(batch),batch[0].shape,batch[1].shape)
@@ -231,11 +233,13 @@ class UNetTrainer:
 
                     # Metric calculation and logging
             #if self.accelerator.is_main_process:
-            avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-            log_dict = {"Training/Loss": avg_loss.detach().item()}
+            if loss is not None:
+
+                avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                log_dict = {"Training/Loss": avg_loss.detach().item()}
             #    self.accelerator.log(log_dict, step=self.global_step)
             #    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
-            self.accelerator.print(log_dict, {"Epoch": epoch}, )
+                self.accelerator.print(log_dict, {"Epoch": epoch}, )
                         # progress_bar.set_postfix(**log_dict)
 
             # progress_bar.close()
