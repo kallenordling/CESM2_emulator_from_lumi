@@ -197,6 +197,7 @@ class UNetTrainer:
 
     def train(self):
         # Sanity check the validation loop and sampling before training
+        best_loss=999
         for epoch in range(self.first_epoch, self.max_epochs):
             # print(epoch)
             loss = None  # Add this line
@@ -236,6 +237,9 @@ class UNetTrainer:
             if loss is not None:
 
                 avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                if avg_loss < best_loss:
+                    self.accelerator.print(log_dict, {"Best LOSS Epoch": epoch})
+                    self.save_best(epoch)
                 log_dict = {"Training/Loss": avg_loss.detach().item()}
             #    self.accelerator.log(log_dict, step=self.global_step)
             #    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
@@ -375,6 +379,26 @@ class UNetTrainer:
                 {f"Original {var}": wandb.Video(gif, fps=4)}, step=self.global_step
             )
 
+    def save_best(self, epoch: int):
+        """Saves the state of training to disk."""
+        if self.save_name is None:
+            return
+        else:
+            state_dict = {
+                "EMA": self.ema_model.ema_model.state_dict(),
+                "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
+                "Optimizer": self.optimizer.state_dict(),
+                "Global Step": self.global_step,
+            }
+
+            # If the directory doesn't exist already create it
+            os.makedirs(self.save_dir, exist_ok=True)
+
+            # Create the save filename and add the epoch number
+            save_name = "best_epoch"+"" + f"_{epoch}.pt"
+
+            # Save the State dictionary to disk
+            torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
     def save(self, epoch: int):
         """Saves the state of training to disk."""
         if self.save_name is None:
