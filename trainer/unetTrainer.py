@@ -214,7 +214,7 @@ class UNetTrainer:
                 ):
                     continue
                 # print("COND SHAPE in train",cond.shape)
-                loss = self.get_loss(batch, cond)
+                loss,mse_loss,cond_loss = self.get_loss(batch, cond)
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -237,12 +237,17 @@ class UNetTrainer:
             if loss is not None:
 
                 avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
+                avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
                 if self.accelerator.is_main_process:
                     if avg_loss.detach().item() < best_loss:
                         self.accelerator.print(avg_loss.detach().item(), {"Best LOSS Epoch": epoch})
                         self.save_best(epoch)
                         best_loss=avg_loss.detach().item()
-                log_dict = {"Training/Loss": avg_loss.detach().item()}
+                log_dict = {"Training/Loss": avg_loss.detach().item(),
+                            'MSE_loss': avg_mse_loss.detach().item(),
+                            'cond_loss': avg_cond_loss.detach().item()}
+
             #    self.accelerator.log(log_dict, step=self.global_step)
             #    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                 self.accelerator.print(log_dict, {"Epoch": epoch}, )
@@ -315,7 +320,7 @@ class UNetTrainer:
             cond_loss = ((clean_mean - pred_mean) ** 2).mean()
 
             # Calculate the loss
-            loss = mse_loss #+ cond_loss * self.cond_loss_scaling
+            loss = mse_loss + cond_loss * self.cond_loss_scaling
 
             # Scale the loss by cosine-weighted latitude
             self.accelerator.backward(loss)
@@ -324,7 +329,7 @@ class UNetTrainer:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss
+        return loss,mse_loss,cond_loss
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
