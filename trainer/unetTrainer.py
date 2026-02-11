@@ -106,7 +106,7 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 0.2
+        self.cond_loss_scaling = 0.8
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -317,8 +317,12 @@ class UNetTrainer:
             # Get the mean of both the clean and the predicted original sample
             clean_mean = clean_samples.mean(dim=-3)
             pred_mean = pred_original_sample.mean(dim=-3)
-            cond_loss = ((clean_mean - pred_mean) ** 2).mean()
-
+            # In get_loss(), after computing cond_loss:
+            log_snr = timesteps  # already log_snr since you pass scheduler.log_snr(t)
+            snr = torch.exp(log_snr)
+            # Weight: ~1 at low noise, ~0 at high noise
+            snr_weight = (snr / (1 + snr)).mean()  # sigmoid of log_snr, averaged over batch
+            cond_loss = ((clean_mean - pred_mean) ** 2).mean() * snr_weight
             # Calculate the loss
             loss = mse_loss + cond_loss * self.cond_loss_scaling
 
