@@ -3,7 +3,6 @@ import random
 from typing import Any
 from functools import lru_cache
 
-from fontTools.otlLib.optimize.gpos import cluster_pairs_by_class2_coverage_custom_cost
 from omegaconf import OmegaConf
 import torch
 import numpy as np
@@ -18,7 +17,6 @@ MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
 # Convert from kelvin to celsius and from kg/m^2/s to mm/day
 PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
 fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
-
 # Normalization and Inverse Normalization functions
 NORM_FN = {
     "TREFHT": lambda x: (x - 4.5) / 21.0,
@@ -28,7 +26,6 @@ DENORM_FN = {
     "TREFHT": lambda x: x * 21.0 + 4.5,
     "pr": lambda x: x**3,
 }
-
 
 # These functions transform the range of the data to [-1, 1]
 MIN_MAX_FN = {"TREFHT": lambda x: x}
@@ -92,39 +89,18 @@ def _get_emissions_minmax():
 
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
+
     print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
           f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
-    # Erikoiskäsittely päästömuuttujille:
-    # min/max otetaan AINA emissions.nc-tiedoston koko kentästä
-    minmax = _get_emissions_minmax()
+
     if ds.name in ["CO2", "SO2"]:
-        
-        positive = ds.where(ds > 0)
+        # Log-scale normalization to [-1, 1] for emissions
+        result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
+        print(f"[NORM DEBUG] {ds.name} after norm: "
+              f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
+        return result
 
-        eps = positive.quantile(1 / 100.0, skipna=True)
-        mask = ds > eps
-
-        # Compute stats only from masked region
-        masked = ds.where(mask)
-
-        mean = masked.mean(skipna=True)
-        std = masked.std(skipna=True)
-
-        std_f = float(std)
-        if (std_f == 0.0) or (not np.isfinite(std_f)):
-            # If nothing valid / std is degenerate, return zeros on mask, keep others unchanged
-            out = xr.where(mask, xr.zeros_like(ds), ds)
-            return out.fillna(0)
-
-        norm_masked = (ds - mean) / std
-        out = xr.where(mask, norm_masked, 0.0)
-
-
-        
-        norm=scale_emis_m1_p1_log10(masked,low_pct=1.0, high_pct=99.5,).fillna(0)
-        return out
-
-    # Muut muuttujat käyttävät valmiita normalisointifunktioita
+    # Other variables use predefined normalization functions
     norm = NORM_FN[ds.name](ds)
     return norm.fillna(0)
 
@@ -196,8 +172,6 @@ class ClimateDataset(Dataset):
         self.dataset_cond = self.dataset_cond.map(normalize)
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
-        print(f"[DIAG] target range: [{self.tensor_data.min():.3f}, {self.tensor_data.max():.3f}]")
-        print(f"[DIAG] cond   range: [{self.tensor_data_cond.min():.3f}, {self.tensor_data_cond.max():.3f}]")
         #print(self.tensor_data_cond.shape,'cond shape')
         #print(self.tensor_data.shape,'target_shape')
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
