@@ -195,6 +195,8 @@ class ClimateDataset(Dataset):
         self.dataset_cond = self.dataset_cond.map(normalize)
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
+        print(f"[DIAG] target range: [{self.tensor_data.min():.3f}, {self.tensor_data.max():.3f}]")
+        print(f"[DIAG] cond   range: [{self.tensor_data_cond.min():.3f}, {self.tensor_data_cond.max():.3f}]")
         #print(self.tensor_data_cond.shape,'cond shape')
         #print(self.tensor_data.shape,'target_shape')
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
