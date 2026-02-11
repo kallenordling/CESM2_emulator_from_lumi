@@ -315,7 +315,7 @@ class UNetTrainer:
             cond_loss = ((clean_mean - pred_mean) ** 2).mean()
 
             # Calculate the loss
-            loss = mse_loss + cond_loss * self.cond_loss_scaling
+            loss = mse_loss #+ cond_loss * self.cond_loss_scaling
 
             # Scale the loss by cosine-weighted latitude
             self.accelerator.backward(loss)
