@@ -90,14 +90,14 @@ def _get_emissions_minmax():
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
-    print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
-          f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
+    #print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
+    #      f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
 
     if ds.name in ["CO2", "SO2"]:
         # Log-scale normalization to [-1, 1] for emissions
         result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
-        print(f"[NORM DEBUG] {ds.name} after norm: "
-              f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
+        #print(f"[NORM DEBUG] {ds.name} after norm: "
+        #      f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
         return result
 
     # Other variables use predefined normalization functions
