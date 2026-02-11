@@ -92,7 +92,8 @@ def _get_emissions_minmax():
 
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
-
+    print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
+          f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
     # Erikoiskäsittely päästömuuttujille:
     # min/max otetaan AINA emissions.nc-tiedoston koko kentästä
     minmax = _get_emissions_minmax()
