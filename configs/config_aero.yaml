@@ -45,8 +45,8 @@ scheduler:
     prediction_type: v_prediction
     clip_sample: false
     clip_range:
-      - 0
-      - null
+      - 4.5
+      - 3.5
 
 
 # (Optional) Define optimizer here if you want to pass a prebuilt optimizer to the trainer.
