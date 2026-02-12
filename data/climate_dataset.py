@@ -171,6 +171,9 @@ class ClimateDataset(Dataset):
         #print(self.dataset_cond)
         self.dataset_cond = self.dataset_cond.map(normalize)
 
+        print(f"target stats: mean={clean_samples.mean():.4f}, std={clean_samples.std():.4f}")
+        print(f"cond stats: mean={cond_map.mean():.4f}, std={cond_map.std():.4f}")
+
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
         #print(self.tensor_data_cond.shape,'cond shape')
         #print(self.tensor_data.shape,'target_shape')
