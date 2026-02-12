@@ -9,7 +9,7 @@ scheduler:
       
 data_dir: /scratch/project_462001112/emulator_data/ 
 save_dir: ./
-guidance_scale: 1.0
+guidance_scale: 2.0
 
 # Seed for random number generators
 seed: 42
