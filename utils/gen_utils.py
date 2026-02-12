@@ -5,13 +5,6 @@ from diffusers import DDPMScheduler
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
 from einops import reduce
 
-from captum.attr import IntegratedGradients
-
-def model_forward(cond):
-    input_tensor = torch.cat([gen_sample, cond], dim=1)
-    return model.ema_model(input_tensor, t).pow(2).mean()
-
-
 
 def generate_samples2(
     clean_samples: Tensor,
@@ -19,13 +12,19 @@ def generate_samples2(
     scheduler: DDPMScheduler,
     sample_steps: int,
     model: torch.nn.Module,
-    disable=False,explain=True
+    disable=False,
+    explain=True,
+    guidance_scale=1.0,
 ):
-    """Generate samples from a trained model (optimized)."""
+    """Generate samples from a trained model with optional classifier-free guidance.
+
+    Args:
+        guidance_scale: CFG scale. 1.0 = no guidance (normal sampling).
+                        >1.0 amplifies conditioning effect (try 1.5-3.0).
+    """
     # ===== EMA SAMPLING ASSERT =====
     assert hasattr(model, "parameters"), "model is not a torch module?"
 
-    # Hard safety check: this MUST be ema_model
     if hasattr(model, "ema_model"):
         raise RuntimeError(
             "X You passed EMA wrapper instead of ema_model. "
@@ -36,53 +35,61 @@ def generate_samples2(
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
 
-    # Use only the first channel but avoid unnecessary copies
     # clean_samples: (B, C, T, H, W) -> (B, 1, T, H, W)
-    clean_samples = clean_samples[:, 0:1, ...]  # slice keeps view if possible
+    clean_samples = clean_samples[:, 0:1, ...]
 
     # Cond map to device once
     cond_map = cond_map.to(device=device, dtype=dtype, non_blocking=True)
 
-
     # Start from pure noise
     gen_sample = torch.randn_like(clean_samples, device=device, dtype=dtype)
 
-    # IMPORTANT: timesteps are assumed to be set OUTSIDE this function
+    # Timesteps assumed to be set OUTSIDE this function
     timesteps = scheduler.timesteps.to(device)
 
-    # Precompute continuous timesteps ONLY ONCE if needed
+    # Precompute continuous timesteps if needed
     if isinstance(scheduler, ContinuousDDPM):
-        # steps has length sample_steps + 1, but we only index by timesteps
         steps = torch.linspace(1.0, 0.0, sample_steps + 1, device=device)
-        # log_snr for all timesteps in one go
-        t_all = scheduler.log_snr(steps[timesteps])  # shape: (n_steps,)
+        t_all = scheduler.log_snr(steps[timesteps])
 
     batch_size = clean_samples.shape[0]
+    use_cfg = guidance_scale != 1.0
+
+    # Prepare null conditioning for classifier-free guidance
+    if use_cfg:
+        cond_null = torch.zeros_like(cond_map)
+        print(f"[GEN_UTILS] Using classifier-free guidance with scale={guidance_scale}")
+
+    # --- Saliency maps (optional) ---
     sal_co2 = None
     sal_sul = None
     if explain:
-        cond_map = cond_map.detach().clone().requires_grad_(True)
+        cond_map_grad = cond_map.detach().clone().requires_grad_(True)
         gen_sample_fixed = gen_sample.detach().clone()
-        t_fixed = scheduler.timesteps[0]  # or a representative timestep
+        t_fixed = scheduler.timesteps[0]
 
-        # One forward pass with gradients
+        if isinstance(scheduler, ContinuousDDPM):
+            steps_temp = torch.linspace(1.0, 0.0, sample_steps + 1, device=device)
+            t_explain = scheduler.log_snr(steps_temp[t_fixed]).expand(batch_size)
+        else:
+            t_explain = t_fixed
+
+        # Forward pass with gradients through the conditioning encoder
         output = model(
             gen_sample_fixed,
-            t_fixed,
-            cond_map=cond_map
+            t_explain,
+            cond_map=cond_map_grad,
         )
 
-        output_scalar = output.pow(2).mean()  # or .sum()
+        output_scalar = output.pow(2).mean()
         output_scalar.backward()
-    
-        saliency = cond_map.grad.detach()  # shape: [B, 2, T, H, W]
 
-        # Optional: average over time
+        saliency = cond_map_grad.grad.detach()  # [B, 2, T, H, W]
         sal_co2 = saliency[0, 0].abs().mean(dim=0).cpu().numpy()  # [H, W]
         sal_sul = saliency[0, 1].abs().mean(dim=0).cpu().numpy()
 
+    # --- Sampling loop ---
     with torch.inference_mode():
-
         for step_idx, t_idx in tqdm(
             enumerate(timesteps),
             total=len(timesteps),
@@ -90,26 +97,36 @@ def generate_samples2(
             disable=disable,
         ):
             if isinstance(scheduler, ContinuousDDPM):
-                # Repeat scalar for batch
                 t = t_all[step_idx].expand(batch_size)
             else:
                 t = t_idx
 
-            # Model forward
-            output = model(
+            # Conditioned prediction
+            output_cond = model(
                 gen_sample,
                 t,
                 cond_map=cond_map,
             )
 
+            # Classifier-free guidance
+            if use_cfg:
+                output_uncond = model(
+                    gen_sample,
+                    t,
+                    cond_map=cond_null,
+                )
+                output = output_uncond + guidance_scale * (output_cond - output_uncond)
+            else:
+                output = output_cond
+
             # One reverse diffusion step
             gen_sample = scheduler.step(
                 output,
                 timestep=t_idx,
-                sample=gen_sample
+                sample=gen_sample,
             ).prev_sample
 
-    return gen_sample,sal_co2,sal_sul
+    return gen_sample, sal_co2, sal_sul
 
 
 @torch.inference_mode()
@@ -120,47 +137,50 @@ def generate_samples(
     sample_steps: int,
     model: torch.nn.Module,
     disable=False,
+    guidance_scale=1.0,
 ):
-    """Generate samples from a trained model"""
+    """Generate samples from a trained model with optional classifier-free guidance."""
     device = next(model.parameters()).device
-    dtype  = next(model.parameters()).dtype
+    dtype = next(model.parameters()).dtype
 
-
-    # Average across the time dimension, and then repeat along the time dimension
-    # To get our average monthly conditioning map
-    #cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
-    #    1, 1, clean_samples.shape[-3], 1, 1
-    #)
-
-    # Sample noise that we'll add to the clean images
-    print(cond_map.shape,"cond map shape")
-    clean_samples= clean_samples[:,0,:,:,:].unsqueeze(1)
+    print(cond_map.shape, "cond map shape")
+    clean_samples = clean_samples[:, 0, :, :, :].unsqueeze(1)
     gen_sample = torch.randn_like(clean_samples)
-    gen_samples = gen_sample.to(device=device, dtype=dtype)
-    cond_map      = cond_map.to(device=device, dtype=dtype)
-    #print(gen_sample.shape)
-    #print(cond_map.shape)
-    # set step values
+    gen_sample = gen_sample.to(device=device, dtype=dtype)
+    cond_map = cond_map.to(device=device, dtype=dtype)
+
+    use_cfg = guidance_scale != 1.0
+    if use_cfg:
+        cond_null = torch.zeros_like(cond_map)
+
     scheduler.set_timesteps(sample_steps)
 
-    # Run the diffusion process in reverse
     for i in tqdm(
         scheduler.timesteps,
         "Sampling",
         disable=disable,
     ):
-        # If we are using a continuous scheduler, convert the timestep to a log_snr
         if isinstance(scheduler, ContinuousDDPM):
             steps = torch.linspace(1.0, 0.0, sample_steps + 1, device=gen_sample.device)
             t = scheduler.log_snr(steps[i]).repeat(clean_samples.shape[0])
         else:
             t = i
-        #print(i)
-        output = model(
+
+        output_cond = model(
             gen_sample,
             t,
             cond_map=cond_map,
         )
+
+        if use_cfg:
+            output_uncond = model(
+                gen_sample,
+                t,
+                cond_map=cond_null,
+            )
+            output = output_uncond + guidance_scale * (output_cond - output_uncond)
+        else:
+            output = output_cond
 
         gen_sample = scheduler.step(output, timestep=i, sample=gen_sample).prev_sample
 

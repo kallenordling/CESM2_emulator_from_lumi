@@ -9,11 +9,11 @@ scheduler:
       
 data_dir: /scratch/project_462001112/emulator_data/ 
 save_dir: ./
-
+guidance_scale: 1.0
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
-load_path: /projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero3_97.pt
+load_path: /projappl/project_462001112/CESM_emulatorV2/runs/best_epoch_20.pt
 gen_mode: gen  # Either gen/val/test
 batch_size: 8
 sample_steps: 1000
