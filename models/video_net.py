@@ -845,15 +845,22 @@ class UNetModel3D(nn.Module):
         # (stored temporarily; will be applied to t after time_mlp)
         cond_emb_scale = None
         cond_emb_shift = None
-        if exists(cond_map) and self.cond_encoder is not None:
-            # Classifier-free guidance: randomly drop conditioning during training
-            if self.training and self.cond_drop_prob > 0:
-                # Per-sample dropout mask
-                keep_mask = torch.rand(cond_map.shape[0], device=cond_map.device) >= self.cond_drop_prob
-                keep_mask = keep_mask.view(-1, 1, 1, 1, 1)
-                cond_map_input = cond_map * keep_mask
+        if self.cond_encoder is not None:
+            if exists(cond_map):
+                # Classifier-free guidance: randomly drop conditioning during training
+                if self.training and self.cond_drop_prob > 0:
+                    keep_mask = torch.rand(cond_map.shape[0], device=cond_map.device) >= self.cond_drop_prob
+                    keep_mask = keep_mask.view(-1, 1, 1, 1, 1)
+                    cond_map_input = cond_map * keep_mask
+                else:
+                    cond_map_input = cond_map
             else:
-                cond_map_input = cond_map
+                # No conditioning provided — use zeros (same as CFG null case)
+                # We still run through encoder so scale/shift are applied consistently
+                cond_map_input = torch.zeros(
+                    x.shape[0], self.cond_channels, x.shape[2], x.shape[3], x.shape[4],
+                    device=x.device, dtype=x.dtype
+                )
             cond_feat = self.cond_encoder(cond_map_input)  # [B, model_dim, 1, 1, 1]
             cond_feat = cond_feat.view(cond_feat.shape[0], -1)  # [B, model_dim]
             cond_emb_scale = self.cond_scale(cond_feat)  # [B, time_dim]
