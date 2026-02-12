@@ -670,14 +670,28 @@ class UNetModel3D(nn.Module):
                 nn.SiLU(),
                 nn.AdaptiveAvgPool3d((1, 1, 1)),  # global spatial+temporal pool
             )
-            self.cond_proj = nn.Sequential(
+            # Project to SCALE and SHIFT (multiplicative conditioning, not just additive)
+            # scale is initialized near 1, shift near 0 so it starts as identity
+            self.cond_scale = nn.Sequential(
                 nn.Linear(model_dim, time_dim),
                 nn.SiLU(),
                 nn.Linear(time_dim, time_dim),
             )
+            self.cond_shift = nn.Sequential(
+                nn.Linear(model_dim, time_dim),
+                nn.SiLU(),
+                nn.Linear(time_dim, time_dim),
+            )
+            # Initialize scale output near 1 (bias=0 means scale=1 after sigmoid-like)
+            # and shift output near 0
+            nn.init.zeros_(self.cond_scale[-1].weight)
+            nn.init.ones_(self.cond_scale[-1].bias)
+            nn.init.zeros_(self.cond_shift[-1].weight)
+            nn.init.zeros_(self.cond_shift[-1].bias)
         else:
             self.cond_encoder = None
-            self.cond_proj = None
+            self.cond_scale = None
+            self.cond_shift = None
 
         # Create embeddings for day and year if applicable
         if day_cond:
@@ -828,8 +842,9 @@ class UNetModel3D(nn.Module):
             focus_present_mask = None
 
         # If a conditioning map is passed in, encode it for injection into time embedding
-        # (stored temporarily; will be added to t after time_mlp)
-        cond_emb = None
+        # (stored temporarily; will be applied to t after time_mlp)
+        cond_emb_scale = None
+        cond_emb_shift = None
         if exists(cond_map) and self.cond_encoder is not None:
             # Classifier-free guidance: randomly drop conditioning during training
             if self.training and self.cond_drop_prob > 0:
@@ -841,7 +856,8 @@ class UNetModel3D(nn.Module):
                 cond_map_input = cond_map
             cond_feat = self.cond_encoder(cond_map_input)  # [B, model_dim, 1, 1, 1]
             cond_feat = cond_feat.view(cond_feat.shape[0], -1)  # [B, model_dim]
-            cond_emb = self.cond_proj(cond_feat)  # [B, time_dim]
+            cond_emb_scale = self.cond_scale(cond_feat)  # [B, time_dim]
+            cond_emb_shift = self.cond_shift(cond_feat)  # [B, time_dim]
 
         if exists(lowres_cond):
             x = torch.cat([x, lowres_cond], dim=1)
@@ -856,9 +872,10 @@ class UNetModel3D(nn.Module):
         # Get timestep embeddings
         t = self.time_mlp(timesteps)
 
-        # Inject conditioning into time embedding (affects every ResBlock via FiLM)
-        if cond_emb is not None:
-            t = t + cond_emb
+        # Inject conditioning via scale-shift (multiplicative, cannot be ignored)
+        # t = scale * t + shift
+        if cond_emb_scale is not None:
+            t = cond_emb_scale * t + cond_emb_shift
 
         # Get day and year embeddings if they are provided
         if self.day_cond:

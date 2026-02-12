@@ -106,7 +106,7 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 0.5  # for shuffled-conditioning contrastive loss
+        self.cond_loss_scaling = 1.0
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -283,7 +283,6 @@ class UNetTrainer:
             ).long()
 
         # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
         with self.accelerator.accumulate(self.model):
@@ -305,42 +304,44 @@ class UNetTrainer:
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
 
             # ================================================================
-            # Conditioning loss: shuffled-conditioning contrastive loss
+            # Conditioning loss: NULL vs CORRECT conditioning
             #
-            # Idea: run a second forward pass with shuffled conditioning
-            # (permute cond_map within the batch). If the model actually uses
-            # the conditioning, the output with WRONG conditioning should be
-            # further from the target than the output with CORRECT conditioning.
+            # Unlike shuffling (where adjacent years have similar CO2/SO2),
+            # comparing against ZERO conditioning is always a big difference.
+            # This directly penalizes the model for ignoring the conditioning.
             #
-            # loss = max(0, margin + mse_correct - mse_wrong)
-            #
-            # This directly measures conditioning sensitivity — not x0 quality.
+            # We use a soft version: the output with correct conditioning
+            # should be closer to the target than output with null conditioning.
             # ================================================================
-            if self.cond_loss_scaling > 0 and clean_samples.shape[0] > 1:
-                # Shuffle conditioning across batch
-                perm = torch.randperm(cond_map.shape[0], device=cond_map.device)
-                # Make sure at least one sample is actually shuffled
-                # (avoid identity permutation)
-                if (perm == torch.arange(cond_map.shape[0], device=cond_map.device)).all():
-                    perm = torch.roll(perm, 1)
-                cond_map_shuffled = cond_map[perm]
+            if self.cond_loss_scaling > 0:
+                # Null conditioning = zeros (matches CFG training dropout)
+                cond_null = torch.zeros_like(cond_map)
 
-                # Forward pass with wrong conditioning (no extra gradient on model weights
-                # for the "wrong" branch — we only want to push "correct" closer)
                 with torch.no_grad():
-                    model_output_wrong = self.model(
+                    model_output_null = self.model(
                         noisy_samples,
                         timesteps,
-                        cond_map=cond_map_shuffled,
+                        cond_map=cond_null,
                     )
 
-                # Per-sample MSE with correct vs wrong conditioning
-                mse_correct = ((model_output - target) ** 2).mean(dim=tuple(range(1, model_output.ndim)))
-                mse_wrong = ((model_output_wrong - target) ** 2).mean(dim=tuple(range(1, model_output.ndim)))
+                # Per-sample MSE for correct vs null conditioning
+                reduce_dims = tuple(range(1, model_output.ndim))
+                mse_correct = ((model_output - target) ** 2).mean(dim=reduce_dims)
+                mse_null = ((model_output_null - target) ** 2).mean(dim=reduce_dims)
 
-                # Hinge loss: penalize when correct conditioning isn't better by a margin
-                margin = 0.1
-                cond_loss = torch.relu(margin + mse_correct - mse_wrong).mean()
+                # We want mse_correct < mse_null (correct conditioning should help)
+                # Hinge: penalize if correct isn't better than null by margin
+                margin = 0.01
+                cond_loss = torch.relu(margin + mse_correct - mse_null).mean()
+
+                # Diagnostic: log how much the conditioning actually changes the output
+                if self.global_step % 200 == 0:
+                    output_diff = (model_output - model_output_null).abs().mean().item()
+                    print(f"[COND DIAG] step={self.global_step} "
+                          f"output_diff={output_diff:.6f} "
+                          f"mse_correct={mse_correct.mean().item():.6f} "
+                          f"mse_null={mse_null.mean().item():.6f} "
+                          f"cond_loss={cond_loss.item():.6f}")
             else:
                 cond_loss = torch.zeros(1, device=self.device)
 
