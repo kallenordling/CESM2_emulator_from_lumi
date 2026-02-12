@@ -121,9 +121,29 @@ class UNetTrainer:
         self.device = self.accelerator.device
         self.weight_dtype = torch.float32
 
-        self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr
-        )
+        # Separate parameter groups: 50x higher LR for conditioning encoder
+        # so it can't be ignored by the optimizer
+        cond_params = []
+        other_params = []
+        for name, param in self.model.named_parameters():
+            if 'cond_encoder' in name or 'cond_scale' in name or 'cond_shift' in name:
+                cond_params.append(param)
+            else:
+                other_params.append(param)
+
+        if cond_params:
+            print(f"[OPTIM] Conditioning params: {len(cond_params)} tensors, "
+                  f"LR={self.lr * 50:.6f}")
+            print(f"[OPTIM] Other params: {len(other_params)} tensors, "
+                  f"LR={self.lr:.6f}")
+            self.optimizer = optimizer([
+                {'params': other_params, 'lr': self.lr},
+                {'params': cond_params, 'lr': self.lr * 50},
+            ], lr=self.lr)
+        else:
+            self.optimizer = optimizer(
+                self.model.parameters(), lr=self.lr
+            )
 
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
