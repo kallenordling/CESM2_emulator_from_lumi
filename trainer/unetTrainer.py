@@ -269,7 +269,7 @@ class UNetTrainer:
         # cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
         #    1, 1, clean_samples.shape[-3], 1, 1
         # )
-
+        '''
         if self.global_step % 100 == 0:
             print(f"target stats: mean={clean_samples.mean():.4f}, std={clean_samples.std():.4f}, "
                   f"min={clean_samples.min():.4f}, max={clean_samples.max():.4f}")
@@ -280,7 +280,7 @@ class UNetTrainer:
                 c = cond_map[:, ch]
                 print(f"  cond ch{ch}: mean={c.mean():.4f}, std={c.std():.4f}, "
                       f"min={c.min():.4f}, max={c.max():.4f}")
-
+        '''
         # Sample noise that we'll add to the clean images
         noise = torch.randn_like(clean_samples)
 
