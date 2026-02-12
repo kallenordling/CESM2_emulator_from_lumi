@@ -106,7 +106,7 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 1
+        self.cond_loss_scaling = 0.5  # for shuffled-conditioning contrastive loss
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -266,21 +266,7 @@ class UNetTrainer:
 
     def get_loss(self, batch, cond_map):
         clean_samples = batch.to(self.weight_dtype)
-        # cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
-        #    1, 1, clean_samples.shape[-3], 1, 1
-        # )
-        '''
-        if self.global_step % 100 == 0:
-            print(f"target stats: mean={clean_samples.mean():.4f}, std={clean_samples.std():.4f}, "
-                  f"min={clean_samples.min():.4f}, max={clean_samples.max():.4f}")
-            print(f"cond stats:   mean={cond_map.mean():.4f}, std={cond_map.std():.4f}, "
-                  f"min={cond_map.min():.4f}, max={cond_map.max():.4f}")
-            # Per-channel breakdown (CO2 vs SO2)
-            for ch in range(cond_map.shape[1]):
-                c = cond_map[:, ch]
-                print(f"  cond ch{ch}: mean={c.mean():.4f}, std={c.std():.4f}, "
-                      f"min={c.min():.4f}, max={c.max():.4f}")
-        '''
+
         # Sample noise that we'll add to the clean images
         noise = torch.randn_like(clean_samples)
 
@@ -315,26 +301,50 @@ class UNetTrainer:
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
-            # Calculate loss and update gradients
+            # Primary loss: latitude-weighted MSE in v-space
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
-            # Calculate the avg conditional loss
-            if hasattr(self.scheduler, "alphas_cumprod"):
-                pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
-            elif self.scheduler.config.prediction_type == "v_prediction":
-                pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
-            else:
-                pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps, model_output)
 
-            # Get the mean of both the clean and the predicted original sample
-            clean_mean = clean_samples.mean(dim=-3)
-            pred_mean = pred_original_sample.mean(dim=-3)
-            # In get_loss(), after computing cond_loss:
-            log_snr = timesteps  # already log_snr since you pass scheduler.log_snr(t)
-            snr = torch.exp(log_snr)
-            # Weight: ~1 at low noise, ~0 at high noise
-            snr_weight = (snr / (1 + snr)).mean()  # sigmoid of log_snr, averaged over batch
-            cond_loss = ((clean_mean - pred_mean) ** 2).mean() * snr_weight
-            # Calculate the loss
+            # ================================================================
+            # Conditioning loss: shuffled-conditioning contrastive loss
+            #
+            # Idea: run a second forward pass with shuffled conditioning
+            # (permute cond_map within the batch). If the model actually uses
+            # the conditioning, the output with WRONG conditioning should be
+            # further from the target than the output with CORRECT conditioning.
+            #
+            # loss = max(0, margin + mse_correct - mse_wrong)
+            #
+            # This directly measures conditioning sensitivity — not x0 quality.
+            # ================================================================
+            if self.cond_loss_scaling > 0 and clean_samples.shape[0] > 1:
+                # Shuffle conditioning across batch
+                perm = torch.randperm(cond_map.shape[0], device=cond_map.device)
+                # Make sure at least one sample is actually shuffled
+                # (avoid identity permutation)
+                if (perm == torch.arange(cond_map.shape[0], device=cond_map.device)).all():
+                    perm = torch.roll(perm, 1)
+                cond_map_shuffled = cond_map[perm]
+
+                # Forward pass with wrong conditioning (no extra gradient on model weights
+                # for the "wrong" branch — we only want to push "correct" closer)
+                with torch.no_grad():
+                    model_output_wrong = self.model(
+                        noisy_samples,
+                        timesteps,
+                        cond_map=cond_map_shuffled,
+                    )
+
+                # Per-sample MSE with correct vs wrong conditioning
+                mse_correct = ((model_output - target) ** 2).mean(dim=tuple(range(1, model_output.ndim)))
+                mse_wrong = ((model_output_wrong - target) ** 2).mean(dim=tuple(range(1, model_output.ndim)))
+
+                # Hinge loss: penalize when correct conditioning isn't better by a margin
+                margin = 0.01
+                cond_loss = torch.relu(margin + mse_correct - mse_wrong).mean()
+            else:
+                cond_loss = torch.zeros(1, device=self.device)
+
+            # Total loss
             loss = mse_loss + cond_loss * self.cond_loss_scaling
 
             # Scale the loss by cosine-weighted latitude
