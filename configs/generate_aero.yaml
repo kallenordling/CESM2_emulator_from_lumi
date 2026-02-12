@@ -19,9 +19,9 @@ batch_size: 8
 sample_steps: 1000
 start_year: 1850
 end_year: 2100
-save_name: ssp126_aero_v3 # Only set a save name if you want something special added to your save path
+save_name: ssp370_aero # Only set a save name if you want something special added to your save path
 samples_per: 10
-cond_file: emissions_ssp126_v2.nc #emissions.nc
+cond_file: emissions_new.nc #emissions.nc
 sul_mul: 0
 co2_mul: 1
 dataset:
