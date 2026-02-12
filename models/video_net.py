@@ -682,10 +682,10 @@ class UNetModel3D(nn.Module):
                 nn.SiLU(),
                 nn.Linear(time_dim, time_dim),
             )
-            # Initialize scale output near 1 (bias=0 means scale=1 after sigmoid-like)
-            # and shift output near 0
+            # Initialize scale output at 0.5 (not 1.0) — forces the model to
+            # actively learn to use conditioning to compensate for the halved time embedding
             nn.init.zeros_(self.cond_scale[-1].weight)
-            nn.init.ones_(self.cond_scale[-1].bias)
+            nn.init.constant_(self.cond_scale[-1].bias, 0.5)
             nn.init.zeros_(self.cond_shift[-1].weight)
             nn.init.zeros_(self.cond_shift[-1].bias)
         else:
