@@ -13,7 +13,7 @@ guidance_scale: 1.0
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
-load_path: /projappl/project_462001112/CESM2_emulator_from_lumi>/runs/best_epoch_48.pt
+load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/best_epoch_48.pt
 gen_mode: gen  # Either gen/val/test
 batch_size: 8
 sample_steps: 1000
