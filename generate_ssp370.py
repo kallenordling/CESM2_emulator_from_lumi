@@ -45,30 +45,13 @@ def create_batches(
         xr_ds: xr.Dataset,
         dataset: ClimateDataset,
 ) -> list[xr.Dataset]:
-    """Splits the dataset up into batches of size batch_size. This is helpful
-    for when we perform multiprocessing, so we can distribute the batches to different
-    processes.
-
-    Args:
-        xr_ds (xr.Dataset): The xarray dataset that we want to split
-        batch_size (int): The size of each batch
-        gpu_ids (list[int]): A list of the GPUs we will be utilizing
-
-    Returns:
-        list[list[xr.Dataset]]: A list of all the batches, where each batch is a list of xarray datasets
-    """
+    """Splits the dataset up into batches of size batch_size."""
     seq_len = dataset.seq_len
 
-    # Store a list of all batches, and a single batch
     data = []
-
-    # Iterate through every 28 days in the xr dataset
     for i in range(0, len(xr_ds.year), seq_len):
-        # Grab a single batch and convert it to tensor
         batch = xr_ds.isel(year=slice(i, i + seq_len))
         tensor_data = dataset.convert_xarray_to_tensor(batch)
-
-        # Append the batch to the list of batches
         data.append((tensor_data, dict(batch.coords)))
 
     return data
@@ -77,16 +60,7 @@ def create_batches(
 def custom_collate_fn(
         batches: list[tuple[Tensor, xr.DataArray]],
 ) -> tuple[Tensor, list[xr.DataArray]]:
-    """Collate function for the dataloader. This is necessary because we want to keep track of the time coordinates
-    for each batch, so we can convert the generated tensors back into xarray datasets
-
-    Args:
-        batches (list[tuple[Tensor, xr.DataArray]]): A list of tuples, where each tuple contains a batch of tensors
-        and the corresponding time coordinates
-
-    Returns:
-        tuple[Tensor, list[xr.DataArray]]: A tuple containing the stacked tensor batch and a list of coordinates
-    """
+    """Collate function for the dataloader."""
     tensor_batch = []
     coords = []
     for batch in batches:
@@ -102,16 +76,18 @@ def main(config: DictConfig) -> None:
     assert os.path.isdir(config.save_dir), "Save directory does not exist"
     assert config.gen_mode in ["gen", "val", "test"], "Invalid gen mode"
 
-    # If we're generating, make sure we have a load path
     if config.gen_mode == "gen":
         assert config.load_path, "Must specify a load path"
         print(config.load_path)
         assert os.path.isfile(config.load_path), "Invalid load path"
 
-    # Make sure num samples is 1 if gen mode is not gen
     assert (
             config.samples_per == 1 or config.gen_mode == "gen"
     ), "Number of samples must be 1 for val and test"
+
+    # Read guidance_scale from config, default to 1.0 (no guidance)
+    guidance_scale = getattr(config, "guidance_scale", 1.0)
+    print(f"[GENERATE] guidance_scale = {guidance_scale}")
 
     # Initialize all necessary objects
     accelerator = Accelerator(**config.accelerator)
@@ -121,7 +97,6 @@ def main(config: DictConfig) -> None:
         data_dir=config.data_dir,
         realizations=[realization_dict[config.gen_mode]],
         target_vars=config.variables, cond_vars=["CO2", 'SO2'], cond_file=config.cond_file
-
     )
     scheduler: ContinuousDDPM = instantiate(config.scheduler)
     scheduler.set_timesteps(config.sample_steps)
@@ -133,12 +108,12 @@ def main(config: DictConfig) -> None:
         # Load the model from the checkpoint
         chkpt: Checkpoint = torch.load(config.load_path, map_location="cpu", weights_only=False)
 
-        ema_model_sd = chkpt["EMA"]  # full EMA state dict (online_model + ema_model)
+        ema_model_sd = chkpt["EMA"]
 
         model = EMA(
             model_conf,
-            beta=0.9999,  # exponential moving average factor
-            update_after_step=100,  # only after this number of .update() calls will it start updating
+            beta=0.9999,
+            update_after_step=100,
             update_every=10,
         ).to(accelerator.device)
         model.ema_model.load_state_dict(ema_model_sd)
@@ -150,8 +125,6 @@ def main(config: DictConfig) -> None:
     # Grab the Xarray dataset from the dataset object
     xr_ds = dataset.dataset_cond.load()
     print(xr_ds)
-    # Restrict days to the first 28 days of each month and select years
-    # xr_ds = xr_ds.sel(time=xr_ds.time.dt.day.isin(range(1, 29)))
     xr_ds = xr_ds.sel(year=slice(str(config.start_year), str(config.end_year)))
 
     batches = create_batches(xr_ds, dataset)
@@ -160,7 +133,6 @@ def main(config: DictConfig) -> None:
         batches, batch_size=config.batch_size, collate_fn=custom_collate_fn
     )
 
-    # Prepare the model and dataloader for distributed training
     model, dataloader = accelerator.prepare(model, dataloader)
 
     for i in tqdm(range(config.samples_per)):
@@ -172,64 +144,37 @@ def main(config: DictConfig) -> None:
             tensor_batch = tensor_batch.to(accelerator.device)
 
             if model is not None:
-                # FIX: generate_samples2 returns (gen_sample, sal_co2, sal_sul)
-                # We only need the first return value
                 gen_months, sal_co2, sal_sul = generate_samples2(
                     tensor_batch, tensor_batch,
                     scheduler=scheduler,
                     sample_steps=config.sample_steps,
                     model=model,
                     disable=True,
+                    guidance_scale=guidance_scale,
                 )
-
-                # Optional: save saliency maps if you want them
-                # if accelerator.is_main_process and sal_co2 is not None:
-                #     # Save sal_co2 and sal_sul somewhere
-                #     pass
             else:
                 gen_months = tensor_batch
 
-            # FIX: gen_months has shape (B, 1, T, H, W) from generate_samples2
-            # We need to convert it to (B, C, T, H, W) where C matches the number of variables
-            # The issue is that generate_samples2 only generates 1 channel (TREFHT)
-            # but convert_tensor_to_xarray expects all variables
-
             for i in range(len(gen_months)):
-                # gen_months[i] has shape (1, T, H, W)
-                # but convert_tensor_to_xarray expects (num_vars, T, H, W)
-                # where num_vars = len(dataset.vars)
-
-                # CRITICAL FIX: The sample needs to match the number of variables
-                # If you're only generating temperature (1 channel), you need to handle this
                 sample = gen_months[i]  # shape: (1, T, H, W)
 
-                # Debug print to see actual shape
                 print(f"Sample shape before conversion: {sample.shape}")
                 print(f"Expected variables: {dataset.vars}")
                 print(f"Number of variables: {len(dataset.vars)}")
 
-                # If the model only outputs 1 variable but dataset expects more,
-                # we need to either:
-                # 1. Only convert the variables that were generated, OR
-                # 2. Generate all variables
-
-                # Solution: Temporarily modify dataset to match what was generated
                 original_vars = dataset.vars
-                dataset.vars = dataset.vars[:sample.shape[0]]  # Only keep as many vars as channels
+                dataset.vars = dataset.vars[:sample.shape[0]]
 
                 gen_samples.append(
                     dataset.convert_tensor_to_xarray(sample, coords=coords[i])
                 )
 
-                # Restore original vars
                 dataset.vars = original_vars
 
         gen_samples = accelerator.gather_for_metrics(gen_samples)
         gen_samples = xr.concat(gen_samples, "year").sortby("year")
 
         if accelerator.is_main_process:
-
-            # If we are generating multiple samples, create a directory for them
             save_name = f"{config.gen_mode}_{config.save_name + '_' if config.save_name is not None else ''}{'_'.join(config.variables)}_{config.start_year}-{config.end_year}.nc"
             save_path = os.path.join(
                 config.data_dir, save_name
@@ -243,14 +188,11 @@ def main(config: DictConfig) -> None:
                 save_path = os.path.join(save_dir, f"member_{mem_index}.nc")
 
             else:
-                # Delete the file if it already exists (avoids permission denied errors)
                 if os.path.isfile(save_path):
                     os.remove(save_path)
 
-            # Save the generated samples
             print('save file', save_path)
             gen_samples.to_netcdf(save_path)
-
             os.chmod(save_path, 0o770)
 
 
