@@ -6,7 +6,7 @@ seed: 1337
 accelerator:
   mixed_precision: bf16
   split_batches: False
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
   log_with: Null
 
 # Datasets
@@ -68,7 +68,7 @@ trainer:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
-    batch_size: 16
+    batch_size: 8
     save_dir: runs/
     save_name: run_test_aero_condenc.pt
     load_path: 0 # RESET - architecture changed, old checkpoints incompatible
@@ -92,7 +92,7 @@ trainer:
   accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 8
     device_placement: True
     sync_batchnorm: True
     #dynamo_backend: none
