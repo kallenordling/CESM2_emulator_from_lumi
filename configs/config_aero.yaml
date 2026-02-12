@@ -68,7 +68,7 @@ trainer:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
-    batch_size: 32
+    batch_size: 16
     save_dir: runs/
     save_name: run_test_aero_condenc.pt
     load_path: 0 # RESET - architecture changed, old checkpoints incompatible
