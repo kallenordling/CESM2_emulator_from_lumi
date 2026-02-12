@@ -279,7 +279,7 @@ class UNetTrainer:
             for ch in range(cond_map.shape[1]):
                 c = cond_map[:, ch]
                 print(f"  cond ch{ch}: mean={c.mean():.4f}, std={c.std():.4f}, "
-                      f"min={c.min():.4f}, max={c.max():.4
+                      f"min={c.min():.4f}, max={c.max():.4f}")
 
         # Sample noise that we'll add to the clean images
         noise = torch.randn_like(clean_samples)
