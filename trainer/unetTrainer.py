@@ -106,7 +106,7 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 0.8
+        self.cond_loss_scaling = 1
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
