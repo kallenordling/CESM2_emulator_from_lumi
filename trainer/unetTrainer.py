@@ -339,7 +339,7 @@ class UNetTrainer:
                 mse_wrong = ((model_output_wrong - target) ** 2).mean(dim=tuple(range(1, model_output.ndim)))
 
                 # Hinge loss: penalize when correct conditioning isn't better by a margin
-                margin = 0.01
+                margin = 0.1
                 cond_loss = torch.relu(margin + mse_correct - mse_wrong).mean()
             else:
                 cond_loss = torch.zeros(1, device=self.device)
