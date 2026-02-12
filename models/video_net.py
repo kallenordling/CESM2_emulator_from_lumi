@@ -6,10 +6,9 @@ import torch.nn as nn
 from einops_exts import rearrange_many
 from einops import rearrange
 
-
 from torch.utils import checkpoint as torch_checkpoint
 
-from  models.rotary_embedding import RotaryEmbedding
+from models.rotary_embedding import RotaryEmbedding
 
 
 def checkpoint(fn, *args, enabled=False):
@@ -115,7 +114,7 @@ class SinusoidalPosEmb(nn.Module):
 
 class Pseudo3DConv(nn.Module):
     def __init__(
-        self, dim, *, kernel_size, dim_out=None, temporal_kernel_size=None, **kwargs
+            self, dim, *, kernel_size, dim_out=None, temporal_kernel_size=None, **kwargs
     ):
         super().__init__()
         dim_out = default(dim_out, dim)
@@ -229,7 +228,7 @@ class Block(nn.Module):
 
 class ResnetBlock(nn.Module):
     def __init__(
-        self, dim, dim_out, *, time_emb_dim=None, groups=8, use_checkpoint=False
+            self, dim, dim_out, *, time_emb_dim=None, groups=8, use_checkpoint=False
     ):
         super().__init__()
 
@@ -285,12 +284,12 @@ class RelativePositionBias(nn.Module):
         is_small = n < max_exact
 
         val_if_large = (
-            max_exact
-            + (
-                torch.log(n.float() / max_exact)
-                / math.log(max_distance / max_exact)
-                * (num_buckets - max_exact)
-            ).long()
+                max_exact
+                + (
+                        torch.log(n.float() / max_exact)
+                        / math.log(max_distance / max_exact)
+                        * (num_buckets - max_exact)
+                ).long()
         )
         val_if_large = torch.min(
             val_if_large, torch.full_like(val_if_large, num_buckets - 1)
@@ -316,7 +315,7 @@ class SpatialLinearAttention(nn.Module):
 
         self.use_checkpoint = use_checkpoint
 
-        self.scale = dim_head**-0.5
+        self.scale = dim_head ** -0.5
         self.heads = heads
         hidden_dim = dim_head * heads
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
@@ -367,12 +366,12 @@ class EinopsToAndFrom(nn.Module):
 
 class Attention(nn.Module):
     def __init__(
-        self, dim, heads=4, dim_head=32, rotary_emb=None, use_checkpoint=False
+            self, dim, heads=4, dim_head=32, rotary_emb=None, use_checkpoint=False
     ):
         super().__init__()
 
         self.use_checkpoint = use_checkpoint
-        self.scale = dim_head**-0.5
+        self.scale = dim_head ** -0.5
         self.heads = heads
         hidden_dim = dim_head * heads
 
@@ -393,10 +392,10 @@ class Attention(nn.Module):
             return self._forward(x, pos_bias, focus_present_mask)
 
     def _forward(
-        self,
-        x,
-        pos_bias=None,
-        focus_present_mask=None,
+            self,
+            x,
+            pos_bias=None,
+            focus_present_mask=None,
     ):
         n, device = x.shape[-2], x.device
 
@@ -485,7 +484,7 @@ class TemporalCNN(nn.Module):
 
 class PseudoConv3D(nn.Module):
     def __init__(
-        self, dim, *, kernel_size, dim_out=None, temporal_kernel_size=None, **kwargs
+            self, dim, *, kernel_size, dim_out=None, temporal_kernel_size=None, **kwargs
     ):
         super().__init__()
         dim_out = default(dim_out, dim)
@@ -560,34 +559,38 @@ class UNetModel3D(nn.Module):
     """
 
     def __init__(
-        self,
-        #n_vars,
-        model_dim,in_channels,out_channels,
-        dim_mults=(1, 2, 4, 8),
-        attn_heads=8,
-        attn_dim_head=32,
-        use_sparse_linear_attn=True,
-        use_mid_attn=False,
-        init_kernel_size=7,
-        resnet_groups=8,
-        use_checkpoint=False,
-        use_temp_attn=True,
-        day_cond=False,
-        year_cond=False,
-        cond_map=True,
+            self,
+            # n_vars,
+            model_dim, in_channels, out_channels,
+            dim_mults=(1, 2, 4, 8),
+            attn_heads=8,
+            attn_dim_head=32,
+            use_sparse_linear_attn=True,
+            use_mid_attn=False,
+            init_kernel_size=7,
+            resnet_groups=8,
+            use_checkpoint=False,
+            use_temp_attn=True,
+            day_cond=False,
+            year_cond=False,
+            cond_map=True,
+            cond_channels=0,
+            cond_drop_prob=0.1,
     ):
         super().__init__()
 
         self.use_temp_attn = use_temp_attn
         self.year_cond = year_cond
         self.day_cond = day_cond
+        self.cond_channels = cond_channels
+        self.cond_drop_prob = cond_drop_prob
 
         # Input and output size to the model will be how many variables we are predicting
-        #in_channels = n_vars
-        #out_channels = n_vars
+        # in_channels = n_vars
+        # out_channels = n_vars
 
         # Add an input channel for the conditioning map
-        #if cond_map:
+        # if cond_map:
         #    in_channels += n_vars
 
         # Initial convolution and attention to process input
@@ -605,7 +608,6 @@ class UNetModel3D(nn.Module):
             self.time_rel_pos_bias = RelativePositionBias(
                 heads=attn_heads, max_distance=32
             )
-
 
             # Create temporal attention operation only just frames
             def temporal_op(dim):
@@ -630,6 +632,7 @@ class UNetModel3D(nn.Module):
         self.time_rel_pos_bias = RelativePositionBias(
             heads=attn_heads, max_distance=32
         )
+
         def temporal_attn(dim):
             return EinopsToAndFrom(
                 "b c f h w",
@@ -646,7 +649,6 @@ class UNetModel3D(nn.Module):
         dims = [model_dim, *map(lambda m: int(model_dim * m), dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
-
         # Define time embedding dimension and create MLP to process timesteps
         time_dim = model_dim * 4
         self.time_mlp = nn.Sequential(
@@ -655,6 +657,27 @@ class UNetModel3D(nn.Module):
             nn.SiLU(),
             nn.Linear(time_dim, time_dim),
         )
+
+        # Conditioning encoder: maps [B, cond_channels, T, H, W] -> [B, time_dim]
+        # This injects CO2/SO2 into the time embedding so every ResBlock sees it
+        if cond_channels > 0:
+            self.cond_encoder = nn.Sequential(
+                nn.Conv3d(cond_channels, model_dim, (1, 3, 3), padding=(0, 1, 1)),
+                nn.GroupNorm(resnet_groups, model_dim),
+                nn.SiLU(),
+                nn.Conv3d(model_dim, model_dim, (1, 3, 3), padding=(0, 1, 1)),
+                nn.GroupNorm(resnet_groups, model_dim),
+                nn.SiLU(),
+                nn.AdaptiveAvgPool3d((1, 1, 1)),  # global spatial+temporal pool
+            )
+            self.cond_proj = nn.Sequential(
+                nn.Linear(model_dim, time_dim),
+                nn.SiLU(),
+                nn.Linear(time_dim, time_dim),
+            )
+        else:
+            self.cond_encoder = None
+            self.cond_proj = None
 
         # Create embeddings for day and year if applicable
         if day_cond:
@@ -727,7 +750,6 @@ class UNetModel3D(nn.Module):
 
         # Construct Up Blocks
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
-
             is_last = ind >= (num_resolutions - 1)
             has_attn = ind in [0, 1, 2]
 
@@ -765,15 +787,15 @@ class UNetModel3D(nn.Module):
         )
 
     def forward(
-        self,
-        x,
-        timesteps,
-        days=None,
-        years=None,
-        cond_map=None,
-        lowres_cond=None,
-        focus_present_mask=None,
-        prob_focus_present=0,
+            self,
+            x,
+            timesteps,
+            days=None,
+            years=None,
+            cond_map=None,
+            lowres_cond=None,
+            focus_present_mask=None,
+            prob_focus_present=0,
     ):
         """
         Apply the model to an input batch.
@@ -789,7 +811,7 @@ class UNetModel3D(nn.Module):
             timesteps = timesteps[None].to(x.device)
 
         # If we are using attn for temporal representation
-            
+
         if exists(self.time_rel_pos_bias):
             # Create keyword arguments for attention operations
             time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device=x.device)
@@ -805,12 +827,21 @@ class UNetModel3D(nn.Module):
             time_rel_pos_bias = None
             focus_present_mask = None
 
-        # If a conditioning map is passed in, concat it to noisy input
-        if exists(cond_map):
-            #print(cond_map.shape)
-            #print(x.shape)
-            #print('SHAPES')
-            x = torch.cat([x, cond_map], dim=1)
+        # If a conditioning map is passed in, encode it for injection into time embedding
+        # (stored temporarily; will be added to t after time_mlp)
+        cond_emb = None
+        if exists(cond_map) and self.cond_encoder is not None:
+            # Classifier-free guidance: randomly drop conditioning during training
+            if self.training and self.cond_drop_prob > 0:
+                # Per-sample dropout mask
+                keep_mask = torch.rand(cond_map.shape[0], device=cond_map.device) >= self.cond_drop_prob
+                keep_mask = keep_mask.view(-1, 1, 1, 1, 1)
+                cond_map_input = cond_map * keep_mask
+            else:
+                cond_map_input = cond_map
+            cond_feat = self.cond_encoder(cond_map_input)  # [B, model_dim, 1, 1, 1]
+            cond_feat = cond_feat.view(cond_feat.shape[0], -1)  # [B, model_dim]
+            cond_emb = self.cond_proj(cond_feat)  # [B, time_dim]
 
         if exists(lowres_cond):
             x = torch.cat([x, lowres_cond], dim=1)
@@ -824,6 +855,10 @@ class UNetModel3D(nn.Module):
 
         # Get timestep embeddings
         t = self.time_mlp(timesteps)
+
+        # Inject conditioning into time embedding (affects every ResBlock via FiLM)
+        if cond_emb is not None:
+            t = t + cond_emb
 
         # Get day and year embeddings if they are provided
         if self.day_cond:

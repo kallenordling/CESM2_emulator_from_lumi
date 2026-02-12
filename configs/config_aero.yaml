@@ -26,8 +26,10 @@ data:
   
 model:
     _target_: models.video_net.UNetModel3D
-    in_channels: 3
+    in_channels: 1
     out_channels: 1
+    cond_channels: 2
+    cond_drop_prob: 0.1
     dim_mults: [0.75, 2, 3,4, 8]
 #   time_dim: 264
     resnet_groups: 8
@@ -68,8 +70,8 @@ trainer:
     save_every: 100
     batch_size: 8
     save_dir: runs/
-    save_name: run_test_aero_standard2.pt
-    load_path: 0 #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_standard1_69.pt #/projappl/project_462001112/CESM_emulatorV2/run_test_aero_standard1_151.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_113.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_89.pt # The path to checkpoint to load from
+    save_name: run_test_aero_condenc.pt
+    load_path: 0 # RESET - architecture changed, old checkpoints incompatible
     lr: 0.00002 #0.0001
     sample_steps: 250
 
