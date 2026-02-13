@@ -152,7 +152,11 @@ class ClimateDataset(Dataset):
 
         # Open up the dataset and make sure it's sorted by time
         #print(realization_dir)
-        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
+        hist_years = list(range(1850, 2015, 5))  # every 5th year
+        future_years = list(range(2015, 2101))  # every year
+        selected_years = hist_years + future_years
+        #xr_data = xr_data.sel(year=selected_years)
+        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year").sel(year=selected_years)
         self.lats=dataset.lat
         # Only select the variables we are interested in
         dataset = dataset[self.vars]
@@ -166,7 +170,7 @@ class ClimateDataset(Dataset):
 
         self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
         cond_file=os.path.join(self.data_dir, self.cond_file)
-        self.dataset_cond =xr.open_dataset(cond_file)
+        self.dataset_cond =xr.open_dataset(cond_file).sel(year=selected_years)
         self.dataset_cond = self.dataset_cond[self.cond_vars]
         #print(self.dataset_cond)
         self.dataset_cond = self.dataset_cond.map(normalize)
