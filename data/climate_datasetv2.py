@@ -17,7 +17,6 @@ MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
 # Convert from kelvin to celsius and from kg/m^2/s to mm/day
 PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
 fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
-
 # Normalization and Inverse Normalization functions
 NORM_FN = {
     "TREFHT": lambda x: (x - 4.5) / 21.0,
@@ -49,7 +48,25 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
     return PREPROCESS_FN[ds.name](ds)
 
 
-EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions.nc"
+EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
+
+def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
+    # TOMCAT emissions: non-negative
+    x = da.clip(min=0)
+    # avoid log(0)
+    x = xr.where(x > 0, x, floor)
+
+    lx = np.log10(x)
+
+    lo = lx.quantile(low_pct/100.0, skipna=True)
+    hi = lx.quantile(high_pct/100.0, skipna=True)
+
+    z = (lx - lo) / (hi - lo)
+    return z.clip(0, 1).fillna(0).astype("float32")
+
+def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
+    z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
+    return (2.0 * z01 - 1.0).astype("float32")
 
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
@@ -60,7 +77,7 @@ def _get_emissions_minmax():
     ds_emis = xr.open_dataset(EMISSIONS_PATH)
 
     minmax = {}
-    for var in ["CO2_em_anthro", "sul"]:
+    for var in ["CO2", "SO2"]:
         da = ds_emis[var]
         min_val = float(da.min())
         max_val = float(da.max())
@@ -73,21 +90,17 @@ def _get_emissions_minmax():
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
-    # Erikoiskäsittely päästömuuttujille:
-    # min/max otetaan AINA emissions.nc-tiedoston koko kentästä
-    if ds.name in ["CO2_em_anthro"]:
-        minmax = _get_emissions_minmax()
-        min_val, max_val = minmax[ds.name]
-        denom = max_val - min_val
+    #print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
+    #      f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
 
-        if denom == 0.0:
-            norm = xr.zeros_like(ds)
-        else:
-            norm = (ds - min_val) / denom
+    if ds.name in ["CO2", "SO2"]:
+        # Log-scale normalization to [-1, 1] for emissions
+        result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
+        #print(f"[NORM DEBUG] {ds.name} after norm: "
+        #      f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
+        return result
 
-        return norm.fillna(0)
-
-    # Muut muuttujat käyttävät valmiita normalisointifunktioita
+    # Other variables use predefined normalization functions
     norm = NORM_FN[ds.name](ds)
     return norm.fillna(0)
 
@@ -115,8 +128,8 @@ class ClimateDataset(Dataset):
         self.data_dir = data_dir
 
         # Necessary to convert vars into a Python list
-        self.vars = OmegaConf.to_object(target_vars) if not isinstance(target_vars, list) else vars
-        self.cond_vars= OmegaConf.to_object(cond_vars) if not isinstance(cond_vars, list) else vars
+        self.vars = OmegaConf.to_object(target_vars) if not isinstance(target_vars, list) else target_vars
+        self.cond_vars = OmegaConf.to_object(cond_vars) if not isinstance(cond_vars, list) else cond_vars
         # Store one dataset (out of memory) as an xarray dataset for metadata
         # Store a different dataset as a torch tensor for speed
         self.xr_data: xr.Dataset
@@ -139,7 +152,11 @@ class ClimateDataset(Dataset):
 
         # Open up the dataset and make sure it's sorted by time
         #print(realization_dir)
-        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
+        hist_years = list(range(1850, 2015, 5))  # every 5th year
+        future_years = list(range(2015, 2101))  # every year
+        selected_years = hist_years + future_years
+        #xr_data = xr_data.sel(year=selected_years)
+        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")#.sel(year=selected_years)
         self.lats=dataset.lat
         # Only select the variables we are interested in
         dataset = dataset[self.vars]
@@ -153,22 +170,24 @@ class ClimateDataset(Dataset):
 
         self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
         cond_file=os.path.join(self.data_dir, self.cond_file)
-        self.dataset_cond =xr.open_dataset(cond_file)
+        self.dataset_cond =xr.open_dataset(cond_file)#.sel(year=selected_years)
         self.dataset_cond = self.dataset_cond[self.cond_vars]
-
+        #print(self.dataset_cond)
         self.dataset_cond = self.dataset_cond.map(normalize)
+
+
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
         #print(self.tensor_data_cond.shape,'cond shape')
         #print(self.tensor_data.shape,'target_shape')
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
         """Generate a tensor of data from an xarray dataset"""
-
+        #print(ds)
         # Stacks the data variables ('pr', 'tas', ...) into a single dimension
         stacked_ds = ds.to_stacked_array(
             new_dim="var", sample_dims=["year", "lon", "lat"]
         ).transpose("var", "year", "lat", "lon")
-
+        #print(stacked_ds.to_numpy())
         # Convert the numpy array to a torch tensor
         tensor_data = torch.tensor(stacked_ds.to_numpy(), dtype=torch.float32)
 
