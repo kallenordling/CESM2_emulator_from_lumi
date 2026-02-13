@@ -17,7 +17,7 @@ from tqdm import tqdm
 import pandas as pd
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
 # Local imports
-from data.climate_dataset import ClimateDataset
+from data.climate_datasetv2 import ClimateDataset
 from utils.gen_utils import generate_samples, generate_samples2
 from omegaconf import OmegaConf
 from models.video_net import UNetModel3D
