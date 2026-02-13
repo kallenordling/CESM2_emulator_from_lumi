@@ -144,11 +144,16 @@ def main(config: DictConfig) -> None:
             tensor_batch = tensor_batch.to(accelerator.device)
 
             if model is not None:
+                # Unwrap EMA: generate_samples2 expects the raw model,
+                # not the EMA wrapper (it asserts no .ema_model attr)
+                unwrapped = accelerator.unwrap_model(model)
+                raw_model = unwrapped.ema_model if hasattr(unwrapped, "ema_model") else unwrapped
+
                 gen_months, sal_co2, sal_sul = generate_samples2(
                     tensor_batch, tensor_batch,
                     scheduler=scheduler,
                     sample_steps=config.sample_steps,
-                    model=model,
+                    model=raw_model,
                     disable=True,
                     guidance_scale=guidance_scale,
                 )
