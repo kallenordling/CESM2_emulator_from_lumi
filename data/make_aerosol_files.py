@@ -102,7 +102,7 @@ anthro_files = sorted(glob.glob(ANTHRO_PATTERN))
 assert len(anthro_files) > 0, f"No anthro files found matching:\n  {ANTHRO_PATTERN}"
 print(f"  Found {len(anthro_files)} files")
 
-ds_anthro = xr.open_mfdataset(anthro_files, combine="by_coords").load()
+ds_anthro = xr.open_mfdataset(anthro_files, combine="by_coords")#.load()
 print(f"  Variables: {list(ds_anthro.data_vars)}")
 print(f"  Dimensions: {dict(ds_anthro.dims)}")
 
