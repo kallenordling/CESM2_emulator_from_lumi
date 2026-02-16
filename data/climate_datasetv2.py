@@ -50,6 +50,18 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 
 EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
 
+def scale_cumulative_linear(da: xr.DataArray, floor=1e-10):
+    """Min-max to [-1, 1], ignoring near-zero values (e.g. ocean cells) for range calc.
+    Values <= floor are clamped to -1 after normalization."""
+    masked = da.where(da > floor)
+    lo = float(masked.min(skipna=True))
+    hi = float(masked.max(skipna=True))
+    z01 = (da - lo) / (hi - lo)           # [0, 1]
+    result = (2.0 * z01 - 1.0)
+    # Clamp near-zero cells to -1
+    result = xr.where(da <= floor, -1.0, result)
+    return result.astype("float32")
+
 def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
     # TOMCAT emissions: non-negative
     x = da.clip(min=0)
@@ -64,7 +76,7 @@ def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-
     z = (lx - lo) / (hi - lo)
     return z.clip(0, 1).fillna(0).astype("float32")
 
-def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
+def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
     z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
     return (2.0 * z01 - 1.0).astype("float32")
 
@@ -95,7 +107,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
 
     if ds.name in ["CO2", "SO2"]:
         # Log-scale normalization to [-1, 1] for emissions
-        result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
+        result = scale_cumulative_linear(ds).fillna(0)#scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
         #print(f"[NORM DEBUG] {ds.name} after norm: "
         #      f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
         return result
@@ -156,7 +168,7 @@ class ClimateDataset(Dataset):
         future_years = list(range(2015, 2101))  # every year
         selected_years = hist_years + future_years
         #xr_data = xr_data.sel(year=selected_years)
-        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")#.sel(year=selected_years)
+        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year").sel(year=selected_years)
         self.lats=dataset.lat
         # Only select the variables we are interested in
         dataset = dataset[self.vars]
@@ -170,7 +182,7 @@ class ClimateDataset(Dataset):
 
         self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
         cond_file=os.path.join(self.data_dir, self.cond_file)
-        self.dataset_cond =xr.open_dataset(cond_file)#.sel(year=selected_years)
+        self.dataset_cond =xr.open_dataset(cond_file).sel(year=selected_years)
         self.dataset_cond = self.dataset_cond[self.cond_vars]
         #print(self.dataset_cond)
         self.dataset_cond = self.dataset_cond.map(normalize)
@@ -178,6 +190,12 @@ class ClimateDataset(Dataset):
 
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
+        # In load_data, after normalizing:
+        cond_tensor = self.tensor_data_cond
+        for i, var in enumerate(self.cond_vars):
+            vals = cond_tensor[i]
+            print(f"{var}: min={vals.min():.4f} max={vals.max():.4f} "
+                  f"std={vals.std():.4f} unique_range={vals.max() - vals.min():.4f}")
         #print(self.tensor_data_cond.shape,'cond shape')
         #print(self.tensor_data.shape,'target_shape')
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
