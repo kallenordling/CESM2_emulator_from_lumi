@@ -105,8 +105,8 @@ ds_anthro_summed = ds_anthro.sum(dim=sector_dim)
 # total mass per year. (Annual sum of a rate in kg/m2/s is not physical.)
 print("\nCalculating annual mean flux...")
 
-ds_air_annual = ds_air_summed.resample(time="YE").mean()
-ds_anthro_annual = ds_anthro_summed.resample(time="YE").mean()
+ds_air_annual = ds_air_summed.groppby('time.year').mean()#.resample(time="YE").mean()
+ds_anthro_annual = ds_anthro_summed.groppby('time.year').mean()#.resample(time="YE").mean()
 
 print(f"  AIR annual shape: {dict(ds_air_annual.dims)}")
 print(f"  Anthro annual shape: {dict(ds_anthro_annual.dims)}")
@@ -121,8 +121,8 @@ n_anthro = len(ds_anthro_annual.time)
 air_start = int(str(ds_air_annual.time.values[0])[:4])
 anthro_start = int(str(ds_anthro_annual.time.values[0])[:4])
 
-ds_air_annual["time"] = pd.date_range(f"{air_start}-01-01", periods=n_air, freq="YS")
-ds_anthro_annual["time"] = pd.date_range(f"{anthro_start}-01-01", periods=n_anthro, freq="YS")
+#ds_air_annual["time"] = pd.date_range(f"{air_start}-01-01", periods=n_air, freq="YS")
+#ds_anthro_annual["time"] = pd.date_range(f"{anthro_start}-01-01", periods=n_anthro, freq="YS")
 
 print(f"  AIR time: {ds_air_annual.time.values[0]} to {ds_air_annual.time.values[-1]}")
 print(f"  Anthro time: {ds_anthro_annual.time.values[0]} to {ds_anthro_annual.time.values[-1]}")
