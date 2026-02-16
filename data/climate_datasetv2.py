@@ -50,7 +50,7 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 
 EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
 
-def scale_cumulative_linear(da: xr.DataArray, floor=1e-14):
+def scale_cumulative_linear(da: xr.DataArray, floor=1e-15):
     """Min-max to [-1, 1], ignoring near-zero values (e.g. ocean cells) for range calc.
     Values <= floor are clamped to -1 after normalization."""
     masked = da.where(da > floor)
