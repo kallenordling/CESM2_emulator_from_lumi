@@ -76,8 +76,8 @@ def rename_to_co2(ds):
     data_vars = [v for v in ds.data_vars if "bnds" not in v and "bound" not in v]
     assert len(data_vars) >= 1, f"No data variables found: {list(ds.data_vars)}"
     var_name = data_vars[0]
-    print(f"  Renaming '{var_name}' -> 'CO2'")
-    return ds.rename({var_name: "CO2"})
+    print(f"  Renaming '{var_name}' -> 'SUL'")
+    return ds.rename({var_name: "SUL"})
 
 
 # ── 1. AIR-anthro: open & sum along level ────────────────────────────────────
@@ -191,7 +191,7 @@ if drop_vars:
 ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint_"+exp+".nc")
+out_path = os.path.join(OUTPUT_DIR, "SUL_cumulative_Gt_per_gridpoint_"+exp+".nc")
 print(ds_total)
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
