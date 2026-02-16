@@ -666,7 +666,6 @@ class UNetModel3D(nn.Module):
                 nn.GroupNorm(resnet_groups, model_dim),
                 nn.SiLU(),
                 nn.Conv3d(model_dim, model_dim, (1, 3, 3), padding=(0, 1, 1)),
-                nn.GroupNorm(resnet_groups, model_dim),
                 nn.SiLU(),
                 nn.AdaptiveAvgPool3d((1, 1, 1)),  # global spatial+temporal pool
             )
