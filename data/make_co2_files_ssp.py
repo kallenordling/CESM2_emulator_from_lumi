@@ -17,8 +17,8 @@ import os
 INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
 OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
 
-AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
-ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
+AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
+ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
 
 R_EARTH = 6.371e6  # Earth radius in meters
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
@@ -78,12 +78,14 @@ air_files = sorted(glob.glob(AIR_PATTERN))
 assert len(air_files) > 0, f"No AIR-anthro files found matching:\n  {AIR_PATTERN}"
 print(f"  Found {len(air_files)} files")
 
-ds_air = xr.open_mfdataset(air_files, combine="by_coords")
+ds_air = xr.open_mfdataset(air_files, combine="by_coords").load()
 print(f"  Variables: {list(ds_air.data_vars)}")
 print(f"  Dimensions: {dict(ds_air.dims)}")
 
 level_dim = find_dim(ds_air, ["level", "lev", "levels"])
 print(f"  Summing along '{level_dim}'...")
+# Drop cftime bound variables early to prevent serialization issues
+ds_air = ds_air.drop_vars([v for v in ds_air if "bnds" in str(v) or "bound" in str(v)], errors="ignore")
 ds_air_summed = ds_air.sum(dim=level_dim)
 
 # ── 2. Anthro: open & sum along sector ───────────────────────────────────────
@@ -92,12 +94,13 @@ anthro_files = sorted(glob.glob(ANTHRO_PATTERN))
 assert len(anthro_files) > 0, f"No anthro files found matching:\n  {ANTHRO_PATTERN}"
 print(f"  Found {len(anthro_files)} files")
 
-ds_anthro = xr.open_mfdataset(anthro_files, combine="by_coords")
+ds_anthro = xr.open_mfdataset(anthro_files, combine="by_coords").load()
 print(f"  Variables: {list(ds_anthro.data_vars)}")
 print(f"  Dimensions: {dict(ds_anthro.dims)}")
 
 sector_dim = find_dim(ds_anthro, ["sector", "sectors"])
 print(f"  Summing along '{sector_dim}'...")
+ds_anthro = ds_anthro.drop_vars([v for v in ds_anthro if "bnds" in str(v) or "bound" in str(v)], errors="ignore")
 ds_anthro_summed = ds_anthro.sum(dim=sector_dim)
 
 # ── 3. Annual mean flux for both (kg/m2/s averaged over each year) ───────────
@@ -168,8 +171,18 @@ ds_total["CO2"].attrs["long_name"] = "Cumulative CO2 emissions per grid point"
 print(f"  Global cumulative at last timestep: {float(ds_total['CO2'].isel(year=-1).sum()):.4f} Gt CO2")
 
 # ── 8. Save ─────────────────────────────────────────────────────────────────
+# Drop any leftover cftime-based variables (time_bnds, etc.) that cause serialization errors
+drop_vars = [v for v in ds_total.coords if "bnds" in str(v) or "bound" in str(v)]
+drop_vars += [v for v in ds_total.data_vars if "bnds" in str(v) or "bound" in str(v)]
+if drop_vars:
+    print(f"  Dropping leftover variables: {drop_vars}")
+    ds_total = ds_total.drop_vars(drop_vars)
+
+# Force compute from dask to numpy before writing
+ds_total = ds_total.compute()
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint_historical.nc")
+out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint.nc")
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
 print("Done!")
