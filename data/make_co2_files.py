@@ -14,8 +14,8 @@ import glob
 import os
 
 # ── Configure paths ──────────────────────────────────────────────────────────
-INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
-OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
+INPUT_DIR = "/path/to/input/data"
+OUTPUT_DIR = "/path/to/output"
 
 AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
 ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
@@ -110,6 +110,22 @@ ds_anthro_annual = ds_anthro_summed.resample(time="YE").mean()
 
 print(f"  AIR annual shape: {dict(ds_air_annual.dims)}")
 print(f"  Anthro annual shape: {dict(ds_anthro_annual.dims)}")
+
+# Replace cftime with pandas timestamps to avoid cftime arithmetic errors
+import pandas as pd
+
+n_air = len(ds_air_annual.time)
+n_anthro = len(ds_anthro_annual.time)
+
+# Extract start year from first time value
+air_start = int(str(ds_air_annual.time.values[0])[:4])
+anthro_start = int(str(ds_anthro_annual.time.values[0])[:4])
+
+ds_air_annual["time"] = pd.date_range(f"{air_start}-01-01", periods=n_air, freq="YS")
+ds_anthro_annual["time"] = pd.date_range(f"{anthro_start}-01-01", periods=n_anthro, freq="YS")
+
+print(f"  AIR time: {ds_air_annual.time.values[0]} to {ds_air_annual.time.values[-1]}")
+print(f"  Anthro time: {ds_anthro_annual.time.values[0]} to {ds_anthro_annual.time.values[-1]}")
 
 # ── 4. Rename to CO2 ────────────────────────────────────────────────────────
 print("\nRenaming variables to 'CO2'...")
