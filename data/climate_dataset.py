@@ -50,18 +50,16 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 
 EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
 
-def scale_cumulative_linear(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
-    """Log-scale normalization to [-1, 1] for spatially-structured emissions.
-    Non-zero cells: log10 -> percentile-clipped linear to [-1, 1].
-    Near-zero cells (ocean): mapped to -1."""
-    positive = da.where(da > floor)
-    lx = np.log10(positive)
-    lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
-    hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
-    z = (lx - lo) / max(hi - lo, 1e-30)
-    result = (2.0 * z.clip(0, 1) - 1.0)
-    result = xr.where(da <= floor, -1.0, result)
-    return result.fillna(-1.0).astype("float32")
+def scale_cumulative_linear(da: xr.DataArray):
+    """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
+    Preserves temporal signal perfectly; every grid cell gets the same
+    value per year (the global mean emission level for that year)."""
+    spatial_dims = [d for d in da.dims if d != "year"]
+    ts = da.mean(dim=spatial_dims)  # [year]
+    lo = float(ts.min(skipna=True))
+    hi = float(ts.max(skipna=True))
+    normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
+    return normed.broadcast_like(da).astype("float32")
 
 def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
     # TOMCAT emissions: non-negative

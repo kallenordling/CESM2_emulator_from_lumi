@@ -119,7 +119,7 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
     Shows how much temporal dynamic range each approach preserves.
     """
     methods = OrderedDict([
-        ("current: log10 pctile (1-99%, floor=1e-30)", lambda da: scale_cumulative_linear(da)),
+        ("current: spatial-mean-first linear", lambda da: scale_cumulative_linear(da)),
         ("previous: log10+quantile",      lambda da: scale_emis_m1_p1_log10(da)),
         ("sqrt + min-max",                lambda da: scale_sqrt_m1_p1(da)),
         ("linear pctile-clip (1-99%)",    lambda da: scale_linear_pctile_clip(da)),
@@ -375,7 +375,7 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
 
     # ── Print normalized stats for each method ──
     methods = OrderedDict([
-        ("current: scale_cumulative_linear (log10 pctile)", scale_cumulative_linear),
+        ("current: scale_cumulative_linear (spatial-mean)", scale_cumulative_linear),
         ("previous: scale_emis_m1_p1_log10", scale_emis_m1_p1_log10),
         ("sqrt + min-max",                   scale_sqrt_m1_p1),
         ("linear pctile-clip (1-99%)",       scale_linear_pctile_clip),
