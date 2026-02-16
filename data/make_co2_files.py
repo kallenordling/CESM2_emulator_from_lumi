@@ -184,7 +184,7 @@ ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint.nc")
-print(ds_totla)
+print(ds_total)
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
 print("Done!")
