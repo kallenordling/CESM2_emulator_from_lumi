@@ -150,7 +150,7 @@ ds_total =  ds_anthro_annual#ds_anthro_aligned
 print(f"  Combined time range: {str(ds_total.year.values[0])[:10]} to {str(ds_total.year.values[-1])[:10]}")
 
 # ── 6. Convert kg/m²/s -> Gt CO2 per grid point per year ────────────────────
-print("\nConverting kg/m²/s -> Gt CO2 per grid point...")
+print("\nConverting kg/m²/s -> Gt SUK per grid point...")
 
 lat = ds_total.lat.values
 lon = ds_total.lon.values
@@ -163,11 +163,11 @@ area_da = xr.DataArray(area_m2, dims=["lat", "lon"], coords={"lat": lat, "lon": 
 #   kg/m²/s  *  m²  *  s/yr  /  (kg/Gt)  =  Gt/yr per grid cell
 ds_total["SUL"] = ds_total["SUL"] * area_da * SECONDS_PER_YEAR / KG_PER_GT
 
-ds_total["SUL"].attrs["units"] = "Gt CO2 / year / gridpoint"
-ds_total["SUL"].attrs["long_name"] = "Annual CO2 emissions per grid point"
+ds_total["SUL"].attrs["units"] = "Gt SUK / year / gridpoint"
+ds_total["SUL"].attrs["long_name"] = "Annual SUK emissions per grid point"
 
-print(f"  Global total first year: {float(ds_total['CO2'].isel(year=0).sum()):.4f} Gt CO2/yr")
-print(f"  Global total last year:  {float(ds_total['CO2'].isel(year=-1).sum()):.4f} Gt CO2/yr")
+print(f"  Global total first year: {float(ds_total['SUL'].isel(year=0).sum()):.4f} Gt SUL/yr")
+print(f"  Global total last year:  {float(ds_total['SUL'].isel(year=-1).sum()):.4f} Gt SUL/yr")
 
 # ── 7. Cumulative sum over time ─────────────────────────────────────────────
 print("\nComputing cumulative sum over time...")
@@ -175,9 +175,9 @@ print(ds_total)
 #ds_total["CO2"] = ds_total["CO2"].cumsum(dim="year")
 
 ds_total["SUL"].attrs["units"] = "Gt SO2 (cumulative)"
-ds_total["SUL"].attrs["long_name"] = "Cumulative CO2 emissions per grid point"
+ds_total["SUL"].attrs["long_name"] = "Cumulative SO2 emissions per grid point"
 
-print(f"  Global cumulative at last timestep: {float(ds_total['CO2'].isel(year=-1).sum()):.4f} Gt CO2")
+print(f"  Global cumulative at last timestep: {float(ds_total['SUL'].isel(year=-1).sum()):.4f} Gt SUL")
 
 # ── 8. Save ─────────────────────────────────────────────────────────────────
 # Drop any leftover cftime-based variables (time_bnds, etc.) that cause serialization errors
