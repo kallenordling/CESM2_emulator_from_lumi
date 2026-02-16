@@ -28,8 +28,7 @@ import xarray as xr
 # Import normalizations from YOUR climate_dataset.py
 # ─────────────────────────────────────────────
 from climate_dataset import (
-    scale_cumulative_linear,    # CO2: spatial-mean-first
-    scale_spatial_log10,        # SO2: log10 preserving spatial structure
+    scale_cumulative_linear,    # current active method
     scale_emis_m1_p1_log10,     # previous log10+quantile method
     scale_emis_0_1_log10,
     normalize,                  # the main dispatch function
