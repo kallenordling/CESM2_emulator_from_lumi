@@ -14,8 +14,8 @@ import glob
 import os
 
 # ── Configure paths ──────────────────────────────────────────────────────────
-INPUT_DIR = "/path/to/input/data"
-OUTPUT_DIR = "/path/to/output"
+INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
+OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
 
 AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
 ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
