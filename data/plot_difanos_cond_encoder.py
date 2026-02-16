@@ -1,291 +1,562 @@
+"""
+Conditioning Encoder Diagnostic
+================================
+Uses the ACTUAL normalization from climate_dataset.py, plus alternatives.
+
+Usage (data only — no model needed):
+    python diagnose_cond_encoder.py --cond_file /path/to/cond.nc --data_only
+
+Full diagnostic with trained model:
+    python diagnose_cond_encoder.py \
+        --checkpoint /path/to/best_epoch_1700.pt \
+        --cond_file /path/to/cond.nc \
+        --config_path ./configs/config_aero.yaml
+"""
+
+import argparse
 import os
-import random
-from typing import Any
-from functools import lru_cache
+import sys
+from collections import OrderedDict
 
-from omegaconf import OmegaConf
-import torch
+import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torch.nn as nn
 import xarray as xr
-from torch.utils.data import Dataset, DataLoader
-from accelerate import Accelerator
-import dask
 
-# Constants for the minimum and maximum of our datasets
-MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
-
-# Convert from kelvin to celsius and from kg/m^2/s to mm/day
-PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
-fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
-# Normalization and Inverse Normalization functions
-NORM_FN = {
-    "TREFHT": lambda x: (x - 4.5) / 21.0,
-    "pr": lambda x: np.cbrt(x),
-}
-DENORM_FN = {
-    "TREFHT": lambda x: x * 21.0 + 4.5,
-    "pr": lambda x: x**3,
-}
-
-# These functions transform the range of the data to [-1, 1]
-MIN_MAX_FN = {"TREFHT": lambda x: x}
+# ─────────────────────────────────────────────
+# Import normalizations from YOUR climate_dataset.py
+# ─────────────────────────────────────────────
+from climate_dataset import (
+    scale_cumulative_linear,    # current active method
+    scale_emis_m1_p1_log10,     # previous log10+quantile method
+    scale_emis_0_1_log10,
+    normalize,                  # the main dispatch function
+)
 
 
-def min_max_norm(x: Any, min_val: float, max_val: float) -> Any:
-    """Normalizes a data array to the range [-1, 1]"""
-    return (x - min_val) / (max_val - min_val)
+# ─────────────────────────────────────────────
+# Additional alternative normalizations for comparison
+# ─────────────────────────────────────────────
 
-
-def min_max_denorm(x: Any, min_val: float, max_val: float) -> Any:
-    """Inverse normalizes a data array from the range [-1, 1] to [min_val, max_val]"""
-    return x * (max_val - min_val) + min_val
-
-
-def preprocess(ds: xr.DataArray) -> xr.DataArray:
-    """Preprocesses a data array"""
-
-    # The name of the variable is contained within the dataarray
-    return PREPROCESS_FN[ds.name](ds)
-
-
-EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
-
-def scale_cumulative_linear(da: xr.DataArray, floor=1e-10):
-    """Min-max to [-1, 1], ignoring near-zero values (e.g. ocean cells) for range calc.
-    Values <= floor are clamped to -1 after normalization."""
-    masked = da.where(da > floor)
-    lo = float(masked.min(skipna=True))
-    hi = float(masked.max(skipna=True))
-    z01 = (da - lo) / (hi - lo)           # [0, 1]
-    result = (2.0 * z01 - 1.0)
-    # Clamp near-zero cells to -1
-    result = xr.where(da <= floor, -1.0, result)
-    return result.astype("float32")
-
-def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
-    # TOMCAT emissions: non-negative
+def scale_sqrt_m1_p1(da: xr.DataArray):
+    """Alternative: sqrt compression then min-max to [-1, 1]"""
     x = da.clip(min=0)
-    # avoid log(0)
-    x = xr.where(x > 0, x, floor)
-
-    lx = np.log10(x)
-
-    lo = lx.quantile(low_pct/100.0, skipna=True)
-    hi = lx.quantile(high_pct/100.0, skipna=True)
-
-    z = (lx - lo) / (hi - lo)
-    return z.clip(0, 1).fillna(0).astype("float32")
-
-def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
-    z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
+    sx = np.sqrt(x)
+    lo = float(sx.min(skipna=True))
+    hi = float(sx.max(skipna=True))
+    z01 = (sx - lo) / max(hi - lo, 1e-30)
     return (2.0 * z01 - 1.0).astype("float32")
 
-@lru_cache(maxsize=1)
-def _get_emissions_minmax():
+
+def scale_linear_pctile_clip(da: xr.DataArray, lo_pct=1.0, hi_pct=99.0):
+    """Linear normalization with percentile clipping to handle outliers."""
+    lo = float(da.quantile(lo_pct / 100.0, skipna=True))
+    hi = float(da.quantile(hi_pct / 100.0, skipna=True))
+    clipped = da.clip(min=lo, max=hi)
+    z01 = (clipped - lo) / max(hi - lo, 1e-30)
+    return (2.0 * z01 - 1.0).astype("float32")
+
+
+def scale_spatial_mean_linear(da: xr.DataArray):
     """
-    Lataa emissions.nc vain kerran ja palauttaa min/max-arvot
-    CO2_em_anthro:lle ja sul:lle.
+    First reduce to spatial mean per year, then min-max to [-1, 1].
+    Avoids ocean-zero domination by collapsing spatial dims first.
+    Then broadcast back to full grid shape.
     """
-    ds_emis = xr.open_dataset(EMISSIONS_PATH)
-
-    minmax = {}
-    for var in ["CO2", "SO2"]:
-        da = ds_emis[var]
-        min_val = float(da.min())
-        max_val = float(da.max())
-        minmax[var] = (min_val, max_val)
-
-    ds_emis.close()
-    return minmax
+    spatial_dims = [d for d in da.dims if d != "year"]
+    ts = da.mean(dim=spatial_dims)  # [year]
+    lo = float(ts.min(skipna=True))
+    hi = float(ts.max(skipna=True))
+    ts_normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
+    # Broadcast back to original shape (every grid cell gets the same value per year)
+    return ts_normed.broadcast_like(da).astype("float32")
 
 
-def normalize(ds: xr.DataArray) -> xr.DataArray:
-    """Normalizes a data array"""
+# ─────────────────────────────────────────────
+# Hook-based encoder inspection
+# ─────────────────────────────────────────────
 
-    #print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
-    #      f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
+class EncoderProbe:
+    """Forward hooks on each layer of cond_encoder to capture activations."""
 
-    if ds.name in ["CO2", "SO2"]:
-        # Log-scale normalization to [-1, 1] for emissions
-        result = scale_cumulative_linear(ds).fillna(0)#scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
-        #print(f"[NORM DEBUG] {ds.name} after norm: "
-        #      f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
-        return result
+    def __init__(self, cond_encoder, cond_scale=None, cond_shift=None):
+        self.activations = OrderedDict()
+        self.hooks = []
 
-    # Other variables use predefined normalization functions
-    norm = NORM_FN[ds.name](ds)
-    return norm.fillna(0)
+        for i, layer in enumerate(cond_encoder):
+            name = f"{i}_{layer.__class__.__name__}"
+            hook = layer.register_forward_hook(self._make_hook(name))
+            self.hooks.append(hook)
 
-def denorm(ds: xr.DataArray) -> xr.DataArray:
-    norm = DENORM_FN[ds.name](ds)
+        if cond_scale is not None:
+            self.hooks.append(
+                cond_scale.register_forward_hook(self._make_hook("scale_output")))
+        if cond_shift is not None:
+            self.hooks.append(
+                cond_shift.register_forward_hook(self._make_hook("shift_output")))
 
-    min_val, max_val = MIN_MAX_CONSTANTS[ds.name]
-    # norm = min_max_denorm(norm, min_val, max_val)
-    return norm
+    def _make_hook(self, name):
+        def hook_fn(module, inp, out):
+            self.activations[name] = out.detach().cpu()
+        return hook_fn
 
+    def clear(self):
+        self.activations.clear()
 
-class ClimateDataset(Dataset):
-    def __init__(
-        self,
-        seq_len: int,
-        realizations: list[str],
-        data_dir: str,
-        target_vars: list[str],
-        cond_file: str,
-        cond_vars: list[str],
-    ):
-        self.seq_len = seq_len
-        self.realizations = realizations
-
-        self.data_dir = data_dir
-
-        # Necessary to convert vars into a Python list
-        self.vars = OmegaConf.to_object(target_vars) if not isinstance(target_vars, list) else target_vars
-        self.cond_vars = OmegaConf.to_object(cond_vars) if not isinstance(cond_vars, list) else cond_vars
-        # Store one dataset (out of memory) as an xarray dataset for metadata
-        # Store a different dataset as a torch tensor for speed
-        self.xr_data: xr.Dataset
-        self.tensor_data: torch.Tensor
-        self.cond_file=cond_file
-        # Load an example realization right off the bat
-        #print('load_data')
-        self.load_data(self.realizations[0])
-        self.lats=0
-
-    def estimate_num_batches(self, batch_size: int) -> int:
-        """Estimates the number of batches in the dataset."""
-        return len(self) * len(self.realizations) // batch_size
-
-    def load_data(self, realization: str):
-        """Loads the data from the spe
-        cified paths and returns it as an xarray Dataset."""
-
-        realization_dir = os.path.join(self.data_dir, realization, "*.nc")
-
-        # Open up the dataset and make sure it's sorted by time
-        #print(realization_dir)
-        hist_years = list(range(1850, 2015, 5))  # every 5th year
-        future_years = list(range(2015, 2101))  # every year
-        selected_years = hist_years + future_years
-        #xr_data = xr_data.sel(year=selected_years)
-        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year").sel(year=selected_years)
-        self.lats=dataset.lat
-        # Only select the variables we are interested in
-        dataset = dataset[self.vars]
-
-        # Apply preprocessing and normalization
-        self.xr_data = dataset.map(preprocess).map(normalize)
-
-        #if self.spatial_resolution is not None:
-        #    with dask.config.set(**{'array.slicing.split_large_chunks' : False}):
-        #        self.xr_data = self.xr_data.coarsen(lon=3, lat=2).mean()
-
-        self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
-        cond_file=os.path.join(self.data_dir, self.cond_file)
-        self.dataset_cond =xr.open_dataset(cond_file).sel(year=selected_years)
-        self.dataset_cond = self.dataset_cond[self.cond_vars]
-        #print(self.dataset_cond)
-        self.dataset_cond = self.dataset_cond.map(normalize)
+    def remove_hooks(self):
+        for h in self.hooks:
+            h.remove()
 
 
+# ─────────────────────────────────────────────
+# Plotting
+# ─────────────────────────────────────────────
 
-        self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
-        # In load_data, after normalizing:
-        cond_tensor = self.tensor_data_cond
-        for i, var in enumerate(self.cond_vars):
-            vals = cond_tensor[i]
-            print(f"{var}: min={vals.min():.4f} max={vals.max():.4f} "
-                  f"std={vals.std():.4f} unique_range={vals.max() - vals.min():.4f}")
-        #print(self.tensor_data_cond.shape,'cond shape')
-        #print(self.tensor_data.shape,'target_shape')
-    def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
-        """Generate a tensor of data from an xarray dataset"""
-        #print(ds)
-        # Stacks the data variables ('pr', 'tas', ...) into a single dimension
-        stacked_ds = ds.to_stacked_array(
-            new_dim="var", sample_dims=["year", "lon", "lat"]
-        ).transpose("var", "year", "lat", "lon")
-        #print(stacked_ds.to_numpy())
-        # Convert the numpy array to a torch tensor
-        tensor_data = torch.tensor(stacked_ds.to_numpy(), dtype=torch.float32)
+def plot_normalization_comparison(cond_ds, cond_vars, save_path):
+    """
+    Compare normalization strategies on the spatial-mean time series.
+    Shows how much temporal dynamic range each approach preserves.
+    """
+    methods = OrderedDict([
+        ("current: linear pctile (1-99%, floor=1e-10)", lambda da: scale_cumulative_linear(da)),
+        ("previous: log10+quantile",      lambda da: scale_emis_m1_p1_log10(da)),
+        ("sqrt + min-max",                lambda da: scale_sqrt_m1_p1(da)),
+        ("linear pctile-clip (1-99%)",    lambda da: scale_linear_pctile_clip(da)),
+        ("spatial-mean-first, then linear", lambda da: scale_spatial_mean_linear(da)),
+    ])
+    colors = ['red', 'orange', 'green', 'blue', 'purple']
 
-        return tensor_data
-    def get_cond_from_coords(self, coord_dict):
-        years = coord_dict["year"]
-        # select those years from the conditioning dataset
-        ds = self.dataset_cond.sel(year=years)
-        return self.convert_xarray_to_tensor(ds)
+    n_vars = len(cond_vars)
+    fig, axes = plt.subplots(n_vars, 2, figsize=(20, 6 * n_vars))
+    if n_vars == 1:
+        axes = axes[np.newaxis, :]
 
-    def convert_tensor_to_xarray(
-        self, tensor: torch.Tensor, coords: xr.DataArray = None
-    ) -> xr.Dataset:
-        """Generate an xarray dataset from a tensor of data"""
+    for row, var in enumerate(cond_vars):
+        da = cond_ds[var]
+        spatial_dims = [d for d in da.dims if d != "year"]
+        years = da.year.values
 
-        assert len(tensor.shape) == 4, "Tensor must have shape (var, time, lat, lon)"
+        # ── Left panel: all normalizations on spatial-mean time series ──
+        ax = axes[row, 0]
+        for (label, fn), col in zip(methods.items(), colors):
+            try:
+                normed = fn(da)
+                ts = normed.mean(dim=spatial_dims)
+                ax.plot(years, ts.values, color=col, linewidth=2, label=label)
+            except Exception as e:
+                ax.text(0.5, 0.5, f"Error: {e}", transform=ax.transAxes)
 
-        np_data = tensor.cpu().numpy()
+        ax.set_ylim(-1.15, 1.15)
+        ax.axhline(-1, color='gray', ls='--', alpha=0.4)
+        ax.axhline(1, color='gray', ls='--', alpha=0.4)
+        ax.set_title(f"{var} — Spatial mean after normalization", fontsize=13)
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Normalized value")
+        ax.legend(fontsize=8, loc='upper left')
+        ax.grid(True, alpha=0.3)
 
-        # Convert the numpy array to a dictionary of xr.DataArrays
-        # with the same names as the original dataset
-        data_vars = {
-            var_name: (["time", "lat", "lon"], np_data[i])
-            for i, var_name in enumerate(self.xr_data.data_vars.keys())
-        }
+        # ── Right panel: future-period zoom ──
+        ax = axes[row, 1]
+        for (label, fn), col in zip(methods.items(), colors):
+            try:
+                normed = fn(da)
+                ts = normed.mean(dim=spatial_dims)
+                future_mask = years >= 2015
+                ax.plot(years[future_mask], ts.values[future_mask],
+                        color=col, linewidth=2, label=label)
+                # Annotate the range
+                fvals = ts.values[future_mask]
+                rng = fvals.max() - fvals.min()
+                ax.annotate(f"Δ={rng:.3f}",
+                            xy=(2085, fvals[-1]),
+                            fontsize=8, color=col)
+            except Exception:
+                pass
 
-        # Create the dataset with the same coordinates as the original dataset
-        # Note: The original time values are lost and just start at 0 instead
-        ds = xr.Dataset(
-            data_vars,
-            coords={
-                "time": np.arange(np_data.shape[1]),
-                "lat": np.linspace(-90, 90, np_data.shape[2]),
-                "lon": np.linspace(0, 360, np_data.shape[3]),
-            },
-        ).map(denorm)
+        ax.set_title(f"{var} — Future period zoom (2015–2100)", fontsize=13)
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Normalized value")
+        ax.legend(fontsize=8, loc='upper left')
+        ax.grid(True, alpha=0.3)
 
-        # If we are provided time coords, create a new time coordinate
-        if coords is not None:
-            ds = ds.assign_coords(coords)
-        return ds
-
-    def __len__(self):
-        return len(self.xr_data.year) - self.seq_len + 1
-
-    def __getitem__(self, idx: int):
-        """Defines how to get a specific index from the dataset"""
-        return self.tensor_data[:, idx : idx + self.seq_len],self.tensor_data_cond[:, idx : idx + self.seq_len]
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"[SAVED] {save_path}")
+    plt.close()
 
 
-class ClimateDataLoader:
-    def __init__(
-        self,
-        dataset: ClimateDataset,
-        accelerator: Accelerator,
-        batch_size: int,
-        **dataloader_kwargs: dict[str, Any],
-    ):
-        self.dataset = dataset
-        self.accelerator = accelerator
-        self.batch_size = batch_size
-        self.dataloader_kwargs = dataloader_kwargs
+def plot_spatial_maps(cond_ds, cond_vars, save_path):
+    """
+    Show spatial maps at early / late years for each var.
+    Reveals the ocean-zero problem and spatial structure.
+    """
+    years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
+    years_to_show = [y for y in years_to_show if y in cond_ds.year.values]
 
-    def __len__(self):
-        return self.dataset.estimate_num_batches(self.batch_size)
+    fig, axes = plt.subplots(len(cond_vars), len(years_to_show),
+                              figsize=(5 * len(years_to_show), 4 * len(cond_vars)))
+    if len(cond_vars) == 1:
+        axes = axes[np.newaxis, :]
+    if len(years_to_show) == 1:
+        axes = axes[:, np.newaxis]
 
-    def generate(self) -> torch.Tensor:
-        # Iterate through each realization in our dataset
-        random.shuffle(self.dataset.realizations)
+    for row, var in enumerate(cond_vars):
+        da = cond_ds[var]
+        vmin = float(da.min(skipna=True))
+        vmax = float(da.max(skipna=True))
 
-        for realization in self.dataset.realizations:
-            # Load a realization of data into memory
-            self.dataset.load_data(realization)
+        for col, yr in enumerate(years_to_show):
+            ax = axes[row, col]
+            data = da.sel(year=yr).values
+            im = ax.imshow(data, aspect='auto', cmap='viridis',
+                           vmin=vmin, vmax=vmax, origin='lower')
+            ax.set_title(f"{var} year={yr}\nmin={data.min():.2e} max={data.max():.2e}",
+                         fontsize=9)
+            plt.colorbar(im, ax=ax, shrink=0.8)
 
-            # Wrap a dataloader around it and generate the data
-            dl = self.accelerator.prepare(
-                DataLoader(
-                    self.dataset, batch_size=self.batch_size, **self.dataloader_kwargs
-                )
-            )
+    plt.suptitle("Raw spatial maps — check for ocean zeros / outlier cells", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"[SAVED] {save_path}")
+    plt.close()
 
-            for sample in dl:
-                yield sample
+
+def plot_encoder_activations(activations, sample_labels, save_path):
+    """Activation distributions at each encoder layer for different emission levels."""
+    layer_names = list(activations.keys())
+    n_layers = len(layer_names)
+    n_samples = len(sample_labels)
+
+    fig, axes = plt.subplots(n_layers, 1, figsize=(14, 3.5 * n_layers))
+    if n_layers == 1:
+        axes = [axes]
+
+    colors = plt.cm.coolwarm(np.linspace(0, 1, n_samples))
+
+    for i, layer_name in enumerate(layer_names):
+        ax = axes[i]
+        acts = activations[layer_name]
+
+        for j, (act, label) in enumerate(zip(acts, sample_labels)):
+            vals = act.flatten().numpy()
+            ax.hist(vals, bins=80, alpha=0.5, label=label, color=colors[j],
+                    density=True, histtype='stepfilled', linewidth=1.5)
+            ax.axvline(vals.mean(), color=colors[j], ls='--', alpha=0.8)
+
+        ax.set_title(f"Layer: {layer_name}", fontsize=12, fontweight='bold')
+        ax.set_xlabel("Activation value")
+        ax.set_ylabel("Density")
+        ax.legend(fontsize=7, loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"[SAVED] {save_path}")
+    plt.close()
+
+
+def plot_scale_shift(scale_vals, shift_vals, emission_levels, save_path):
+    """Scale/shift vector properties vs emission level."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Norms
+    scale_norms = [s.norm().item() for s in scale_vals]
+    shift_norms = [s.norm().item() for s in shift_vals]
+
+    axes[0].plot(emission_levels, scale_norms, 'ro-', lw=2, ms=8)
+    axes[0].set_title("||scale|| vs emission level")
+    axes[0].set_xlabel("Normalized emission (spatial mean)")
+    axes[0].set_ylabel("||scale||")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(emission_levels, shift_norms, 'bo-', lw=2, ms=8)
+    axes[1].set_title("||shift|| vs emission level")
+    axes[1].set_xlabel("Normalized emission (spatial mean)")
+    axes[1].set_ylabel("||shift||")
+    axes[1].grid(True, alpha=0.3)
+
+    # Cosine similarity matrix
+    n = len(scale_vals)
+    sim = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            sim[i, j] = torch.nn.functional.cosine_similarity(
+                scale_vals[i].flatten().unsqueeze(0),
+                scale_vals[j].flatten().unsqueeze(0)
+            ).item()
+
+    im = axes[2].imshow(sim, cmap='RdBu_r', vmin=-1, vmax=1)
+    axes[2].set_xticks(range(n))
+    axes[2].set_yticks(range(n))
+    labels = [f"{e:.2f}" for e in emission_levels]
+    axes[2].set_xticklabels(labels, rotation=45, fontsize=8)
+    axes[2].set_yticklabels(labels, fontsize=8)
+    axes[2].set_title("Cosine sim of scale vectors\n(should vary, not all ~1)")
+    plt.colorbar(im, ax=axes[2])
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"[SAVED] {save_path}")
+    plt.close()
+
+
+def plot_embedding_pca(scale_vals, shift_vals, emission_levels, save_path):
+    """PCA of [scale||shift] embeddings colored by emission level."""
+    try:
+        from sklearn.decomposition import PCA
+    except ImportError:
+        print("[SKIP] sklearn not installed, skipping PCA plot")
+        return
+
+    embeddings = np.stack([
+        torch.cat([s.flatten(), sh.flatten()]).numpy()
+        for s, sh in zip(scale_vals, shift_vals)
+    ])
+
+    if embeddings.shape[0] < 3:
+        print("[SKIP] Need >= 3 samples for PCA")
+        return
+
+    pca = PCA(n_components=2)
+    proj = pca.fit_transform(embeddings)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc = ax.scatter(proj[:, 0], proj[:, 1], c=emission_levels,
+                    cmap='coolwarm', s=100, edgecolors='black', lw=0.5)
+    plt.colorbar(sc, ax=ax, label="Emission level (norm. spatial mean)")
+
+    for i, lvl in enumerate(emission_levels):
+        ax.annotate(f"  {lvl:.2f}", (proj[i, 0], proj[i, 1]), fontsize=8)
+
+    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%})")
+    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%})")
+    ax.set_title("PCA of [scale || shift] — should separate by emission level")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"[SAVED] {save_path}")
+    plt.close()
+
+
+# ─────────────────────────────────────────────
+# Main routines
+# ─────────────────────────────────────────────
+
+def run_data_diagnostic(cond_file, cond_vars, output_dir):
+    """Normalization comparison — no model needed."""
+    ds = xr.open_dataset(cond_file)
+    ds = ds[cond_vars]
+
+    # ── Print raw stats ──
+    print("\n" + "=" * 60)
+    print("RAW DATA STATISTICS")
+    print("=" * 60)
+    for var in cond_vars:
+        da = ds[var]
+        spatial_dims = [d for d in da.dims if d != "year"]
+        ts = da.mean(dim=spatial_dims)
+        vals = da.values.flatten()
+        vals = vals[~np.isnan(vals)]
+
+        print(f"\n{var}:")
+        print(f"  Shape:       {da.shape}  dims={da.dims}")
+        print(f"  Global min:  {vals.min():.6e}")
+        print(f"  Global max:  {vals.max():.6e}")
+        print(f"  Mean:        {vals.mean():.6e}")
+        print(f"  Median:      {np.median(vals):.6e}")
+        print(f"  % zeros:     {(vals == 0).sum() / len(vals) * 100:.1f}%")
+        print(f"  % < 1e-10:   {(np.abs(vals) < 1e-10).sum() / len(vals) * 100:.1f}%")
+        print(f"  Max/median:  {vals.max() / max(np.median(vals), 1e-30):.1f}x")
+        print(f"  Year range:  {da.year.values[0]} -> {da.year.values[-1]}")
+        print(f"  First year spatial mean: {float(ts.isel(year=0)):.6e}")
+        print(f"  Last  year spatial mean: {float(ts.isel(year=-1)):.6e}")
+
+    # ── Print normalized stats for each method ──
+    methods = OrderedDict([
+        ("current: scale_cumulative_linear (pctile 1-99%)", scale_cumulative_linear),
+        ("previous: scale_emis_m1_p1_log10", scale_emis_m1_p1_log10),
+        ("sqrt + min-max",                   scale_sqrt_m1_p1),
+        ("linear pctile-clip (1-99%)",       scale_linear_pctile_clip),
+        ("spatial-mean-first",               scale_spatial_mean_linear),
+    ])
+
+    print("\n" + "=" * 60)
+    print("NORMALIZATION COMPARISON (spatial-mean time series)")
+    print("=" * 60)
+    for var in cond_vars:
+        da = ds[var]
+        spatial_dims = [d for d in da.dims if d != "year"]
+        print(f"\n{var}:")
+        for label, fn in methods.items():
+            try:
+                normed = fn(da)
+                ts = normed.mean(dim=spatial_dims)
+                future = ts.sel(year=slice(2015, 2100))
+                hist = ts.sel(year=slice(1850, 2014))
+                print(f"\n  {label}:")
+                print(f"    Full:       [{float(ts.min()):.4f}, {float(ts.max()):.4f}]")
+                print(f"    Historical: [{float(hist.min()):.4f}, {float(hist.max()):.4f}]  "
+                      f"delta={float(hist.max()) - float(hist.min()):.4f}")
+                print(f"    Future:     [{float(future.min()):.4f}, {float(future.max()):.4f}]  "
+                      f"delta={float(future.max()) - float(future.min()):.4f}")
+                print(f"    Future std: {float(future.std()):.4f}")
+            except Exception as e:
+                print(f"  {label}: ERROR -- {e}")
+
+    # ── Plots ──
+    plot_normalization_comparison(ds, cond_vars,
+                                  os.path.join(output_dir, "diag_normalization.png"))
+    plot_spatial_maps(ds, cond_vars,
+                      os.path.join(output_dir, "diag_spatial_maps.png"))
+
+
+def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
+                            cond_vars, output_dir, device="cpu"):
+    """Full diagnostic: data + encoder layer activations + scale/shift."""
+
+    # First run data diagnostic
+    run_data_diagnostic(cond_file, cond_vars, output_dir)
+
+    # Load model
+    from omegaconf import OmegaConf
+    from hydra.utils import instantiate
+
+    print(f"\n[INFO] Loading config: {config_path}")
+    conf = OmegaConf.load(config_path)
+    model = instantiate(conf.model)
+
+    print(f"[INFO] Loading checkpoint: {checkpoint_path}")
+    chkpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    if "EMA" in chkpt:
+        model.load_state_dict(chkpt["EMA"], strict=False)
+        print("[INFO] Loaded EMA weights")
+    elif "Unet" in chkpt:
+        model.load_state_dict(chkpt["Unet"], strict=False)
+        print("[INFO] Loaded Unet weights")
+
+    model.eval().to(device)
+
+    if model.cond_encoder is None:
+        print("[ERROR] Model has no cond_encoder!")
+        return
+
+    # Hook up the encoder
+    probe = EncoderProbe(model.cond_encoder, model.cond_scale, model.cond_shift)
+
+    # Load & normalize conditioning data using YOUR normalize()
+    ds_raw = xr.open_dataset(cond_file)[cond_vars]
+    ds_normed = ds_raw.map(normalize)
+
+    # Pick ~10 representative years
+    all_years = ds_normed.year.values
+    idx = np.linspace(0, len(all_years) - 1, 10, dtype=int)
+    sample_years = all_years[idx]
+    print(f"[INFO] Sampling years: {sample_years}")
+
+    all_layer_acts = OrderedDict()
+    scale_vals, shift_vals = [], []
+    emission_levels, sample_labels = [], []
+
+    for year in sample_years:
+        year_ds = ds_normed.sel(year=[year])
+
+        # Stack cond_vars into [C, T, H, W] -> [1, C, T, H, W]
+        arrays = [year_ds[v].values for v in cond_vars]
+        stacked = np.stack(arrays, axis=0)  # [C, T, H, W] or [C, H, W]
+        if stacked.ndim == 3:
+            stacked = stacked[:, np.newaxis, :, :]  # add T dim
+        cond_tensor = torch.tensor(stacked, dtype=torch.float32).unsqueeze(0).to(device)
+
+        emis_level = float(cond_tensor.mean())
+        emission_levels.append(emis_level)
+        sample_labels.append(f"Year {year}\n(mean={emis_level:.3f})")
+
+        probe.clear()
+        with torch.no_grad():
+            cond_feat = model.cond_encoder(cond_tensor)
+            cond_feat_flat = cond_feat.view(cond_feat.shape[0], -1)
+            scale = model.cond_scale(cond_feat_flat)
+            shift = model.cond_shift(cond_feat_flat)
+
+        scale_vals.append(scale.cpu())
+        shift_vals.append(shift.cpu())
+
+        for layer_name, act in probe.activations.items():
+            if layer_name not in all_layer_acts:
+                all_layer_acts[layer_name] = []
+            all_layer_acts[layer_name].append(act)
+
+    # ── Plots ──
+    plot_encoder_activations(all_layer_acts, sample_labels,
+                              os.path.join(output_dir, "diag_encoder_layers.png"))
+    plot_scale_shift(scale_vals, shift_vals, emission_levels,
+                      os.path.join(output_dir, "diag_scale_shift.png"))
+    plot_embedding_pca(scale_vals, shift_vals, emission_levels,
+                        os.path.join(output_dir, "diag_embedding_pca.png"))
+
+    # ── Summary ──
+    print("\n" + "=" * 60)
+    print("ENCODER DIAGNOSTIC SUMMARY")
+    print("=" * 60)
+
+    print(f"\nScale vectors across emission levels:")
+    for lvl, s in zip(emission_levels, scale_vals):
+        print(f"  emis={lvl:+.3f}  ||scale||={s.norm().item():.4f}  "
+              f"mean={s.mean().item():.4f}  std={s.std().item():.4f}")
+
+    print(f"\nShift vectors across emission levels:")
+    for lvl, s in zip(emission_levels, shift_vals):
+        print(f"  emis={lvl:+.3f}  ||shift||={s.norm().item():.4f}  "
+              f"mean={s.mean().item():.4f}  std={s.std().item():.4f}")
+
+    scale_stacked = torch.stack(scale_vals)
+    shift_stacked = torch.stack(shift_vals)
+    scale_var = scale_stacked.std(dim=0).mean().item()
+    shift_var = shift_stacked.std(dim=0).mean().item()
+
+    print(f"\nCross-sample variation (std across emission levels):")
+    print(f"  Scale: {scale_var:.6f}")
+    print(f"  Shift: {shift_var:.6f}")
+
+    if scale_var < 0.01 and shift_var < 0.01:
+        print("\n  WARNING: VERY LOW — encoder produces nearly identical embeddings!")
+        print("     -> GroupNorm is likely destroying the signal.")
+        print("     -> Try removing GroupNorm from cond_encoder.")
+    elif scale_var < 0.05:
+        print("\n  WARNING: LOW — encoder barely distinguishes emission levels.")
+    else:
+        print("\n  OK: Reasonable variation. Encoder does respond to emissions.")
+
+    probe.remove_hooks()
+
+
+# ─────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Diagnose conditioning encoder")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--cond_file", type=str, required=True,
+                        help="Path to conditioning NetCDF file")
+    parser.add_argument("--config_path", type=str, default="./configs/config_aero.yaml")
+    parser.add_argument("--cond_vars", nargs="+", default=["CO2", "SO2"])
+    parser.add_argument("--output_dir", type=str, default="./diagnostics")
+    parser.add_argument("--data_only", action="store_true")
+    parser.add_argument("--device", type=str, default="cpu")
+
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.data_only or args.checkpoint is None:
+        run_data_diagnostic(args.cond_file, args.cond_vars, args.output_dir)
+    else:
+        run_encoder_diagnostic(
+            args.checkpoint, args.cond_file, args.config_path,
+            args.cond_vars, args.output_dir, args.device,
+        )
+
+    print(f"\n[DONE] Diagnostics saved to: {args.output_dir}")

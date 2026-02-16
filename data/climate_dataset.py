@@ -50,12 +50,17 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 
 EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
 
-def scale_cumulative_linear(da: xr.DataArray):
-    """Simple min-max to [-1, 1] — preserves linear relationship."""
-    lo = float(da.min(skipna=True))
-    hi = float(da.max(skipna=True))
-    z01 = (da - lo) / (hi - lo)           # [0, 1]
-    return (2.0 * z01 - 1.0).astype("float32")  # [-1, 1]
+def scale_cumulative_linear(da: xr.DataArray, floor=1e-10, lo_pct=1.0, hi_pct=99.0):
+    """Min-max to [-1, 1] using percentiles of non-zero values.
+    Values <= floor are clamped to -1 after normalization."""
+    masked = da.where(da > floor)
+    lo = float(masked.quantile(lo_pct / 100.0, skipna=True))
+    hi = float(masked.quantile(hi_pct / 100.0, skipna=True))
+    clipped = da.clip(min=lo, max=hi)
+    z01 = (clipped - lo) / max(hi - lo, 1e-30)
+    result = (2.0 * z01 - 1.0)
+    result = xr.where(da <= floor, -1.0, result)
+    return result.astype("float32")
 
 def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
     # TOMCAT emissions: non-negative
