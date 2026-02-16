@@ -186,7 +186,7 @@ if drop_vars:
 ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint_"+hist+".nc")
+out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint_"+exp+".nc")
 print(ds_total)
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
