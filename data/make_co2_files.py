@@ -114,18 +114,18 @@ print(f"  Anthro annual shape: {dict(ds_anthro_annual.dims)}")
 # Replace cftime with pandas timestamps to avoid cftime arithmetic errors
 import pandas as pd
 
-n_air = len(ds_air_annual.time)
-n_anthro = len(ds_anthro_annual.time)
+n_air = len(ds_air_annual.year)
+n_anthro = len(ds_anthro_annual.year)
 
 # Extract start year from first time value
-air_start = int(str(ds_air_annual.time.values[0])[:4])
-anthro_start = int(str(ds_anthro_annual.time.values[0])[:4])
+air_start = int(str(ds_air_annual.year.values[0])[:4])
+anthro_start = int(str(ds_anthro_annual.year.values[0])[:4])
 
 #ds_air_annual["time"] = pd.date_range(f"{air_start}-01-01", periods=n_air, freq="YS")
 #ds_anthro_annual["time"] = pd.date_range(f"{anthro_start}-01-01", periods=n_anthro, freq="YS")
 
-print(f"  AIR time: {ds_air_annual.time.values[0]} to {ds_air_annual.time.values[-1]}")
-print(f"  Anthro time: {ds_anthro_annual.time.values[0]} to {ds_anthro_annual.time.values[-1]}")
+print(f"  AIR time: {ds_air_annual.year.values[0]} to {ds_air_annual.year.values[-1]}")
+print(f"  Anthro time: {ds_anthro_annual.year.values[0]} to {ds_anthro_annual.year.values[-1]}")
 
 # ── 4. Rename to CO2 ────────────────────────────────────────────────────────
 print("\nRenaming variables to 'CO2'...")
@@ -136,7 +136,7 @@ ds_anthro_annual = rename_to_co2(ds_anthro_annual)
 print("\nCombining AIR + anthro emissions...")
 ds_air_aligned, ds_anthro_aligned = xr.align(ds_air_annual, ds_anthro_annual, join="inner")
 ds_total = ds_air_aligned + ds_anthro_aligned
-print(f"  Combined time range: {str(ds_total.time.values[0])[:10]} to {str(ds_total.time.values[-1])[:10]}")
+print(f"  Combined time range: {str(ds_total.year.values[0])[:10]} to {str(ds_total.time.values[-1])[:10]}")
 
 # ── 6. Convert kg/m²/s -> Gt CO2 per grid point per year ────────────────────
 print("\nConverting kg/m²/s -> Gt CO2 per grid point...")
@@ -165,7 +165,7 @@ ds_total["CO2"] = ds_total["CO2"].cumsum(dim="time")
 ds_total["CO2"].attrs["units"] = "Gt CO2 (cumulative)"
 ds_total["CO2"].attrs["long_name"] = "Cumulative CO2 emissions per grid point"
 
-print(f"  Global cumulative at last timestep: {float(ds_total['CO2'].isel(time=-1).sum()):.4f} Gt CO2")
+print(f"  Global cumulative at last timestep: {float(ds_total['CO2'].isel(year=-1).sum()):.4f} Gt CO2")
 
 # ── 8. Save ─────────────────────────────────────────────────────────────────
 os.makedirs(OUTPUT_DIR, exist_ok=True)
