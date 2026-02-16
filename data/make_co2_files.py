@@ -136,7 +136,7 @@ ds_anthro_annual = rename_to_co2(ds_anthro_annual)
 print("\nCombining AIR + anthro emissions...")
 ds_air_aligned, ds_anthro_aligned = xr.align(ds_air_annual, ds_anthro_annual, join="inner")
 ds_total = ds_air_aligned + ds_anthro_aligned
-print(f"  Combined time range: {str(ds_total.year.values[0])[:10]} to {str(ds_total.time.values[-1])[:10]}")
+print(f"  Combined time range: {str(ds_total.year.values[0])[:10]} to {str(ds_total.year.values[-1])[:10]}")
 
 # ── 6. Convert kg/m²/s -> Gt CO2 per grid point per year ────────────────────
 print("\nConverting kg/m²/s -> Gt CO2 per grid point...")
@@ -155,12 +155,12 @@ ds_total["CO2"] = ds_total["CO2"] * area_da * SECONDS_PER_YEAR / KG_PER_GT
 ds_total["CO2"].attrs["units"] = "Gt CO2 / year / gridpoint"
 ds_total["CO2"].attrs["long_name"] = "Annual CO2 emissions per grid point"
 
-print(f"  Global total first year: {float(ds_total['CO2'].isel(time=0).sum()):.4f} Gt CO2/yr")
-print(f"  Global total last year:  {float(ds_total['CO2'].isel(time=-1).sum()):.4f} Gt CO2/yr")
+print(f"  Global total first year: {float(ds_total['CO2'].isel(year=0).sum()):.4f} Gt CO2/yr")
+print(f"  Global total last year:  {float(ds_total['CO2'].isel(year=-1).sum()):.4f} Gt CO2/yr")
 
 # ── 7. Cumulative sum over time ─────────────────────────────────────────────
 print("\nComputing cumulative sum over time...")
-ds_total["CO2"] = ds_total["CO2"].cumsum(dim="time")
+ds_total["CO2"] = ds_total["CO2"].cumsum(dim="year")
 
 ds_total["CO2"].attrs["units"] = "Gt CO2 (cumulative)"
 ds_total["CO2"].attrs["long_name"] = "Cumulative CO2 emissions per grid point"
