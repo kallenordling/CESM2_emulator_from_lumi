@@ -17,8 +17,8 @@ import os
 INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
 OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
 
-AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
-ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
+AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
+ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
 
 R_EARTH = 6.371e6  # Earth radius in meters
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
