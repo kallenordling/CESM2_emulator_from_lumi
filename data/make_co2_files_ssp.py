@@ -163,6 +163,7 @@ print(f"  Global total last year:  {float(ds_total['CO2'].isel(year=-1).sum()):.
 
 # ── 7. Cumulative sum over time ─────────────────────────────────────────────
 print("\nComputing cumulative sum over time...")
+print(ds_total)
 ds_total["CO2"] = ds_total["CO2"].cumsum(dim="year")
 
 ds_total["CO2"].attrs["units"] = "Gt CO2 (cumulative)"
