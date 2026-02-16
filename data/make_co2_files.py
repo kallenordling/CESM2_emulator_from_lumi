@@ -105,8 +105,8 @@ ds_anthro_summed = ds_anthro.sum(dim=sector_dim)
 # total mass per year. (Annual sum of a rate in kg/m2/s is not physical.)
 print("\nCalculating annual mean flux...")
 
-ds_air_annual = ds_air_summed.groppby('time.year').mean()#.resample(time="YE").mean()
-ds_anthro_annual = ds_anthro_summed.groppby('time.year').mean()#.resample(time="YE").mean()
+ds_air_annual = ds_air_summed.groupby'time.year').mean()#.resample(time="YE").mean()
+ds_anthro_annual = ds_anthro_summed.groupby('time.year').mean()#.resample(time="YE").mean()
 
 print(f"  AIR annual shape: {dict(ds_air_annual.dims)}")
 print(f"  Anthro annual shape: {dict(ds_anthro_annual.dims)}")
