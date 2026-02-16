@@ -51,7 +51,9 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
 
 def scale_cumulative_linear(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
-    """Log-scale on non-zero values, zeros map to -1."""
+    """Log-scale normalization to [-1, 1] for spatially-structured emissions.
+    Non-zero cells: log10 -> percentile-clipped linear to [-1, 1].
+    Near-zero cells (ocean): mapped to -1."""
     positive = da.where(da > floor)
     lx = np.log10(positive)
     lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
