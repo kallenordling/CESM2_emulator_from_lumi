@@ -146,7 +146,7 @@ ds_anthro_annual = rename_to_co2(ds_anthro_annual)
 # ── 5. Sum AIR + anthro on shared time range ─────────────────────────────────
 print("\nCombining AIR + anthro emissions...")
 #ds_air_aligned, ds_anthro_aligned = xr.align(ds_air_annual, ds_anthro_annual, join="inner")
-ds_total =  ds_anthro_aligned
+ds_total =  ds_anthro_annual#ds_anthro_aligned
 print(f"  Combined time range: {str(ds_total.year.values[0])[:10]} to {str(ds_total.year.values[-1])[:10]}")
 
 # ── 6. Convert kg/m²/s -> Gt CO2 per grid point per year ────────────────────
@@ -191,7 +191,7 @@ if drop_vars:
 ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-out_path = os.path.join(OUTPUT_DIR, "SUL_cumulative_Gt_per_gridpoint_"+exp+".nc")
+out_path = os.path.join(OUTPUT_DIR, "SO2_cumulative_Gt_per_gridpoint_"+exp+".nc")
 print(ds_total)
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
