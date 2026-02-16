@@ -222,6 +222,46 @@ def plot_spatial_maps(cond_ds, cond_vars, save_path):
     plt.close()
 
 
+def plot_spatial_maps_normalized(cond_ds, cond_vars, save_path):
+    """
+    Show spatial maps AFTER normalization at early / late years.
+    Reveals what the model actually sees as input.
+    """
+    years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
+    years_to_show = [y for y in years_to_show if y in cond_ds.year.values]
+
+    # Normalize each variable using the actual normalize() function
+    ds_normed = cond_ds.map(normalize)
+
+    fig, axes = plt.subplots(len(cond_vars), len(years_to_show),
+                              figsize=(5 * len(years_to_show), 4 * len(cond_vars)))
+    if len(cond_vars) == 1:
+        axes = axes[np.newaxis, :]
+    if len(years_to_show) == 1:
+        axes = axes[:, np.newaxis]
+
+    for row, var in enumerate(cond_vars):
+        da = ds_normed[var]
+
+        for col, yr in enumerate(years_to_show):
+            ax = axes[row, col]
+            data = da.sel(year=yr).values
+            im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
+                           vmin=-1, vmax=1, origin='lower')
+            ax.set_title(f"{var} year={yr}\nmin={data.min():.3f} max={data.max():.3f}\n"
+                         f"mean={data.mean():.3f} std={data.std():.3f}",
+                         fontsize=9)
+            plt.colorbar(im, ax=ax, shrink=0.8)
+
+    plt.suptitle("Normalized spatial maps — what the model sees as cond_map input",
+                 fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"[SAVED] {save_path}")
+    plt.close()
+    plt.close()
+
+
 def plot_encoder_activations(activations, sample_labels, save_path):
     """Activation distributions at each encoder layer for different emission levels."""
     layer_names = list(activations.keys())
@@ -410,6 +450,8 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
                                   os.path.join(output_dir, "diag_normalization.png"))
     plot_spatial_maps(ds, cond_vars,
                       os.path.join(output_dir, "diag_spatial_maps.png"))
+    plot_spatial_maps_normalized(ds, cond_vars,
+                      os.path.join(output_dir, "diag_spatial_maps_normalized.png"))
 
 
 def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
