@@ -28,7 +28,8 @@ import xarray as xr
 # Import normalizations from YOUR climate_dataset.py
 # ─────────────────────────────────────────────
 from climate_dataset import (
-    scale_cumulative_linear,    # current active method
+    scale_cumulative_linear,    # CO2: spatial-mean-first
+    scale_spatial_log10,        # SO2: log10 preserving spatial structure
     scale_emis_m1_p1_log10,     # previous log10+quantile method
     scale_emis_0_1_log10,
     normalize,                  # the main dispatch function
@@ -225,41 +226,59 @@ def plot_spatial_maps(cond_ds, cond_vars, save_path):
 def plot_spatial_maps_normalized(cond_ds, cond_vars, save_path):
     """
     Show spatial maps AFTER normalization at early / late years.
-    Reveals what the model actually sees as input.
+    Compares current method vs alternatives side by side.
     """
+    methods = OrderedDict([
+        ("current: spatial-mean linear", scale_cumulative_linear),
+        ("log10+quantile (previous)",    scale_emis_m1_p1_log10),
+        ("sqrt + min-max",               scale_sqrt_m1_p1),
+        ("spatial-mean-first",           scale_spatial_mean_linear),
+    ])
+
     years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
     years_to_show = [y for y in years_to_show if y in cond_ds.year.values]
 
-    # Normalize each variable using the actual normalize() function
-    ds_normed = cond_ds.map(normalize)
+    for var in cond_vars:
+        da = cond_ds[var]
+        n_methods = len(methods)
+        n_years = len(years_to_show)
 
-    fig, axes = plt.subplots(len(cond_vars), len(years_to_show),
-                              figsize=(5 * len(years_to_show), 4 * len(cond_vars)))
-    if len(cond_vars) == 1:
-        axes = axes[np.newaxis, :]
-    if len(years_to_show) == 1:
-        axes = axes[:, np.newaxis]
+        fig, axes = plt.subplots(n_methods, n_years,
+                                  figsize=(5 * n_years, 3.5 * n_methods))
+        if n_methods == 1:
+            axes = axes[np.newaxis, :]
+        if n_years == 1:
+            axes = axes[:, np.newaxis]
 
-    for row, var in enumerate(cond_vars):
-        da = ds_normed[var]
+        for row, (label, fn) in enumerate(methods.items()):
+            try:
+                normed = fn(da)
+            except Exception as e:
+                for col in range(n_years):
+                    axes[row, col].text(0.5, 0.5, f"Error:\n{e}",
+                                         transform=axes[row, col].transAxes,
+                                         ha='center', fontsize=8)
+                    axes[row, col].set_ylabel(label, fontsize=9)
+                continue
 
-        for col, yr in enumerate(years_to_show):
-            ax = axes[row, col]
-            data = da.sel(year=yr).values
-            im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
-                           vmin=-1, vmax=1, origin='lower')
-            ax.set_title(f"{var} year={yr}\nmin={data.min():.3f} max={data.max():.3f}\n"
-                         f"mean={data.mean():.3f} std={data.std():.3f}",
-                         fontsize=9)
-            plt.colorbar(im, ax=ax, shrink=0.8)
+            for col, yr in enumerate(years_to_show):
+                ax = axes[row, col]
+                data = normed.sel(year=yr).values
+                im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
+                               vmin=-1, vmax=1, origin='lower')
+                ax.set_title(f"year={yr}\nmin={data.min():.3f} max={data.max():.3f}",
+                             fontsize=8)
+                if col == 0:
+                    ax.set_ylabel(label, fontsize=9)
+                plt.colorbar(im, ax=ax, shrink=0.8)
 
-    plt.suptitle("Normalized spatial maps — what the model sees as cond_map input",
-                 fontsize=14)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"[SAVED] {save_path}")
-    plt.close()
-    plt.close()
+        plt.suptitle(f"{var} — Normalized spatial maps (all methods, range [-1, 1])",
+                     fontsize=13)
+        plt.tight_layout()
+        var_save = save_path.replace(".png", f"_{var}.png")
+        plt.savefig(var_save, dpi=150, bbox_inches='tight')
+        print(f"[SAVED] {var_save}")
+        plt.close()
 
 
 def plot_encoder_activations(activations, sample_labels, save_path):
