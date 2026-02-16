@@ -12,14 +12,17 @@ import xarray as xr
 import numpy as np
 import glob
 import os
-
+exp="ssp370"
 # ── Configure paths ──────────────────────────────────────────────────────────
 INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
 OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
 
-AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
-ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
-
+if exp == "hist":
+    AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
+    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
+if  exp =="ssp370":
+    AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
+    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
 R_EARTH = 6.371e6  # Earth radius in meters
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 KG_PER_GT = 1e12  # 1 Gt = 1e12 kg
@@ -183,7 +186,7 @@ if drop_vars:
 ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint.nc")
+out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint_"+hist+".nc")
 print(ds_total)
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
