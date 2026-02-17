@@ -11,7 +11,7 @@ comp = dict(
 
 encoding = {}
 
-for var in ds.data_vars:
+for var in ['CO2']:
     dtype = ds[var].dtype
 
     # reduce precision if float
@@ -24,7 +24,7 @@ for var in ds.data_vars:
     else:
         encoding[var] = comp
 
-ds.to_netcdf(
+ds['CO2'].to_netcdf(
     "compressed.nc",
     format="NETCDF4",
     engine="netcdf4",
