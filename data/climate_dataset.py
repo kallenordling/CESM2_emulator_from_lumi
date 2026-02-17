@@ -120,7 +120,7 @@ def _get_emissions_minmax():
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
-    if ds.name in ["CO2", "SO2"]:
+    if ds.name in ["CO2", "SO2",'SUL']:
         result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
         return result
 
