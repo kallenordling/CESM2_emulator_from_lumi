@@ -72,7 +72,7 @@ def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
     Near-zero cells (ocean) mapped to -1.
     Best for regionally varying emissions like SO2."""
     positive = da.where(da > floor)
-    lx = np.log10(positive)
+    lx = np.log1p(positive)
     lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
     hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
     z = (lx - lo) / max(hi - lo, 1e-30)
