@@ -136,9 +136,18 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
         da = cond_ds[var]
         spatial_dims = [d for d in da.dims if d != "year"]
         years = da.year.values
+        raw_ts = da.mean(dim=spatial_dims)
 
         # ── Left panel: all normalizations on spatial-mean time series ──
         ax = axes[row, 0]
+
+        # Raw data on secondary y-axis
+        ax2 = ax.twinx()
+        ax2.plot(years, raw_ts.values, color='black', linewidth=2.5,
+                 alpha=0.3, linestyle='-', label='raw (right axis)')
+        ax2.set_ylabel("Raw value", color='black', alpha=0.5)
+        ax2.tick_params(axis='y', labelcolor='black', alpha=0.5)
+
         for (label, fn), col in zip(methods.items(), colors):
             try:
                 normed = fn(da)
@@ -153,16 +162,28 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
         ax.set_title(f"{var} — Spatial mean after normalization", fontsize=13)
         ax.set_xlabel("Year")
         ax.set_ylabel("Normalized value")
-        ax.legend(fontsize=8, loc='upper left')
+        # Combine legends from both axes
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper left')
         ax.grid(True, alpha=0.3)
 
         # ── Right panel: future-period zoom ──
         ax = axes[row, 1]
+
+        # Raw data on secondary y-axis (future only)
+        ax2 = ax.twinx()
+        future_mask = years >= 2015
+        ax2.plot(years[future_mask], raw_ts.values[future_mask],
+                 color='black', linewidth=2.5, alpha=0.3, linestyle='-',
+                 label='raw (right axis)')
+        ax2.set_ylabel("Raw value", color='black', alpha=0.5)
+        ax2.tick_params(axis='y', labelcolor='black', alpha=0.5)
+
         for (label, fn), col in zip(methods.items(), colors):
             try:
                 normed = fn(da)
                 ts = normed.mean(dim=spatial_dims)
-                future_mask = years >= 2015
                 ax.plot(years[future_mask], ts.values[future_mask],
                         color=col, linewidth=2, label=label)
                 # Annotate the range
@@ -177,7 +198,9 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
         ax.set_title(f"{var} — Future period zoom (2015–2100)", fontsize=13)
         ax.set_xlabel("Year")
         ax.set_ylabel("Normalized value")
-        ax.legend(fontsize=8, loc='upper left')
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper left')
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
