@@ -80,18 +80,23 @@ def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
     result = xr.where(da <= floor, -1.0, result)
     return result.fillna(-1.0).astype("float32")
 
-def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
-    # TOMCAT emissions: non-negative
-    x = da.clip(min=0)
-    # avoid log(0)
-    x = xr.where(x > 0, x, floor)
 
+def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
+    x = da.clip(min=0)
+    x = xr.where(x > 0, x, floor)
     lx = np.log10(x)
 
-    lo = lx.quantile(low_pct/100.0, skipna=True)
-    hi = lx.quantile(high_pct/100.0, skipna=True)
+    # Compute quantiles ONLY on non-floor values
+    real_mask = da > floor
+    lx_real = lx.where(real_mask)
+    lo = float(lx_real.quantile(low_pct / 100.0, skipna=True))
+    hi = float(lx_real.quantile(high_pct / 100.0, skipna=True))
 
-    z = (lx - lo) / (hi - lo)
+    z = (lx - lo) / max(hi - lo, 1e-30)
+    z = z.clip(0, 1)  # bound the output
+
+    # Ocean/floor cells get 0 (will become -1 after the 2*z-1 transform)
+    z = xr.where(real_mask, z, 0.0)
     return z.fillna(0).astype("float32")
 
 def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
