@@ -13,6 +13,7 @@ import dask
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend for saving plots
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import QuantileTransformer
 
 # Constants for the minimum and maximum of our datasets
 MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
@@ -101,9 +102,21 @@ def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-
     z = z.fillna(0.0)
     return z.astype("float32")
 
+def xr_quantile_normalize(da, dim="year"):
+    ranks = da.rank(dim)
+    probs = (ranks - 0.5) / da.sizes[dim]
+    return xr.apply_ufunc(
+        scipy.stats.norm.ppf,
+        probs,
+        dask="parallelized",
+        vectorize=True
+    )
+
 def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
     z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
     return (2.0 * z01 - 1.0).astype("float32")
+
+
 
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
@@ -128,7 +141,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
     if ds.name in ["CO2", "SO2",'SUL']:
-        result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
+        result = xr_quantile_normalize(ds)#scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
         return result
 
     # Other variables use predefined normalization functions
