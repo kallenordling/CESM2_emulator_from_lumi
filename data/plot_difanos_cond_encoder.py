@@ -17,7 +17,7 @@ import argparse
 import os
 import sys
 from collections import OrderedDict
-import scipy
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -28,10 +28,11 @@ import xarray as xr
 # Import normalizations from YOUR climate_dataset.py
 # ─────────────────────────────────────────────
 from climate_dataset import (
-    scale_cumulative_linear,    # current active method
-    scale_emis_m1_p1_log10,     # previous log10+quantile method
+    scale_cumulative_linear,
+    scale_emis_m1_p1_log10,
     scale_emis_0_1_log10,
-    normalize,      xr_quantile_normalize            # the main dispatch function
+    scale_quantile_transform,   # NEW: sklearn QuantileTransformer
+    normalize,
 )
 
 
@@ -119,14 +120,14 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
     Shows how much temporal dynamic range each approach preserves.
     """
     methods = OrderedDict([
-        ("current: spatial-mean-first linear", lambda da: scale_cumulative_linear(da)),
-        ("previous: log10+quantile",      lambda da: scale_emis_m1_p1_log10(da)),
-        ('new quantile transformer',      lambda  da: xr_quantile_normalize(da)),
+        ("QuantileTransformer (current)", lambda da: scale_quantile_transform(da)),
+        ("log10+quantile (previous)",     lambda da: scale_emis_m1_p1_log10(da)),
+        ("spatial-mean-first linear",     lambda da: scale_cumulative_linear(da)),
         ("sqrt + min-max",                lambda da: scale_sqrt_m1_p1(da)),
         ("linear pctile-clip (1-99%)",    lambda da: scale_linear_pctile_clip(da)),
         ("spatial-mean-first, then linear", lambda da: scale_spatial_mean_linear(da)),
     ])
-    colors = ['red', 'orange', 'green', 'blue', 'purple']
+    colors = ['red', 'orange', 'green', 'blue', 'purple', 'brown']
 
     n_vars = len(cond_vars)
     fig, axes = plt.subplots(n_vars, 2, figsize=(20, 6 * n_vars))
@@ -252,12 +253,11 @@ def plot_spatial_maps_normalized(cond_ds, cond_vars, save_path):
     Compares current method vs alternatives side by side.
     """
     methods = OrderedDict([
-        ("current: spatial-mean linear", scale_cumulative_linear),
-        ("log10+quantile (previous)",    scale_emis_m1_p1_log10),
-        ('new quantile transformer',    xr_quantile_normalize),
-
-        ("sqrt + min-max",               scale_sqrt_m1_p1),
-        ("spatial-mean-first",           scale_spatial_mean_linear),
+        ("QuantileTransformer (current)", scale_quantile_transform),
+        ("log10+quantile (previous)",     scale_emis_m1_p1_log10),
+        ("spatial-mean linear",           scale_cumulative_linear),
+        ("sqrt + min-max",                scale_sqrt_m1_p1),
+        ("spatial-mean-first",            scale_spatial_mean_linear),
     ])
 
     years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
@@ -459,12 +459,12 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
 
     # ── Print normalized stats for each method ──
     methods = OrderedDict([
-        ("current: scale_cumulative_linear (spatial-mean)", scale_cumulative_linear),
-        ("previous: scale_emis_m1_p1_log10", scale_emis_m1_p1_log10),
-        ('new quantile transformer',      xr_quantile_normalize),
-        ("sqrt + min-max",                   scale_sqrt_m1_p1),
-        ("linear pctile-clip (1-99%)",       scale_linear_pctile_clip),
-        ("spatial-mean-first",               scale_spatial_mean_linear),
+        ("QuantileTransformer (current)",  scale_quantile_transform),
+        ("log10+quantile (previous)",      scale_emis_m1_p1_log10),
+        ("spatial-mean linear",            scale_cumulative_linear),
+        ("sqrt + min-max",                 scale_sqrt_m1_p1),
+        ("linear pctile-clip (1-99%)",     scale_linear_pctile_clip),
+        ("spatial-mean-first",             scale_spatial_mean_linear),
     ])
 
     print("\n" + "=" * 60)
