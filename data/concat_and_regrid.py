@@ -14,7 +14,7 @@ import numpy as np
 # ── Args ─────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Concat hist+ssp370 emissions and regrid to target grid")
 parser.add_argument("--target", required=True, help="Path to a target NetCDF file to extract the grid from")
-parser.add_argument("--data_dir", default="/scratch/project_462001112/emulator_data/",
+parser.add_argument("--data_dir", default="/mnt/lumi_sc/emulator_data/",
                     help="Directory containing the CO2/SO2 files")
 parser.add_argument("--output", default=None, help="Output file path (default: <data_dir>/emissions_co2_so2_regridded.nc)")
 args = parser.parse_args()
