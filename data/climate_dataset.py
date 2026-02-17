@@ -92,7 +92,7 @@ def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-
     hi = lx.quantile(high_pct/100.0, skipna=True)
 
     z = (lx - lo) / (hi - lo)
-    return z.clip(0, 1).fillna(0).astype("float32")
+    return z.fillna(0).astype("float32")
 
 def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
     z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
