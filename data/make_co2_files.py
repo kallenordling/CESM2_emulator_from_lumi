@@ -12,8 +12,14 @@ import xarray as xr
 import numpy as np
 import glob
 import os
-exp="ssp370"
-# ── Configure paths ──────────────────────────────────────────────────────────
+import argparse
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("exp", help="Experiment name, e.g. hist or ssp370")
+args = parser.parse_args()
+
+exp = args.exp# ── Configure paths ──────────────────────────────────────────────────────────# ── Configure paths ──────────────────────────────────────────────────────────
 INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
 OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
 
@@ -167,10 +173,10 @@ print(f"  Global total last year:  {float(ds_total['CO2'].isel(year=-1).sum()):.
 # ── 7. Cumulative sum over time ─────────────────────────────────────────────
 print("\nComputing cumulative sum over time...")
 print(ds_total)
-ds_total["CO2"] = ds_total["CO2"].cumsum(dim="year")
+#ds_total["CO2"] = ds_total["CO2"].cumsum(dim="year")
 
-ds_total["CO2"].attrs["units"] = "Gt CO2 (cumulative)"
-ds_total["CO2"].attrs["long_name"] = "Cumulative CO2 emissions per grid point"
+#ds_total["CO2"].attrs["units"] = "Gt CO2 (cumulative)"
+#ds_total["CO2"].attrs["long_name"] = "Cumulative CO2 emissions per grid point"
 
 print(f"  Global cumulative at last timestep: {float(ds_total['CO2'].isel(year=-1).sum()):.4f} Gt CO2")
 
