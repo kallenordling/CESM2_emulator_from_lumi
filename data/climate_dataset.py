@@ -180,13 +180,13 @@ class ClimateDataset(Dataset):
         future_years = list(range(2015, 2101))  # every year
         selected_years = hist_years + future_years
         #xr_data = xr_data.sel(year=selected_years)
-        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year").sel(year=selected_years)
+        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
         self.lats=dataset.lat
         # Only select the variables we are interested in
         dataset = dataset[self.vars]
 
         # Apply preprocessing and normalization
-        self.xr_data = dataset.map(preprocess).map(normalize)
+        self.xr_data = dataset.map(preprocess).map(normalize).sel(year=selected_years)
 
         #if self.spatial_resolution is not None:
         #    with dask.config.set(**{'array.slicing.split_large_chunks' : False}):
@@ -194,10 +194,10 @@ class ClimateDataset(Dataset):
 
         self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
         cond_file=os.path.join(self.data_dir, self.cond_file)
-        self.dataset_cond =xr.open_dataset(cond_file).sel(year=selected_years)
+        self.dataset_cond =xr.open_dataset(cond_file)
         self.dataset_cond = self.dataset_cond[self.cond_vars]
         #print(self.dataset_cond)
-        self.dataset_cond = self.dataset_cond.map(normalize)
+        self.dataset_cond = self.dataset_cond.map(normalize).sel(year=selected_years)
 
 
 
