@@ -114,19 +114,11 @@ class EncoderProbe:
 # Plotting
 # ─────────────────────────────────────────────
 
-def plot_normalization_comparison(cond_ds, cond_vars, save_path):
+def plot_normalization_comparison(cond_ds, cond_vars, cached_normed, save_path):
     """
     Compare normalization strategies on the spatial-mean time series.
-    Shows how much temporal dynamic range each approach preserves.
+    Uses pre-computed cached_normed[var][label] to avoid recomputation.
     """
-    methods = OrderedDict([
-        ("QuantileTransformer (current)", lambda da: scale_quantile_transform(da)),
-        ("log10+quantile (previous)",     lambda da: scale_emis_m1_p1_log10(da)),
-        ("spatial-mean-first linear",     lambda da: scale_cumulative_linear(da)),
-        ("sqrt + min-max",                lambda da: scale_sqrt_m1_p1(da)),
-        ("linear pctile-clip (1-99%)",    lambda da: scale_linear_pctile_clip(da)),
-        ("spatial-mean-first, then linear", lambda da: scale_spatial_mean_linear(da)),
-    ])
     colors = ['red', 'orange', 'green', 'blue', 'purple', 'brown']
 
     n_vars = len(cond_vars)
@@ -143,20 +135,17 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
         # ── Left panel: all normalizations on spatial-mean time series ──
         ax = axes[row, 0]
 
-        # Raw data on secondary y-axis
         ax2 = ax.twinx()
         ax2.plot(years, raw_ts.values, color='black', linewidth=2.5,
                  alpha=0.3, linestyle='-', label='raw (right axis)')
         ax2.set_ylabel("Raw value", color='black', alpha=0.5)
         ax2.tick_params(axis='y', labelcolor='gray')
 
-        for (label, fn), col in zip(methods.items(), colors):
-            try:
-                normed = fn(da)
-                ts = normed.mean(dim=spatial_dims)
-                ax.plot(years, ts.values, color=col, linewidth=2, label=label)
-            except Exception as e:
-                ax.text(0.5, 0.5, f"Error: {e}", transform=ax.transAxes)
+        for (label, normed), col in zip(cached_normed[var].items(), colors):
+            if normed is None:
+                continue
+            ts = normed.mean(dim=spatial_dims)
+            ax.plot(years, ts.values, color=col, linewidth=2, label=label)
 
         ax.set_ylim(-1.15, 1.15)
         ax.axhline(-1, color='gray', ls='--', alpha=0.4)
@@ -164,7 +153,6 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
         ax.set_title(f"{var} — Spatial mean after normalization", fontsize=13)
         ax.set_xlabel("Year")
         ax.set_ylabel("Normalized value")
-        # Combine legends from both axes
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper left')
@@ -172,30 +160,26 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
 
         # ── Right panel: future-period zoom ──
         ax = axes[row, 1]
-
-        # Raw data on secondary y-axis (future only)
-        ax2 = ax.twinx()
         future_mask = years >= 2015
+
+        ax2 = ax.twinx()
         ax2.plot(years[future_mask], raw_ts.values[future_mask],
                  color='black', linewidth=2.5, alpha=0.3, linestyle='-',
                  label='raw (right axis)')
         ax2.set_ylabel("Raw value", color='black', alpha=0.5)
         ax2.tick_params(axis='y', labelcolor='gray')
 
-        for (label, fn), col in zip(methods.items(), colors):
-            try:
-                normed = fn(da)
-                ts = normed.mean(dim=spatial_dims)
-                ax.plot(years[future_mask], ts.values[future_mask],
-                        color=col, linewidth=2, label=label)
-                # Annotate the range
-                fvals = ts.values[future_mask]
-                rng = fvals.max() - fvals.min()
-                ax.annotate(f"Δ={rng:.3f}",
-                            xy=(2085, fvals[-1]),
-                            fontsize=8, color=col)
-            except Exception:
-                pass
+        for (label, normed), col in zip(cached_normed[var].items(), colors):
+            if normed is None:
+                continue
+            ts = normed.mean(dim=spatial_dims)
+            ax.plot(years[future_mask], ts.values[future_mask],
+                    color=col, linewidth=2, label=label)
+            fvals = ts.values[future_mask]
+            rng = fvals.max() - fvals.min()
+            ax.annotate(f"Δ={rng:.3f}",
+                        xy=(2085, fvals[-1]),
+                        fontsize=8, color=col)
 
         ax.set_title(f"{var} — Future period zoom (2015–2100)", fontsize=13)
         ax.set_xlabel("Year")
@@ -247,24 +231,16 @@ def plot_spatial_maps(cond_ds, cond_vars, save_path):
     plt.close()
 
 
-def plot_spatial_maps_normalized(cond_ds, cond_vars, save_path):
+def plot_spatial_maps_normalized(cond_ds, cond_vars, cached_normed, save_path):
     """
     Show spatial maps AFTER normalization at early / late years.
-    Compares current method vs alternatives side by side.
+    Uses pre-computed cached_normed[var][label] to avoid recomputation.
     """
-    methods = OrderedDict([
-        ("QuantileTransformer (current)", scale_quantile_transform),
-        ("log10+quantile (previous)",     scale_emis_m1_p1_log10),
-        ("spatial-mean linear",           scale_cumulative_linear),
-        ("sqrt + min-max",                scale_sqrt_m1_p1),
-        ("spatial-mean-first",            scale_spatial_mean_linear),
-    ])
-
     years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
     years_to_show = [y for y in years_to_show if y in cond_ds.year.values]
 
     for var in cond_vars:
-        da = cond_ds[var]
+        methods = cached_normed[var]
         n_methods = len(methods)
         n_years = len(years_to_show)
 
@@ -275,12 +251,10 @@ def plot_spatial_maps_normalized(cond_ds, cond_vars, save_path):
         if n_years == 1:
             axes = axes[:, np.newaxis]
 
-        for row, (label, fn) in enumerate(methods.items()):
-            try:
-                normed = fn(da)
-            except Exception as e:
+        for row, (label, normed) in enumerate(methods.items()):
+            if normed is None:
                 for col in range(n_years):
-                    axes[row, col].text(0.5, 0.5, f"Error:\n{e}",
+                    axes[row, col].text(0.5, 0.5, "Error",
                                          transform=axes[row, col].transAxes,
                                          ha='center', fontsize=8)
                     axes[row, col].set_ylabel(label, fontsize=9)
@@ -457,8 +431,8 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
         print(f"  First year spatial mean: {float(ts.isel(year=0)):.6e}")
         print(f"  Last  year spatial mean: {float(ts.isel(year=-1)):.6e}")
 
-    # ── Print normalized stats for each method ──
-    methods = OrderedDict([
+    # ── Compute ALL normalizations ONCE per variable ──
+    method_fns = OrderedDict([
         ("QuantileTransformer (current)",  scale_quantile_transform),
         ("log10+quantile (previous)",      scale_emis_m1_p1_log10),
         ("spatial-mean linear",            scale_cumulative_linear),
@@ -467,6 +441,21 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
         ("spatial-mean-first",             scale_spatial_mean_linear),
     ])
 
+    # cached_normed[var][label] = xr.DataArray
+    cached_normed = {}
+    for var in cond_vars:
+        da = ds[var]
+        cached_normed[var] = OrderedDict()
+        for label, fn in method_fns.items():
+            print(f"  Computing {label} for {var}...", end=" ", flush=True)
+            try:
+                cached_normed[var][label] = fn(da)
+                print("OK")
+            except Exception as e:
+                cached_normed[var][label] = None
+                print(f"ERROR: {e}")
+
+    # ── Print normalized stats ──
     print("\n" + "=" * 60)
     print("NORMALIZATION COMPARISON (spatial-mean time series)")
     print("=" * 60)
@@ -474,28 +463,27 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
         da = ds[var]
         spatial_dims = [d for d in da.dims if d != "year"]
         print(f"\n{var}:")
-        for label, fn in methods.items():
-            try:
-                normed = fn(da)
-                ts = normed.mean(dim=spatial_dims)
-                future = ts.sel(year=slice(2015, 2100))
-                hist = ts.sel(year=slice(1850, 2014))
-                print(f"\n  {label}:")
-                print(f"    Full:       [{float(ts.min()):.4f}, {float(ts.max()):.4f}]")
-                print(f"    Historical: [{float(hist.min()):.4f}, {float(hist.max()):.4f}]  "
-                      f"delta={float(hist.max()) - float(hist.min()):.4f}")
-                print(f"    Future:     [{float(future.min()):.4f}, {float(future.max()):.4f}]  "
-                      f"delta={float(future.max()) - float(future.min()):.4f}")
-                print(f"    Future std: {float(future.std()):.4f}")
-            except Exception as e:
-                print(f"  {label}: ERROR -- {e}")
+        for label, normed in cached_normed[var].items():
+            if normed is None:
+                print(f"  {label}: SKIPPED (error)")
+                continue
+            ts = normed.mean(dim=spatial_dims)
+            future = ts.sel(year=slice(2015, 2100))
+            hist = ts.sel(year=slice(1850, 2014))
+            print(f"\n  {label}:")
+            print(f"    Full:       [{float(ts.min()):.4f}, {float(ts.max()):.4f}]")
+            print(f"    Historical: [{float(hist.min()):.4f}, {float(hist.max()):.4f}]  "
+                  f"delta={float(hist.max()) - float(hist.min()):.4f}")
+            print(f"    Future:     [{float(future.min()):.4f}, {float(future.max()):.4f}]  "
+                  f"delta={float(future.max()) - float(future.min()):.4f}")
+            print(f"    Future std: {float(future.std()):.4f}")
 
-    # ── Plots ──
-    plot_normalization_comparison(ds, cond_vars,
+    # ── Plots (all use cached results, no recomputation) ──
+    plot_normalization_comparison(ds, cond_vars, cached_normed,
                                   os.path.join(output_dir, "diag_normalization.png"))
     plot_spatial_maps(ds, cond_vars,
                       os.path.join(output_dir, "diag_spatial_maps.png"))
-    plot_spatial_maps_normalized(ds, cond_vars,
+    plot_spatial_maps_normalized(ds, cond_vars, cached_normed,
                       os.path.join(output_dir, "diag_spatial_maps_normalized.png"))
 
 
