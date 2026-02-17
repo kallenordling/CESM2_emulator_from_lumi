@@ -13,7 +13,6 @@ import dask
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend for saving plots
 import matplotlib.pyplot as plt
-import scipy
 from sklearn.preprocessing import QuantileTransformer
 
 # Constants for the minimum and maximum of our datasets
@@ -74,7 +73,7 @@ def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
     Near-zero cells (ocean) mapped to -1.
     Best for regionally varying emissions like SO2."""
     positive = da.where(da > floor)
-    lx = np.log1p(positive)
+    lx = np.log10(positive)
     lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
     hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
     z = (lx - lo) / max(hi - lo, 1e-30)
@@ -82,42 +81,66 @@ def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
     result = xr.where(da <= floor, -1.0, result)
     return result.fillna(-1.0).astype("float32")
 
-
 def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
-    real_mask = da > floor
+    # TOMCAT emissions: non-negative
+    x = da.clip(min=0)
+    # avoid log(0)
+    x = xr.where(x > 0, x, floor)
 
-    # Log-transform only real emission cells (ocean → NaN)
-    lx = np.log1p(da.where(real_mask))
+    lx = np.log10(x)
 
-    # Quantiles from real cells only
-    lo = float(lx.quantile(low_pct / 100.0, skipna=True))
-    hi = float(lx.quantile(high_pct / 100.0, skipna=True))
+    lo = lx.quantile(low_pct/100.0, skipna=True)
+    hi = lx.quantile(high_pct/100.0, skipna=True)
 
-    z = (lx - lo) / max(hi - lo, 1e-30)
-
-    # Only clip at top — let bottom values be naturally negative
-    # so cells crossing the lo threshold transition smoothly
-    z = z.clip(max=1.0)
-
-    # Ocean cells (NaN from log10) → 0 (becomes -1 after 2z-1)
-    z = z.fillna(0.0)
-    return z.astype("float32")
-
-def xr_quantile_normalize(da, dim="year"):
-    ranks = da.rank(dim)
-    probs = (ranks - 0.5) / da.sizes[dim]
-    return xr.apply_ufunc(
-        scipy.stats.norm.ppf,
-        probs,
-        dask="parallelized",
-        vectorize=True
-    )
+    z = (lx - lo) / (hi - lo)
+    return z.fillna(0).astype("float32")
 
 def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
     z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
     return (2.0 * z01 - 1.0).astype("float32")
 
 
+def scale_quantile_transform(da: xr.DataArray, n_quantiles=1000, floor=1e-30):
+    """sklearn QuantileTransformer: rank-based normalization to [-1, 1].
+
+    - Smooth and monotonic — no sudden jumps from hard clipping
+    - Handles extreme skew naturally (rank-based, not value-based)
+    - Preserves spatial structure (high-emission cells get higher values)
+    - Preserves temporal trend (increasing emissions → increasing values)
+    - Ocean/near-zero cells are handled separately → mapped to -1
+    """
+    shape = da.shape
+    vals = da.values.copy()
+
+    # Separate ocean/near-zero cells
+    real_mask = vals > floor
+
+    if real_mask.sum() == 0:
+        # All zeros — return flat -1
+        return xr.DataArray(
+            np.full(shape, -1.0, dtype=np.float32),
+            dims=da.dims, coords=da.coords,
+        )
+
+    # Fit QuantileTransformer only on non-zero values
+    real_vals = vals[real_mask].reshape(-1, 1)
+
+    qt = QuantileTransformer(
+        n_quantiles=min(n_quantiles, len(real_vals)),
+        output_distribution='uniform',
+        random_state=42,
+    )
+    qt.fit(real_vals)
+
+    # Transform ALL non-zero values → [0, 1] → [-1, 1]
+    transformed = np.full(shape, -1.0, dtype=np.float32)  # ocean = -1
+    transformed[real_mask] = (
+        2.0 * qt.transform(vals[real_mask].reshape(-1, 1)).ravel() - 1.0
+    )
+
+    return xr.DataArray(
+        transformed, dims=da.dims, coords=da.coords,
+    ).astype("float32")
 
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
@@ -141,8 +164,8 @@ def _get_emissions_minmax():
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
-    if ds.name in ["CO2", "SO2",'SUL']:
-        result = xr_quantile_normalize(ds)#scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
+    if ds.name in ["CO2", "SO2", "SUL"]:
+        result = scale_quantile_transform(ds).fillna(0)
         return result
 
     # Other variables use predefined normalization functions
