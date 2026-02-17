@@ -128,6 +128,6 @@ print(f"  Output shape: {dict(ds_regridded.dims)}")
 
 # ── 7. Save ─────────────────────────────────────────────────────────────────
 print(f"\nSaving to: {OUTPUT_FILE}")
-ds_regridded = ds_regridded.compute()
+ds_regridded = ds_regridded.compute().sel(year=slice(1850,2100))
 ds_regridded.to_netcdf(OUTPUT_FILE)
 print("Done!")
