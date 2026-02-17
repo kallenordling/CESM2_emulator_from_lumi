@@ -25,7 +25,7 @@ TARGET_FILE = args.target
 OUTPUT_FILE = args.output or os.path.join(DATA_DIR, "emissions_co2_so2_regridded.nc")
 
 # ── File paths (adjust naming to match your make_co2_files.py output) ────────
-CO2_HIST = os.path.join(DATA_DIR, "CO2_cumulative_Gt_per_gridpoint.nc")
+CO2_HIST = os.path.join(DATA_DIR, "CO2_cumulative_Gt_per_gridpoint_hist.nc")
 CO2_SSP = os.path.join(DATA_DIR, "CO2_cumulative_Gt_per_gridpoint_ssp370.nc")
 SO2_HIST = os.path.join(DATA_DIR, "SO2_cumulative_Gt_per_gridpoint_hist.nc")
 SO2_SSP = os.path.join(DATA_DIR, "SO2_cumulative_Gt_per_gridpoint_ssp370.nc")
@@ -49,7 +49,7 @@ if len(ds_co2_ssp.year) > 0:
     hist_endpoint = ds_co2_hist["CO2"].isel(year=-1)
     ds_co2_ssp["CO2"] = ds_co2_ssp["CO2"] + hist_endpoint
 
-ds_co2 = xr.concat([ds_co2_hist, ds_co2_ssp], dim="year")
+ds_co2 = xr.concat([ds_co2_hist, ds_co2_ssp], dim="year").sel(year=slice(1850,2100)).cumsum(dim="year")
 print(f"  Combined CO2: {ds_co2.year.values[0]}–{ds_co2.year.values[-1]} ({len(ds_co2.year)} years)")
 
 # ── 2. Load and concat SO2 (hist + ssp370) ──────────────────────────────────
@@ -65,7 +65,7 @@ print(f"  ssp370: {ds_so2_ssp.year.values[0]}–{ds_so2_ssp.year.values[-1]}")
 ds_so2_ssp = ds_so2_ssp.sel(year=ds_so2_ssp.year > last_hist_year)
 
 # SO2 is annual rate (not cumulative), so just concat directly
-ds_so2 = xr.concat([ds_so2_hist, ds_so2_ssp], dim="year")
+ds_so2 = xr.concat([ds_so2_hist, ds_so2_ssp], dim="year").sel(year=slice(1850,2100))
 print(f"  Combined SO2: {ds_so2.year.values[0]}–{ds_so2.year.values[-1]} ({len(ds_so2.year)} years)")
 
 # ── 3. Merge CO2 and SO2 into one dataset ───────────────────────────────────
