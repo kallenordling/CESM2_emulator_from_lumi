@@ -189,7 +189,7 @@ if drop_vars:
     ds_total = ds_total.drop_vars(drop_vars)
 
 # Force compute from dask to numpy before writing
-ds_total = ds_total.compute()
+#ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint_"+exp+".nc")
