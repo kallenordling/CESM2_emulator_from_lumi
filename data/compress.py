@@ -1,7 +1,7 @@
 import xarray as xr
 import numpy as np
 
-ds = xr.open_dataset(" /scratch/project_462001112/emulator_data/emissions_co2_so2_regridded.nc")
+ds = xr.open_dataset("/scratch/project_462001112/emulator_data/emissions_co2_so2_regridded.nc")
 
 comp = dict(
     zlib=True,
