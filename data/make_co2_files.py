@@ -87,7 +87,7 @@ air_files = sorted(glob.glob(AIR_PATTERN))
 assert len(air_files) > 0, f"No AIR-anthro files found matching:\n  {AIR_PATTERN}"
 print(f"  Found {len(air_files)} files")
 
-ds_air = xr.open_mfdataset(air_files, combine="by_coords").load()
+ds_air = xr.open_mfdataset(air_files, combine="by_coords")#.load()
 print(f"  Variables: {list(ds_air.data_vars)}")
 print(f"  Dimensions: {dict(ds_air.dims)}")
 
@@ -103,7 +103,7 @@ anthro_files = sorted(glob.glob(ANTHRO_PATTERN))
 assert len(anthro_files) > 0, f"No anthro files found matching:\n  {ANTHRO_PATTERN}"
 print(f"  Found {len(anthro_files)} files")
 
-ds_anthro = xr.open_mfdataset(anthro_files, combine="by_coords").load()
+ds_anthro = xr.open_mfdataset(anthro_files, combine="by_coords")#.load()
 print(f"  Variables: {list(ds_anthro.data_vars)}")
 print(f"  Dimensions: {dict(ds_anthro.dims)}")
 
