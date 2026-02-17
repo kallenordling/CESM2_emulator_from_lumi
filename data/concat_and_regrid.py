@@ -114,7 +114,7 @@ if src_is_360 != tgt_is_360:
         ds_merged = ds_merged.assign_coords(lon=((ds_merged.lon + 180) % 360 - 180))
         ds_merged = ds_merged.sortby("lon")
 ds_merged.to_netcdf(OUTPUT_FILE)
-'''
+
 # ── 6. Regrid with xesmf ────────────────────────────────────────────────────
 print("\nBuilding xesmf regridder (bilinear)...")
 #regridder = xe.Regridder(ds_merged, target_grid, method="bilinear", periodic=True)
@@ -130,4 +130,3 @@ print(f"\nSaving to: {OUTPUT_FILE}")
 ds_regridded = ds_regridded.compute()
 ds_regridded.to_netcdf(OUTPUT_FILE)
 print("Done!")
-'''
