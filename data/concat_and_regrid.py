@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import xarray as xr
+import xesmf as xe
 import os
 import numpy as np
 
@@ -117,7 +118,7 @@ ds_merged.to_netcdf(OUTPUT_FILE)
 
 # ── 6. Regrid with xesmf ────────────────────────────────────────────────────
 print("\nBuilding xesmf regridder (bilinear)...")
-#regridder = xe.Regridder(ds_merged, target_grid, method="bilinear", periodic=True)
+regridder = xe.Regridder(ds_merged, target_grid, method="bilinear", periodic=True)
 print(f"  {regridder}")
 
 print("Regridding...")
