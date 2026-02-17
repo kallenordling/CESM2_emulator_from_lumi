@@ -13,6 +13,7 @@ import dask
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend for saving plots
 import matplotlib.pyplot as plt
+import scipy
 from sklearn.preprocessing import QuantileTransformer
 
 # Constants for the minimum and maximum of our datasets
