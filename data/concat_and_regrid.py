@@ -34,6 +34,7 @@ SO2_SSP = os.path.join(DATA_DIR, "SO2_annual_Tg_per_gridpoint_ssp370.nc")
 print("Loading CO2 files...")
 ds_co2_hist = xr.open_dataset(CO2_HIST)
 ds_co2_ssp = xr.open_dataset(CO2_SSP)
+ds_co2_ssp = ds_co2_ssp.interp(year=np.arange(ds_co2_ssp.year.values[0], ds_co2_ssp.year.values[-1] + 1), method="linear")
 
 print(f"  hist: {ds_co2_hist.year.values[0]}–{ds_co2_hist.year.values[-1]}")
 print(f"  ssp370: {ds_co2_ssp.year.values[0]}–{ds_co2_ssp.year.values[-1]}")
@@ -55,6 +56,7 @@ print(f"  Combined CO2: {ds_co2.year.values[0]}–{ds_co2.year.values[-1]} ({len
 print("\nLoading SO2 files...")
 ds_so2_hist = xr.open_dataset(SO2_HIST)
 ds_so2_ssp = xr.open_dataset(SO2_SSP)
+ds_so2_ssp = ds_co2_ssp.interp(year=np.arange(ds_so2_ssp.year.values[0], ds_so2_ssp.year.values[-1] + 1), method="linear")
 
 print(f"  hist: {ds_so2_hist.year.values[0]}–{ds_so2_hist.year.values[-1]}")
 print(f"  ssp370: {ds_so2_ssp.year.values[0]}–{ds_so2_ssp.year.values[-1]}")
