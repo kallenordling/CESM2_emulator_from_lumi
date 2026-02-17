@@ -25,7 +25,7 @@ OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
 
 if exp == "hist":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
-    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
+    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS--2024-11-25_gn_*.nc")
 if  exp =="ssp370":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
     ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
