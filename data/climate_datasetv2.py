@@ -10,6 +10,9 @@ import xarray as xr
 from torch.utils.data import Dataset, DataLoader
 from accelerate import Accelerator
 import dask
+import matplotlib
+matplotlib.use('Agg')  # non-interactive backend for saving plots
+import matplotlib.pyplot as plt
 
 # Constants for the minimum and maximum of our datasets
 MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
@@ -50,17 +53,32 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 
 EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_new.nc"
 
-def scale_cumulative_linear(da: xr.DataArray, floor=1e-15):
-    """Min-max to [-1, 1], ignoring near-zero values (e.g. ocean cells) for range calc.
-    Values <= floor are clamped to -1 after normalization."""
-    masked = da.where(da > floor)
-    lo = float(masked.min(skipna=True))
-    hi = float(masked.max(skipna=True))
-    z01 = (da - lo) / (hi - lo)           # [0, 1]
-    result = (2.0 * z01 - 1.0)
-    # Clamp near-zero cells to -1
+def scale_cumulative_linear(da: xr.DataArray):
+    """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
+    Preserves temporal signal perfectly; every grid cell gets the same
+    value per year (the global mean emission level for that year).
+    Best for well-mixed gases like CO2."""
+    spatial_dims = [d for d in da.dims if d != "year"]
+    ts = da.mean(dim=spatial_dims)  # [year]
+    lo = float(ts.min(skipna=True))
+    hi = float(ts.max(skipna=True))
+    normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
+    return normed.broadcast_like(da).astype("float32")
+
+
+def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
+    """Log10 normalization to [-1, 1] preserving spatial structure.
+    Percentiles computed only on non-zero cells to avoid ocean domination.
+    Near-zero cells (ocean) mapped to -1.
+    Best for regionally varying emissions like SO2."""
+    positive = da.where(da > floor)
+    lx = np.log10(positive)
+    lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
+    hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
+    z = (lx - lo) / max(hi - lo, 1e-30)
+    result = (2.0 * z.clip(0, 1) - 1.0)
     result = xr.where(da <= floor, -1.0, result)
-    return result.astype("float32")
+    return result.fillna(-1.0).astype("float32")
 
 def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
     # TOMCAT emissions: non-negative
@@ -102,14 +120,8 @@ def _get_emissions_minmax():
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
-    #print(f"[NORM DEBUG] ds.name={ds.name!r}, shape={ds.shape}, "
-    #      f"min={float(ds.min(skipna=True)):.4f}, max={float(ds.max(skipna=True)):.4f}")
-
-    if ds.name in ["CO2", "SO2"]:
-        # Log-scale normalization to [-1, 1] for emissions
-        result = scale_cumulative_linear(ds).fillna(0)#scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
-        #print(f"[NORM DEBUG] {ds.name} after norm: "
-        #      f"min={float(result.min()):.4f}, max={float(result.max()):.4f}")
+    if ds.name in ["CO2", "SO2",'SUL']:
+        result = scale_emis_m1_p1_log10(ds, low_pct=1.0, high_pct=99.5).fillna(0)
         return result
 
     # Other variables use predefined normalization functions
@@ -190,14 +202,81 @@ class ClimateDataset(Dataset):
 
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
-        # In load_data, after normalizing:
+        # Print normalized stats
         cond_tensor = self.tensor_data_cond
         for i, var in enumerate(self.cond_vars):
             vals = cond_tensor[i]
             print(f"{var}: min={vals.min():.4f} max={vals.max():.4f} "
                   f"std={vals.std():.4f} unique_range={vals.max() - vals.min():.4f}")
-        #print(self.tensor_data_cond.shape,'cond shape')
-        #print(self.tensor_data.shape,'target_shape')
+
+        # Save diagnostic spatial plots (only on first load)
+        diag_dir = os.path.join(self.data_dir, "diagnostics")
+        if not os.path.isdir(diag_dir):
+            os.makedirs(diag_dir, exist_ok=True)
+            self._save_cond_diagnostics(diag_dir)
+
+    def _save_cond_diagnostics(self, diag_dir: str):
+        """Save spatial maps of normalized conditioning data for visual inspection."""
+        years_to_show = [self.dataset_cond.year.values[0], 2015, 2050,
+                         self.dataset_cond.year.values[-1]]
+        years_to_show = [y for y in years_to_show
+                         if y in self.dataset_cond.year.values]
+
+        for var in self.cond_vars:
+            da = self.dataset_cond[var]
+            n_years = len(years_to_show)
+
+            fig, axes = plt.subplots(1, n_years, figsize=(5 * n_years, 4))
+            if n_years == 1:
+                axes = [axes]
+
+            for col, yr in enumerate(years_to_show):
+                ax = axes[col]
+                data = da.sel(year=yr).values
+                im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
+                               vmin=-1, vmax=1, origin='lower')
+                ax.set_title(f"year={yr}\nmin={data.min():.3f} max={data.max():.3f}\n"
+                             f"mean={data.mean():.3f} std={data.std():.3f}",
+                             fontsize=9)
+                plt.colorbar(im, ax=ax, shrink=0.8)
+
+            fig.suptitle(f"{var} — Normalized cond_map (what model sees)", fontsize=13)
+            plt.tight_layout()
+            save_path = os.path.join(diag_dir, f"cond_normalized_{var}.png")
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"[DIAG] Saved {save_path}")
+
+        # Also plot spatial-mean time series
+        fig, axes = plt.subplots(len(self.cond_vars), 1,
+                                  figsize=(12, 4 * len(self.cond_vars)))
+        if len(self.cond_vars) == 1:
+            axes = [axes]
+
+        for i, var in enumerate(self.cond_vars):
+            da = self.dataset_cond[var]
+            spatial_dims = [d for d in da.dims if d != "year"]
+            ts = da.mean(dim=spatial_dims)
+            years = da.year.values
+
+            ax = axes[i]
+            ax.plot(years, ts.values, 'b-', linewidth=2)
+            ax.set_title(f"{var} — Spatial mean of normalized cond_map\n"
+                         f"range: [{float(ts.min()):.3f}, {float(ts.max()):.3f}]",
+                         fontsize=12)
+            ax.set_xlabel("Year")
+            ax.set_ylabel("Normalized value")
+            ax.set_ylim(-1.15, 1.15)
+            ax.axhline(-1, color='gray', ls='--', alpha=0.4)
+            ax.axhline(1, color='gray', ls='--', alpha=0.4)
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        save_path = os.path.join(diag_dir, "cond_timeseries.png")
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"[DIAG] Saved {save_path}")
+
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
         """Generate a tensor of data from an xarray dataset"""
         #print(ds)
