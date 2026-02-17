@@ -31,7 +31,7 @@ from climate_dataset import (
     scale_cumulative_linear,    # current active method
     scale_emis_m1_p1_log10,     # previous log10+quantile method
     scale_emis_0_1_log10,
-    normalize,                  # the main dispatch function
+    normalize,      xr_quantile_normalize            # the main dispatch function
 )
 
 
@@ -121,6 +121,7 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
     methods = OrderedDict([
         ("current: spatial-mean-first linear", lambda da: scale_cumulative_linear(da)),
         ("previous: log10+quantile",      lambda da: scale_emis_m1_p1_log10(da)),
+        ('new quantile transformer',      lambda  da: xr_quantile_normalize(da)),
         ("sqrt + min-max",                lambda da: scale_sqrt_m1_p1(da)),
         ("linear pctile-clip (1-99%)",    lambda da: scale_linear_pctile_clip(da)),
         ("spatial-mean-first, then linear", lambda da: scale_spatial_mean_linear(da)),
@@ -253,6 +254,8 @@ def plot_spatial_maps_normalized(cond_ds, cond_vars, save_path):
     methods = OrderedDict([
         ("current: spatial-mean linear", scale_cumulative_linear),
         ("log10+quantile (previous)",    scale_emis_m1_p1_log10),
+        ('new quantile transformer',    xr_quantile_normalize),
+
         ("sqrt + min-max",               scale_sqrt_m1_p1),
         ("spatial-mean-first",           scale_spatial_mean_linear),
     ])
@@ -458,6 +461,7 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
     methods = OrderedDict([
         ("current: scale_cumulative_linear (spatial-mean)", scale_cumulative_linear),
         ("previous: scale_emis_m1_p1_log10", scale_emis_m1_p1_log10),
+        ('new quantile transformer',      xr_quantile_normalize),
         ("sqrt + min-max",                   scale_sqrt_m1_p1),
         ("linear pctile-clip (1-99%)",       scale_linear_pctile_clip),
         ("spatial-mean-first",               scale_spatial_mean_linear),
