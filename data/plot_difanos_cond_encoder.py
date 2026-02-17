@@ -146,7 +146,7 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
         ax2.plot(years, raw_ts.values, color='black', linewidth=2.5,
                  alpha=0.3, linestyle='-', label='raw (right axis)')
         ax2.set_ylabel("Raw value", color='black', alpha=0.5)
-        ax2.tick_params(axis='y', labelcolor='black', alpha=0.5)
+        ax2.tick_params(axis='y', labelcolor='gray')
 
         for (label, fn), col in zip(methods.items(), colors):
             try:
@@ -178,7 +178,7 @@ def plot_normalization_comparison(cond_ds, cond_vars, save_path):
                  color='black', linewidth=2.5, alpha=0.3, linestyle='-',
                  label='raw (right axis)')
         ax2.set_ylabel("Raw value", color='black', alpha=0.5)
-        ax2.tick_params(axis='y', labelcolor='black', alpha=0.5)
+        ax2.tick_params(axis='y', labelcolor='gray')
 
         for (label, fn), col in zip(methods.items(), colors):
             try:
