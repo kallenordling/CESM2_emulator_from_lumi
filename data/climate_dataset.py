@@ -85,7 +85,7 @@ def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-
     real_mask = da > floor
 
     # Log-transform only real emission cells (ocean → NaN)
-    lx = np.log10(da.where(real_mask))
+    lx = np.log1p(da.where(real_mask))
 
     # Quantiles from real cells only
     lo = float(lx.quantile(low_pct / 100.0, skipna=True))
