@@ -50,7 +50,10 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
         Normalized array with mean ≈ 0 and std ≈ 1, same shape and coordinates.
     """
     vals=da.values.flatten()
-    mask = vals > 1e-7
+    if da.name == "SUL":
+        mask = vals > 1e-13
+    if da.name == "CO2":
+        mask = vals > 1e-5
 
     mu    = float(vals[mask].mean())
     sigma = float(vals[mask].std())
