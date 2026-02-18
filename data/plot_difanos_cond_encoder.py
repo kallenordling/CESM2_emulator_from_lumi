@@ -37,6 +37,48 @@ from climate_dataset import (
 
 
 # ─────────────────────────────────────────────
+# Latitude-weighted area mean
+# ─────────────────────────────────────────────
+
+def lat_weighted_mean(da: xr.DataArray) -> xr.DataArray:
+    """
+    Compute a latitude-weighted spatial mean, collapsing all spatial dims.
+
+    Looks for a coordinate named 'lat' or 'latitude'. If neither is found,
+    falls back to a simple arithmetic mean with a warning.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Array with at least one spatial dimension.
+
+    Returns
+    -------
+    xr.DataArray
+        Array with spatial dims collapsed, weighted by cos(lat).
+    """
+    # Find the latitude coordinate name
+    lat_name = None
+    for candidate in ("lat", "latitude"):
+        if candidate in da.coords:
+            lat_name = candidate
+            break
+
+    if lat_name is None:
+        spatial_dims = [d for d in da.dims if d != "year"]
+        print(f"  [WARN] No lat/latitude coord found — falling back to unweighted mean")
+        return da.mean(dim=spatial_dims)
+
+    # Build cosine-of-latitude weights (shape matches the lat dim)
+    weights = np.cos(np.deg2rad(da[lat_name])).clip(min=0)  # [0, 1], zero at poles
+    weights = weights / weights.sum()                        # normalise
+
+    # Weighted mean over all spatial dims; xarray broadcasts weights over non-lat dims
+    spatial_dims = [d for d in da.dims if d != "year"]
+    return da.weighted(weights).mean(dim=spatial_dims)
+
+
+# ─────────────────────────────────────────────
 # Additional alternative normalizations for comparison
 # ─────────────────────────────────────────────
 
@@ -61,12 +103,11 @@ def scale_linear_pctile_clip(da: xr.DataArray, lo_pct=1.0, hi_pct=99.0):
 
 def scale_spatial_mean_linear(da: xr.DataArray):
     """
-    First reduce to spatial mean per year, then min-max to [-1, 1].
+    First reduce to latitude-weighted spatial mean per year, then min-max to [-1, 1].
     Avoids ocean-zero domination by collapsing spatial dims first.
     Then broadcast back to full grid shape.
     """
-    spatial_dims = [d for d in da.dims if d != "year"]
-    ts = da.mean(dim=spatial_dims)  # [year]
+    ts = lat_weighted_mean(da)  # [year]
     lo = float(ts.min(skipna=True))
     hi = float(ts.max(skipna=True))
     ts_normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
@@ -116,7 +157,7 @@ class EncoderProbe:
 
 def plot_normalization_comparison(cond_ds, cond_vars, cached_normed, save_path):
     """
-    Compare normalization strategies on the spatial-mean time series.
+    Compare normalization strategies on the latitude-weighted spatial-mean time series.
     Uses pre-computed cached_normed[var][label] to avoid recomputation.
     """
     colors = ['red', 'orange', 'green', 'blue', 'purple', 'brown']
@@ -128,9 +169,8 @@ def plot_normalization_comparison(cond_ds, cond_vars, cached_normed, save_path):
 
     for row, var in enumerate(cond_vars):
         da = cond_ds[var]
-        spatial_dims = [d for d in da.dims if d != "year"]
         years = da.year.values
-        raw_ts = da.mean(dim=spatial_dims)
+        raw_ts = lat_weighted_mean(da)  # latitude-weighted
 
         # ── Left panel: all normalizations on spatial-mean time series ──
         ax = axes[row, 0]
@@ -144,13 +184,13 @@ def plot_normalization_comparison(cond_ds, cond_vars, cached_normed, save_path):
         for (label, normed), col in zip(cached_normed[var].items(), colors):
             if normed is None:
                 continue
-            ts = normed.mean(dim=spatial_dims)
+            ts = lat_weighted_mean(normed)  # latitude-weighted
             ax.plot(years, ts.values, color=col, linewidth=2, label=label)
 
         ax.set_ylim(-1.15, 1.15)
         ax.axhline(-1, color='gray', ls='--', alpha=0.4)
         ax.axhline(1, color='gray', ls='--', alpha=0.4)
-        ax.set_title(f"{var} — Spatial mean after normalization", fontsize=13)
+        ax.set_title(f"{var} — Lat-weighted spatial mean after normalization", fontsize=13)
         ax.set_xlabel("Year")
         ax.set_ylabel("Normalized value")
         lines1, labels1 = ax.get_legend_handles_labels()
@@ -172,7 +212,7 @@ def plot_normalization_comparison(cond_ds, cond_vars, cached_normed, save_path):
         for (label, normed), col in zip(cached_normed[var].items(), colors):
             if normed is None:
                 continue
-            ts = normed.mean(dim=spatial_dims)
+            ts = lat_weighted_mean(normed)  # latitude-weighted
             ax.plot(years[future_mask], ts.values[future_mask],
                     color=col, linewidth=2, label=label)
             fvals = ts.values[future_mask]
@@ -324,13 +364,13 @@ def plot_scale_shift(scale_vals, shift_vals, emission_levels, save_path):
 
     axes[0].plot(emission_levels, scale_norms, 'ro-', lw=2, ms=8)
     axes[0].set_title("||scale|| vs emission level")
-    axes[0].set_xlabel("Normalized emission (spatial mean)")
+    axes[0].set_xlabel("Normalized emission (lat-weighted spatial mean)")
     axes[0].set_ylabel("||scale||")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(emission_levels, shift_norms, 'bo-', lw=2, ms=8)
     axes[1].set_title("||shift|| vs emission level")
-    axes[1].set_xlabel("Normalized emission (spatial mean)")
+    axes[1].set_xlabel("Normalized emission (lat-weighted spatial mean)")
     axes[1].set_ylabel("||shift||")
     axes[1].grid(True, alpha=0.3)
 
@@ -382,7 +422,7 @@ def plot_embedding_pca(scale_vals, shift_vals, emission_levels, save_path):
     fig, ax = plt.subplots(figsize=(8, 6))
     sc = ax.scatter(proj[:, 0], proj[:, 1], c=emission_levels,
                     cmap='coolwarm', s=100, edgecolors='black', lw=0.5)
-    plt.colorbar(sc, ax=ax, label="Emission level (norm. spatial mean)")
+    plt.colorbar(sc, ax=ax, label="Emission level (lat-weighted spatial mean)")
 
     for i, lvl in enumerate(emission_levels):
         ax.annotate(f"  {lvl:.2f}", (proj[i, 0], proj[i, 1]), fontsize=8)
@@ -413,23 +453,22 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
     print("=" * 60)
     for var in cond_vars:
         da = ds[var]
-        spatial_dims = [d for d in da.dims if d != "year"]
-        ts = da.mean(dim=spatial_dims)
+        ts = lat_weighted_mean(da)  # latitude-weighted
         vals = da.values.flatten()
         vals = vals[~np.isnan(vals)]
 
         print(f"\n{var}:")
-        print(f"  Shape:       {da.shape}  dims={da.dims}")
-        print(f"  Global min:  {vals.min():.6e}")
-        print(f"  Global max:  {vals.max():.6e}")
-        print(f"  Mean:        {vals.mean():.6e}")
-        print(f"  Median:      {np.median(vals):.6e}")
-        print(f"  % zeros:     {(vals == 0).sum() / len(vals) * 100:.1f}%")
-        print(f"  % < 1e-10:   {(np.abs(vals) < 1e-10).sum() / len(vals) * 100:.1f}%")
-        print(f"  Max/median:  {vals.max() / max(np.median(vals), 1e-30):.1f}x")
-        print(f"  Year range:  {da.year.values[0]} -> {da.year.values[-1]}")
-        print(f"  First year spatial mean: {float(ts.isel(year=0)):.6e}")
-        print(f"  Last  year spatial mean: {float(ts.isel(year=-1)):.6e}")
+        print(f"  Shape:               {da.shape}  dims={da.dims}")
+        print(f"  Global min:          {vals.min():.6e}")
+        print(f"  Global max:          {vals.max():.6e}")
+        print(f"  Mean:                {vals.mean():.6e}")
+        print(f"  Median:              {np.median(vals):.6e}")
+        print(f"  % zeros:             {(vals == 0).sum() / len(vals) * 100:.1f}%")
+        print(f"  % < 1e-10:           {(np.abs(vals) < 1e-10).sum() / len(vals) * 100:.1f}%")
+        print(f"  Max/median:          {vals.max() / max(np.median(vals), 1e-30):.1f}x")
+        print(f"  Year range:          {da.year.values[0]} -> {da.year.values[-1]}")
+        print(f"  First year lat-wtd mean: {float(ts.isel(year=0)):.6e}")
+        print(f"  Last  year lat-wtd mean: {float(ts.isel(year=-1)):.6e}")
 
     # ── Compute ALL normalizations ONCE per variable ──
     method_fns = OrderedDict([
@@ -457,17 +496,15 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
 
     # ── Print normalized stats ──
     print("\n" + "=" * 60)
-    print("NORMALIZATION COMPARISON (spatial-mean time series)")
+    print("NORMALIZATION COMPARISON (latitude-weighted spatial-mean time series)")
     print("=" * 60)
     for var in cond_vars:
-        da = ds[var]
-        spatial_dims = [d for d in da.dims if d != "year"]
         print(f"\n{var}:")
         for label, normed in cached_normed[var].items():
             if normed is None:
                 print(f"  {label}: SKIPPED (error)")
                 continue
-            ts = normed.mean(dim=spatial_dims)
+            ts = lat_weighted_mean(normed)   # latitude-weighted
             future = ts.sel(year=slice(2015, 2100))
             hist = ts.sel(year=slice(1850, 2014))
             print(f"\n  {label}:")
@@ -545,9 +582,11 @@ def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
             stacked = stacked[:, np.newaxis, :, :]  # add T dim
         cond_tensor = torch.tensor(stacked, dtype=torch.float32).unsqueeze(0).to(device)
 
-        emis_level = float(cond_tensor.mean())
+        # Use lat-weighted mean of the first cond_var as the emission level label
+        emis_da = year_ds[cond_vars[0]]
+        emis_level = float(lat_weighted_mean(emis_da))
         emission_levels.append(emis_level)
-        sample_labels.append(f"Year {year}\n(mean={emis_level:.3f})")
+        sample_labels.append(f"Year {year}\n(lat-wtd={emis_level:.3f})")
 
         probe.clear()
         with torch.no_grad():
