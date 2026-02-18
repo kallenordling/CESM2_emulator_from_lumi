@@ -32,8 +32,8 @@ SO2_SSP = os.path.join(DATA_DIR, "SO2_cumulative_Gt_per_gridpoint_ssp370.nc")
 
 # ── 1. Load and concat CO2 (hist + ssp370) ──────────────────────────────────
 print("Loading CO2 files...")
-ds_co2_hist = xr.open_dataset(CO2_HIST)
-ds_co2_ssp = xr.open_dataset(CO2_SSP)
+ds_co2_hist = xr.open_dataset(CO2_HIST).sel(year=slice(1850,2014))
+ds_co2_ssp = xr.open_dataset(CO2_SSP).sel(year=slice(2015,2100))
 ds_co2_ssp = ds_co2_ssp.interp(year=np.arange(ds_co2_ssp.year.values[0], ds_co2_ssp.year.values[-1] + 1), method="linear")
 
 print(f"  hist: {ds_co2_hist.year.values[0]}–{ds_co2_hist.year.values[-1]}")
