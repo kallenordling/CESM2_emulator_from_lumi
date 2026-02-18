@@ -54,6 +54,8 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     mu    = float(vals_log[mask].mean())
     sigma = float(vals_log[mask].std())
     result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
+    result = result.clip(max=1)
+
     # Store params on the DataArray for display
     result.attrs["norm_mu"]    = mu
     result.attrs["norm_sigma"] = sigma
