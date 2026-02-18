@@ -49,7 +49,11 @@ if len(ds_co2_ssp.year) > 0:
     hist_endpoint = ds_co2_hist["CO2"].isel(year=-1)
     ds_co2_ssp["CO2"] = ds_co2_ssp["CO2"] + hist_endpoint
 
-ds_co2 = xr.concat([ds_co2_hist, ds_co2_ssp], dim="year").sel(year=slice(1850,2100)).cumsum(dim="year")
+ds_co2 = (xr.concat([ds_co2_hist, ds_co2_ssp], dim="year").sel(year=slice(1850,2100)))
+print(ds_co2)
+ds_co2=ds_co2.cumsum(dim="year")
+print(ds_co2)
+
 print(f"  Combined CO2: {ds_co2.year.values[0]}–{ds_co2.year.values[-1]} ({len(ds_co2.year)} years)")
 
 # ── 2. Load and concat SO2 (hist + ssp370) ──────────────────────────────────
