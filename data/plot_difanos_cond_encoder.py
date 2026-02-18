@@ -516,7 +516,7 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
     for var in cond_vars:
         print(f"\n{var}:")
         for label, normed in cached_normed[var].items():
-            å
+
             if normed is None:
                 print(f"  {label}: SKIPPED (error)")
                 continue
