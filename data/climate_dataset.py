@@ -48,9 +48,11 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     xr.DataArray
         Normalized array with mean ≈ 0 and std ≈ 1, same shape and coordinates.
     """
-    mask = da.values > 1e-7
-    mu    = float(da[mask].mean(skipna=True))
-    sigma = float(da[mask].std(skipna=True))
+    vals=da.values.flatten()
+    mask = vals > 1e-7
+
+    mu    = float(vals[mask].mean(skipna=True))
+    sigma = float(vals[mask].std(skipna=True))
     return ((da - mu) / max(sigma, 1e-30)).astype("float32")
 
 def min_max_norm(x: Any, min_val: float, max_val: float) -> Any:
