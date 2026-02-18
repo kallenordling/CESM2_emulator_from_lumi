@@ -420,7 +420,7 @@ class ClimateDataset(Dataset):
             dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
             self.lats = dataset.lat
             dataset = dataset[self.vars]
-            self.xr_data = dataset.map(preprocess).map(normalize).sel(year=selected_years)
+            self.xr_data = dataset.map(preprocess).map(normalize)#.sel(year=selected_years)
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
 
             if self.n_components_target is not None:
@@ -435,7 +435,7 @@ class ClimateDataset(Dataset):
         cond_file = os.path.join(self.data_dir, self.cond_file)
         self.dataset_cond = xr.open_dataset(cond_file)
         self.dataset_cond = self.dataset_cond[self.cond_vars]
-        self.dataset_cond = self.dataset_cond.map(normalize).sel(year=selected_years)
+        self.dataset_cond = self.dataset_cond.map(normalize)#.sel(year=selected_years)
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
 
