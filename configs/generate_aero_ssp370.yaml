@@ -14,7 +14,7 @@ guidance_scale: 2.0
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
-load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc_139.pt
+load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/best_epoch_463.pt
 gen_mode: gen  # Either gen/val/test
 batch_size: 8
 sample_steps:  250
@@ -22,7 +22,7 @@ start_year: 1850
 end_year: 2100
 save_name: ssp370_aero # Only set a save name if you want something special added to your save path
 samples_per: 10
-cond_file: emissions_new.nc #emissions.nc
+cond_file: emissions_co2_so2_regridded.nc #emissions.nc
 sul_mul: 0
 co2_mul: 1
 dataset:
