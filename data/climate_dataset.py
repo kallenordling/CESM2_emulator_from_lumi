@@ -113,7 +113,7 @@ def scale_quantile_transform(da: xr.DataArray, n_quantiles=1000, floor=1e-30):
     vals = da.values.copy()
 
     # Separate ocean/near-zero cells
-    real_mask = vals > floor
+    real_mask = vals #vals > floor
 
     if real_mask.sum() == 0:
         # All zeros — return flat -1
