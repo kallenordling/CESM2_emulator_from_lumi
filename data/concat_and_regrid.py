@@ -54,7 +54,7 @@ print(f"  Combined CO2: {ds_co2.year.values[0]}–{ds_co2.year.values[-1]} ({len
 
 # ── 2. Load and concat SO2 (hist + ssp370) ──────────────────────────────────
 print("\nLoading SO2 files...")
-ds_so2_hist = xr.open_dataset(SO2_HIST)).sel(year=slice(1850,2014))
+ds_so2_hist = xr.open_dataset(SO2_HIST).sel(year=slice(1850,2014))
 ds_so2_ssp = xr.open_dataset(SO2_SSP).sel(year=slice(2015,2100))
 ds_so2_ssp = ds_so2_ssp.interp(year=np.arange(ds_so2_ssp.year.values[0], ds_so2_ssp.year.values[-1] + 1), method="linear")
 
