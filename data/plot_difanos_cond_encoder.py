@@ -115,6 +115,19 @@ def scale_spatial_mean_linear(da: xr.DataArray):
     return ts_normed.broadcast_like(da).astype("float32")
 
 
+def scale_zscore(da: xr.DataArray) -> xr.DataArray:
+    """
+    Z-score normalization: (x - mean) / std computed over ALL values globally.
+
+    Result is unbounded but typically falls within ±3 for well-behaved fields.
+    Useful for revealing whether the encoder sees genuinely different signal
+    magnitudes vs. just shifted baselines.
+    """
+    mu    = float(da.mean(skipna=True))
+    sigma = float(da.std(skipna=True))
+    return ((da - mu) / max(sigma, 1e-30)).astype("float32")
+
+
 # ─────────────────────────────────────────────
 # Hook-based encoder inspection
 # ─────────────────────────────────────────────
@@ -472,12 +485,14 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
 
     # ── Compute ALL normalizations ONCE per variable ──
     method_fns = OrderedDict([
-        ("QuantileTransformer (current)",  scale_quantile_transform),
-        ("log10+quantile (previous)",      scale_emis_m1_p1_log10),
-        ("spatial-mean linear",            scale_cumulative_linear),
-        ("sqrt + min-max",                 scale_sqrt_m1_p1),
-        ("linear pctile-clip (1-99%)",     scale_linear_pctile_clip),
-        ("spatial-mean-first",             scale_spatial_mean_linear),
+        ("★ normalize() [used by encoder]", normalize),
+        ("QuantileTransformer",             scale_quantile_transform),
+        ("log10+quantile",                  scale_emis_m1_p1_log10),
+        ("spatial-mean linear",             scale_cumulative_linear),
+        ("sqrt + min-max",                  scale_sqrt_m1_p1),
+        ("linear pctile-clip (1-99%)",      scale_linear_pctile_clip),
+        ("spatial-mean-first",              scale_spatial_mean_linear),
+        ("z-score (μ=0, σ=1)",              scale_zscore),
     ])
 
     # cached_normed[var][label] = xr.DataArray
@@ -524,6 +539,96 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
                       os.path.join(output_dir, "diag_spatial_maps_normalized.png"))
 
 
+def _plot_encoder_input_distributions(ds_normed: xr.Dataset, cond_vars: list,
+                                       save_path: str):
+    """
+    Plot the distribution of the values that are ACTUALLY fed into the encoder
+    (i.e. after ds_raw.map(normalize)), alongside the lat-weighted mean time
+    series and a per-decade box plot.
+
+    One row per conditioning variable; three columns:
+      [density histogram | CDF | lat-weighted mean vs year]
+    """
+    n_vars = len(cond_vars)
+    fig, axes = plt.subplots(n_vars, 3, figsize=(18, 5 * n_vars), squeeze=False)
+    fig.suptitle(
+        "Encoder input distributions  —  ds_raw.map(normalize())\n"
+        "all years × all grid points",
+        fontsize=14, fontweight="bold",
+    )
+
+    for row, var in enumerate(cond_vars):
+        da   = ds_normed[var]
+        vals = da.values.ravel().astype(np.float64)
+        vals = vals[~np.isnan(vals)]
+
+        n       = len(vals)
+        vmean   = vals.mean()
+        vmedian = np.median(vals)
+        vstd    = vals.std()
+        vmin, vmax = vals.min(), vals.max()
+        p01  = np.percentile(vals, 1)
+        p99  = np.percentile(vals, 99)
+        zeros_pct = 100.0 * (vals == 0).sum() / max(n, 1)
+
+        stat_str = (
+            f"n={n:,}
+"
+            f"min={vmin:.3e}  max={vmax:.3e}
+"
+            f"mean={vmean:.3e}  std={vstd:.3e}
+"
+            f"p01={p01:.3e}  p99={p99:.3e}
+"
+            f"zeros={zeros_pct:.1f}%"
+        )
+
+        # ── col 0: density histogram ─────────────────────────────────────────
+        ax0 = axes[row, 0]
+        ax0.hist(vals, bins=100, color="royalblue", edgecolor="none",
+                 alpha=0.85, density=True)
+        ax0.axvline(vmean,   color="red",    ls="--", lw=1.5, label="mean")
+        ax0.axvline(vmedian, color="orange", ls="--", lw=1.5, label="median")
+        ax0.legend(fontsize=8)
+        ax0.text(0.02, 0.97, stat_str, transform=ax0.transAxes,
+                 fontsize=7, va="top", fontfamily="monospace",
+                 bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+        ax0.set_title(f"{var}  —  normalize() output", fontsize=11)
+        ax0.set_xlabel(f"{var} (normalized)")
+        ax0.set_ylabel("Density")
+        ax0.grid(True, alpha=0.3)
+
+        # ── col 1: CDF ───────────────────────────────────────────────────────
+        ax1 = axes[row, 1]
+        sv  = np.sort(vals)
+        cdf = np.arange(1, len(sv) + 1) / len(sv)
+        ax1.plot(sv, cdf, lw=1.5, color="royalblue")
+        for pct, col in [(0.05, "orange"), (0.50, "red"), (0.95, "orange")]:
+            i = min(np.searchsorted(cdf, pct), len(sv) - 1)
+            ax1.axvline(sv[i], color=col, ls=":", lw=1.2,
+                        label=f"p{int(pct*100)}={sv[i]:.3f}")
+        ax1.legend(fontsize=7)
+        ax1.set_title("CDF")
+        ax1.set_xlabel(f"{var} (normalized)")
+        ax1.set_ylabel("Cumulative probability")
+        ax1.grid(True, alpha=0.3)
+
+        # ── col 2: lat-weighted mean vs year ─────────────────────────────────
+        ax2 = axes[row, 2]
+        ts = lat_weighted_mean(da)
+        ax2.plot(da.year.values, ts.values, lw=1.8, color="darkblue")
+        ax2.axhline(0, color="gray", ls="--", lw=0.8, alpha=0.6)
+        ax2.set_title("Lat-weighted spatial mean vs year")
+        ax2.set_xlabel("Year")
+        ax2.set_ylabel(f"{var} — normalize()")
+        ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    print(f"[SAVED] {save_path}")
+    plt.close()
+
+
 def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
                             cond_vars, output_dir, device="cpu"):
     """Full diagnostic: data + encoder layer activations + scale/shift."""
@@ -561,6 +666,13 @@ def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
     # Load & normalize conditioning data using YOUR normalize()
     ds_raw = xr.open_dataset(cond_file)[cond_vars]
     ds_normed = ds_raw.map(normalize)
+
+    # ── Plot the actual normalized values fed into the encoder ────────────────
+    print("[INFO] Plotting encoder-input (normalize()) distributions...")
+    _plot_encoder_input_distributions(
+        ds_normed, cond_vars,
+        os.path.join(output_dir, "diag_encoder_input_distributions.png")
+    )
 
     # Pick ~10 representative years
     all_years = ds_normed.year.values

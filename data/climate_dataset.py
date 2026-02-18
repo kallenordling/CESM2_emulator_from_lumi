@@ -34,6 +34,23 @@ DENORM_FN = {
 # These functions transform the range of the data to [-1, 1]
 MIN_MAX_FN = {"TREFHT": lambda x: x}
 
+def norm_zscore(da: xr.DataArray) -> xr.DataArray:
+    """
+    Z-score normalization: (x - mean) / std, computed over all values globally.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Input data array.
+
+    Returns
+    -------
+    xr.DataArray
+        Normalized array with mean ≈ 0 and std ≈ 1, same shape and coordinates.
+    """
+    mu    = float(da.mean(skipna=True))
+    sigma = float(da.std(skipna=True))
+    return ((da - mu) / max(sigma, 1e-30)).astype("float32")
 
 def min_max_norm(x: Any, min_val: float, max_val: float) -> Any:
     """Normalizes a data array to the range [-1, 1]"""
@@ -165,7 +182,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
     if ds.name in ["CO2", "SO2", "SUL"]:
-        result = scale_quantile_transform(ds).fillna(0)
+        result = norm_zscore(ds).fillna(0) #scale_quantile_transform(ds).fillna(0)
         return result
 
     # Other variables use predefined normalization functions
