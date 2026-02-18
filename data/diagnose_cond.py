@@ -45,9 +45,9 @@ warnings.filterwarnings("ignore")
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     vals = da.values.flatten()
     if da.name == "SUL":
-        mask = vals > 1e-9
+        mask = vals > 1e-13
     elif da.name == "CO2":
-        mask = vals > 1e-3
+        mask = vals > 1e-8
     else:
         mask = vals > 0
     vals_log = np.log1p(vals)
