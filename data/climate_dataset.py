@@ -54,7 +54,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
         mask = vals > 1e-9
     if da.name == "CO2":
         mask = vals > 1e-3
-
+    vals=np.log1p(vals)
     mu    = float(vals[mask].mean())
     sigma = float(vals[mask].std())
     return ((da - mu) / max(sigma, 1e-30)).astype("float32")
