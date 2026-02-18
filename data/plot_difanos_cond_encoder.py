@@ -1042,7 +1042,6 @@ if __name__ == "__main__":
         cond_file=cond_file,
         n_components_target=n_components_target,
         n_components_cond=n_components_cond,
-        cond_only=cond_only,
     )
 
     print(f"[INFO] Dataset loaded — cond tensor shape: "
