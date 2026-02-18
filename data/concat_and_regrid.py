@@ -52,7 +52,8 @@ if len(ds_co2_ssp.year) > 0:
 ds_co2 = (xr.concat([ds_co2_hist, ds_co2_ssp], dim="year").sel(year=slice(1850,2100)))
 ds_co2.to_netcdf(DATA_DIR + "/emissions_co2_concat.nc")
 print(ds_co2)
-ds_co2_cumsum=ds_co2.cumsum(dim="year")
+ds_co2_cumsum=ds_co2.cumsum(dim="year",keep_attrs=True)
+ds_co2_cumsum['year'] = ds_co2['year']
 ds_co2_cumsum.assign_coords(year=("year", ds_co2.year.data))
 ds_co2 =ds_co2_cumsum
 ds_co2.to_netcdf(DATA_DIR + "/emissions_co2_cumsum.nc")
