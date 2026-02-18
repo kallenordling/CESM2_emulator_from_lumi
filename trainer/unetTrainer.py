@@ -442,15 +442,12 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
+                # Persist PCA objects so generation uses identical projection
+                "PCA": self.train_set.get_pca_state(),
             }
 
-            # If the directory doesn't exist already create it
             os.makedirs(self.save_dir, exist_ok=True)
-
-            # Create the save filename and add the epoch number
-            save_name = "best_epoch"+"" + f"_{epoch}.pt"
-
-            # Save the State dictionary to disk
+            save_name = "best_epoch" + "" + f"_{epoch}.pt"
             torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
     def save(self, epoch: int):
         """Saves the state of training to disk."""
@@ -462,6 +459,8 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
+                # Persist PCA objects so generation uses identical projection
+                "PCA": self.train_set.get_pca_state(),
             }
 
             # If the directory doesn't exist already create it
@@ -542,6 +541,12 @@ class UNetTrainer:
 
         # Restore global step
         self.global_step = checkpoint.get("Global Step", 0)
+
+        # Restore PCA projection (must happen before any load_data call that
+        # would otherwise refit from scratch on a different realization)
+        if "PCA" in checkpoint and checkpoint["PCA"] is not None:
+            self.train_set.set_pca_state(checkpoint["PCA"])
+            print("[INFO] Restored PCA state from checkpoint")
         print(self.global_step, self.accelerator.gradient_accumulation_steps)
         self.resume_global_step = (
                 self.global_step * self.accelerator.gradient_accumulation_steps

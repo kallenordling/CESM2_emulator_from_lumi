@@ -17,7 +17,7 @@ from tqdm import tqdm
 import pandas as pd
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
 # Local imports
-from data.climate_datasetv2 import ClimateDataset
+from data.climate_dataset import ClimateDataset
 from utils.gen_utils import generate_samples, generate_samples2
 from omegaconf import OmegaConf
 from models.video_net import UNetModel3D
@@ -96,7 +96,7 @@ def main(config: DictConfig) -> None:
         config.dataset,
         data_dir=config.data_dir,
         realizations=[realization_dict[config.gen_mode]],
-        target_vars=config.variables, cond_vars=["CO2", 'SUL'], cond_file=config.cond_file
+        target_vars=config.variables, cond_vars=["CO2", 'SO2'], cond_file=config.cond_file
     )
     scheduler: ContinuousDDPM = instantiate(config.scheduler)
     scheduler.set_timesteps(config.sample_steps)
@@ -107,6 +107,14 @@ def main(config: DictConfig) -> None:
     if config.gen_mode == "gen":
         # Load the model from the checkpoint
         chkpt: Checkpoint = torch.load(config.load_path, map_location="cpu", weights_only=False)
+
+        # ── Restore PCA projection used during training ───────────────────────
+        if "PCA" in chkpt and chkpt["PCA"] is not None:
+            dataset.set_pca_state(chkpt["PCA"])
+            print("[GENERATE] Restored PCA state from checkpoint")
+            # Re-apply PCA to the already-loaded conditioning tensor
+            # (dataset.load_data was called in __init__ before PCA state was set)
+            dataset.load_data(realization_dict[config.gen_mode])
 
         ema_model_sd = chkpt["EMA"]
 
@@ -144,16 +152,11 @@ def main(config: DictConfig) -> None:
             tensor_batch = tensor_batch.to(accelerator.device)
 
             if model is not None:
-                # Unwrap EMA: generate_samples2 expects the raw model,
-                # not the EMA wrapper (it asserts no .ema_model attr)
-                unwrapped = accelerator.unwrap_model(model)
-                raw_model = unwrapped.ema_model if hasattr(unwrapped, "ema_model") else unwrapped
-
                 gen_months, sal_co2, sal_sul = generate_samples2(
                     tensor_batch, tensor_batch,
                     scheduler=scheduler,
                     sample_steps=config.sample_steps,
-                    model=raw_model,
+                    model=model,
                     disable=True,
                     guidance_scale=guidance_scale,
                 )

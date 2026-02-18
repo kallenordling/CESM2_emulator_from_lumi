@@ -20,6 +20,8 @@ data:
     cond_file: emissions_co2_so2_regridded.nc  # e.g. ghg, aerosol, sst, etc.
     target_vars: ["TREFHT"]
     cond_vars: ["CO2",'SUL']
+    n_components_target: 80
+    n_components_cond: 30
 
 # Model (your diffusion / UNet wrapper that exposes loss_components or loss)
 
