@@ -67,8 +67,8 @@ ds_so2_ssp = ds_so2_ssp.sel(year=ds_so2_ssp.year > last_hist_year)
 # SO2 is annual rate (not cumulative), so just concat directly
 ds_so2 = xr.concat([ds_so2_hist, ds_so2_ssp], dim="year").sel(year=slice(1850,2100))
 print(f"  Combined SO2: {ds_so2.year.values[0]}–{ds_so2.year.values[-1]} ({len(ds_so2.year)} years)")
-print(ds_co2)
-print(ds_so2)
+print(ds_co2.year)
+print(ds_so2.year)
 # ── 3. Merge CO2 and SO2 into one dataset ───────────────────────────────────
 print("\nMerging CO2 and SO2...")
 ds_merged = xr.merge([ds_co2, ds_so2])
