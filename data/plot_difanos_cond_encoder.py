@@ -572,14 +572,10 @@ def _plot_encoder_input_distributions(ds_normed: xr.Dataset, cond_vars: list,
         zeros_pct = 100.0 * (vals == 0).sum() / max(n, 1)
 
         stat_str = (
-            f"n={n:,}
-"
-            f"min={vmin:.3e}  max={vmax:.3e}
-"
-            f"mean={vmean:.3e}  std={vstd:.3e}
-"
-            f"p01={p01:.3e}  p99={p99:.3e}
-"
+            f"n={n:,}\n"
+            f"min={vmin:.3e}  max={vmax:.3e}\n"
+            f"mean={vmean:.3e}  std={vstd:.3e}\n"
+            f"p01={p01:.3e}  p99={p99:.3e}\n"
             f"zeros={zeros_pct:.1f}%"
         )
 
