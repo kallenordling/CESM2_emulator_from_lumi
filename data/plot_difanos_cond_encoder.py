@@ -1,16 +1,30 @@
 """
 Conditioning Encoder Diagnostic
 ================================
-Uses the ACTUAL normalization from climate_dataset.py, plus alternatives.
+Uses ClimateDataset for all data loading and normalization — including PCA
+denoising if configured — so the diagnostic always reflects exactly what the
+model receives.
 
 Usage (data only — no model needed):
-    python diagnose_cond_encoder.py --cond_file /path/to/cond.nc --data_only
+    python diagnose_cond_encoder.py \\
+        --data_dir /path/to/data \\
+        --cond_file emissions.nc \\
+        --cond_vars CO2 SO2 \\
+        --target_vars TREFHT \\
+        --realizations r1i1p1f1 \\
+        --data_only
 
 Full diagnostic with trained model:
-    python diagnose_cond_encoder.py \
-        --checkpoint /path/to/best_epoch_1700.pt \
-        --cond_file /path/to/cond.nc \
-        --config_path ./configs/config_aero.yaml
+    python diagnose_cond_encoder.py \\
+        --data_dir /path/to/data \\
+        --cond_file emissions.nc \\
+        --checkpoint /path/to/best_epoch_1700.pt \\
+        --config_path ./configs/config_aero.yaml \\
+        --n_components_cond 40
+
+PCA options (both default to None = disabled):
+    --n_components_target N    PCA components for climate target fields
+    --n_components_cond   N    PCA components for CO2/SO2 conditioning maps
 """
 
 import argparse
@@ -25,13 +39,14 @@ import torch.nn as nn
 import xarray as xr
 
 # ─────────────────────────────────────────────
-# Import normalizations from YOUR climate_dataset.py
+# Import from climate_dataset.py
 # ─────────────────────────────────────────────
 from climate_dataset import (
+    ClimateDataset,
     scale_cumulative_linear,
     scale_emis_m1_p1_log10,
     scale_emis_0_1_log10,
-    scale_quantile_transform,   # NEW: sklearn QuantileTransformer
+    scale_quantile_transform,
     normalize,
 )
 
@@ -248,69 +263,149 @@ def plot_normalization_comparison(cond_ds, cond_vars, cached_normed, save_path):
     plt.close()
 
 
-def plot_spatial_maps(cond_ds, cond_vars, save_path):
+def plot_spatial_maps(dataset: ClimateDataset, save_path: str):
     """
-    Show spatial maps at early / late years for each var.
-    Reveals the ocean-zero problem and spatial structure.
+    Show spatial maps at representative years across the full processing pipeline:
+      Row 0 — Raw (straight from NetCDF, physical units)
+      Row 1 — Normalized, pre-PCA  (dataset.dataset_cond)
+      Row 2 — Model input, post-PCA (dataset.tensor_data_cond)   [only if PCA active]
+
+    This makes it immediately obvious what information the encoder actually sees.
     """
-    years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
-    years_to_show = [y for y in years_to_show if y in cond_ds.year.values]
+    ds_raw = xr.open_dataset(os.path.join(dataset.data_dir, dataset.cond_file))
+    ds_raw = ds_raw[dataset.cond_vars]
 
-    fig, axes = plt.subplots(len(cond_vars), len(years_to_show),
-                              figsize=(5 * len(years_to_show), 4 * len(cond_vars)))
-    if len(cond_vars) == 1:
-        axes = axes[np.newaxis, :]
-    if len(years_to_show) == 1:
-        axes = axes[:, np.newaxis]
+    all_years = dataset.dataset_cond.year.values
+    candidate_years = [all_years[0], 2015, 2050, all_years[-1]]
+    years_to_show = [y for y in candidate_years if y in all_years]
+    year_indices  = [int(np.where(all_years == y)[0][0]) for y in years_to_show]
 
-    for row, var in enumerate(cond_vars):
-        da = cond_ds[var]
-        vmin = float(da.min(skipna=True))
-        vmax = float(da.max(skipna=True))
+    pca_active = dataset._pca_cond is not None
+    n_rows = 3 if pca_active else 2
+    n_cols = len(years_to_show)
 
-        for col, yr in enumerate(years_to_show):
-            ax = axes[row, col]
-            data = da.sel(year=yr).values
-            im = ax.imshow(data, aspect='auto', cmap='viridis',
-                           vmin=vmin, vmax=vmax, origin='lower')
-            ax.set_title(f"{var} year={yr}\nmin={data.min():.2e} max={data.max():.2e}",
-                         fontsize=9)
+    # tensor_data_cond: (n_vars, T, H, W)
+    cond_np = dataset.tensor_data_cond.numpy()
+
+    for v_idx, var in enumerate(dataset.cond_vars):
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(5 * n_cols, 3.8 * n_rows))
+        if n_cols == 1:
+            axes = axes[:, np.newaxis]
+
+        row_labels = ["Raw (physical units)",
+                      "Normalized — pre-PCA  (dataset.dataset_cond)"]
+        if pca_active:
+            n_comps = dataset._pca_cond[v_idx].n_components_
+            var_pct = dataset._pca_cond[v_idx].explained_variance_ratio_.sum() * 100
+            row_labels.append(
+                f"Model input — post-PCA  ({n_comps} comps, {var_pct:.1f}% var)"
+            )
+
+        for col, (yr, t_idx) in enumerate(zip(years_to_show, year_indices)):
+            # ── Row 0: raw ────────────────────────────────────────────────────
+            raw_data = ds_raw[var].sel(year=yr).values if yr in ds_raw.year.values \
+                       else np.full_like(cond_np[v_idx, t_idx], np.nan)
+            ax = axes[0, col]
+            vmin_r, vmax_r = np.nanmin(raw_data), np.nanmax(raw_data)
+            im = ax.imshow(raw_data, aspect='auto', cmap='viridis',
+                           vmin=vmin_r, vmax=vmax_r, origin='lower')
+            ax.set_title(f"year={yr}\n"
+                         f"min={vmin_r:.2e}  max={vmax_r:.2e}", fontsize=8)
             plt.colorbar(im, ax=ax, shrink=0.8)
+            if col == 0:
+                ax.set_ylabel(row_labels[0], fontsize=9)
 
-    plt.suptitle("Raw spatial maps — check for ocean zeros / outlier cells", fontsize=14)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"[SAVED] {save_path}")
-    plt.close()
+            # ── Row 1: normalized pre-PCA ─────────────────────────────────────
+            norm_data = dataset.dataset_cond[var].sel(year=yr).values
+            ax = axes[1, col]
+            im = ax.imshow(norm_data, aspect='auto', cmap='RdBu_r',
+                           vmin=-1, vmax=1, origin='lower')
+            ax.set_title(f"min={norm_data.min():.3f}  max={norm_data.max():.3f}", fontsize=8)
+            plt.colorbar(im, ax=ax, shrink=0.8)
+            if col == 0:
+                ax.set_ylabel(row_labels[1], fontsize=9)
+
+            # ── Row 2: model input post-PCA ───────────────────────────────────
+            if pca_active:
+                model_data = cond_np[v_idx, t_idx]
+                ax = axes[2, col]
+                im = ax.imshow(model_data, aspect='auto', cmap='RdBu_r',
+                               vmin=-1, vmax=1, origin='lower')
+                ax.set_title(f"min={model_data.min():.3f}  max={model_data.max():.3f}",
+                             fontsize=8)
+                plt.colorbar(im, ax=ax, shrink=0.8)
+                if col == 0:
+                    ax.set_ylabel(row_labels[2], fontsize=9)
+
+        pca_tag = (f"  [PCA: {dataset._pca_cond[v_idx].n_components_} comps]"
+                   if pca_active else "")
+        fig.suptitle(f"{var} — Processing pipeline{pca_tag}", fontsize=14)
+        plt.tight_layout()
+        var_save = save_path.replace(".png", f"_{var}.png")
+        plt.savefig(var_save, dpi=150, bbox_inches='tight')
+        print(f"[SAVED] {var_save}")
+        plt.close()
+
+    ds_raw.close()
 
 
-def plot_spatial_maps_normalized(cond_ds, cond_vars, cached_normed, save_path):
+def plot_spatial_maps_normalized(dataset: ClimateDataset, cached_normed: dict,
+                                  save_path: str):
     """
-    Show spatial maps AFTER normalization at early / late years.
-    Uses pre-computed cached_normed[var][label] to avoid recomputation.
+    Show spatial maps AFTER each normalization method at representative years.
+    The top row always shows "★ ClimateDataset model input" (post-PCA), so the
+    reader can immediately compare every alternative to what the model actually sees.
     """
-    years_to_show = [cond_ds.year.values[0], 2015, 2050, cond_ds.year.values[-1]]
-    years_to_show = [y for y in years_to_show if y in cond_ds.year.values]
+    all_years = dataset.dataset_cond.year.values
+    candidate_years = [all_years[0], 2015, 2050, all_years[-1]]
+    years_to_show  = [y for y in candidate_years if y in all_years]
+    year_indices   = [int(np.where(all_years == y)[0][0]) for y in years_to_show]
+    cond_np = dataset.tensor_data_cond.numpy()   # (n_vars, T, H, W)
 
-    for var in cond_vars:
+    for v_idx, var in enumerate(dataset.cond_vars):
         methods = cached_normed[var]
-        n_methods = len(methods)
-        n_years = len(years_to_show)
+        n_methods = len(methods) + 1              # +1 for the ClimateDataset row
+        n_years   = len(years_to_show)
 
         fig, axes = plt.subplots(n_methods, n_years,
-                                  figsize=(5 * n_years, 3.5 * n_methods))
+                                 figsize=(5 * n_years, 3.5 * n_methods))
         if n_methods == 1:
             axes = axes[np.newaxis, :]
         if n_years == 1:
             axes = axes[:, np.newaxis]
 
-        for row, (label, normed) in enumerate(methods.items()):
+        pca_active = dataset._pca_cond is not None
+        pca_tag = ""
+        if pca_active:
+            n_comps = dataset._pca_cond[v_idx].n_components_
+            var_pct = dataset._pca_cond[v_idx].explained_variance_ratio_.sum() * 100
+            pca_tag = f"  PCA {n_comps} comps ({var_pct:.1f}% var)"
+        model_row_label = f"★ ClimateDataset model input{pca_tag}"
+
+        # ── Row 0: ClimateDataset model input (post-PCA) ──────────────────────
+        for col, (yr, t_idx) in enumerate(zip(years_to_show, year_indices)):
+            ax = axes[0, col]
+            data = cond_np[v_idx, t_idx]
+            im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
+                           vmin=-1, vmax=1, origin='lower')
+            ax.set_title(f"year={yr}\nmin={data.min():.3f}  max={data.max():.3f}",
+                         fontsize=8)
+            if col == 0:
+                ax.set_ylabel(model_row_label, fontsize=9, color='darkgreen',
+                              fontweight='bold')
+            plt.colorbar(im, ax=ax, shrink=0.8)
+
+        # ── Rows 1+: alternative normalization methods ─────────────────────────
+        for row_offset, (label, normed) in enumerate(methods.items()):
+            row = row_offset + 1
             if normed is None:
                 for col in range(n_years):
                     axes[row, col].text(0.5, 0.5, "Error",
-                                         transform=axes[row, col].transAxes,
-                                         ha='center', fontsize=8)
-                    axes[row, col].set_ylabel(label, fontsize=9)
+                                        transform=axes[row, col].transAxes,
+                                        ha='center', fontsize=8)
+                    if col == 0:
+                        axes[row, col].set_ylabel(label, fontsize=9)
                 continue
 
             for col, yr in enumerate(years_to_show):
@@ -318,13 +413,13 @@ def plot_spatial_maps_normalized(cond_ds, cond_vars, cached_normed, save_path):
                 data = normed.sel(year=yr).values
                 im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
                                vmin=-1, vmax=1, origin='lower')
-                ax.set_title(f"year={yr}\nmin={data.min():.3f} max={data.max():.3f}",
+                ax.set_title(f"year={yr}\nmin={data.min():.3f}  max={data.max():.3f}",
                              fontsize=8)
                 if col == 0:
                     ax.set_ylabel(label, fontsize=9)
                 plt.colorbar(im, ax=ax, shrink=0.8)
 
-        plt.suptitle(f"{var} — Normalized spatial maps (all methods, range [-1, 1])",
+        plt.suptitle(f"{var} — Normalised spatial maps  (all methods vs model input)",
                      fontsize=13)
         plt.tight_layout()
         var_save = save_path.replace(".png", f"_{var}.png")
@@ -455,18 +550,30 @@ def plot_embedding_pca(scale_vals, shift_vals, emission_levels, save_path):
 # Main routines
 # ─────────────────────────────────────────────
 
-def run_data_diagnostic(cond_file, cond_vars, output_dir):
-    """Normalization comparison — no model needed."""
-    ds = xr.open_dataset(cond_file)
-    ds = ds[cond_vars]
+def run_data_diagnostic(dataset: ClimateDataset, output_dir: str):
+    """Normalization comparison — no model needed.
 
-    # ── Print raw stats ──
+    Uses ``dataset.dataset_cond`` (the normalised pre-PCA xarray) for the
+    multi-method comparison, and ``dataset.tensor_data_cond`` (post-PCA,
+    exactly what the encoder sees) for distribution and spatial-pipeline plots.
+    """
+    # Open raw file for physical-unit stats and the raw spatial row.
+    # Filter to the same year selection as dataset.dataset_cond so all
+    # downstream .sel(year=...) calls are consistent.
+    cond_file_path = os.path.join(dataset.data_dir, dataset.cond_file)
+    selected_years = dataset.dataset_cond.year.values
+    ds_raw = xr.open_dataset(cond_file_path)[dataset.cond_vars].sel(
+        year=selected_years, method="nearest"
+    )
+    cond_vars = dataset.cond_vars
+
+    # ── Print raw stats ───────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("RAW DATA STATISTICS")
     print("=" * 60)
     for var in cond_vars:
-        da = ds[var]
-        ts = lat_weighted_mean(da)  # latitude-weighted
+        da = ds_raw[var]
+        ts = lat_weighted_mean(da)
         vals = da.values.flatten()
         vals = vals[~np.isnan(vals)]
 
@@ -483,23 +590,51 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
         print(f"  First year lat-wtd mean: {float(ts.isel(year=0)):.6e}")
         print(f"  Last  year lat-wtd mean: {float(ts.isel(year=-1)):.6e}")
 
-    # ── Compute ALL normalizations ONCE per variable ──
+    # ── ClimateDataset model-input stats (post-PCA) ───────────────────────────
+    pca_active = dataset._pca_cond is not None
+    cond_np = dataset.tensor_data_cond.numpy()   # (n_vars, T, H, W)
+    all_years = dataset.dataset_cond.year.values
+
+    print("\n" + "=" * 60)
+    print("CLIMATADATASET MODEL-INPUT STATS (post-PCA)" if pca_active
+          else "CLIMATADATASET NORMALISED STATS")
+    print("=" * 60)
+    for v_idx, var in enumerate(cond_vars):
+        vals = cond_np[v_idx].ravel()
+        ts   = cond_np[v_idx].mean(axis=(1, 2))
+        pca_info = ""
+        if pca_active:
+            n_comps = dataset._pca_cond[v_idx].n_components_
+            var_pct = dataset._pca_cond[v_idx].explained_variance_ratio_.sum() * 100
+            pca_info = f"  PCA: {n_comps} comps  {var_pct:.2f}% var retained"
+        print(f"\n{var}:{pca_info}")
+        print(f"  min={vals.min():.4f}  max={vals.max():.4f}  "
+              f"mean={vals.mean():.4f}  std={vals.std():.4f}")
+        print(f"  temporal mean range: [{ts.min():.4f}, {ts.max():.4f}]")
+
+    # ── Compute alternative normalizations on raw data for comparison ─────────
+    # dataset.dataset_cond already holds normalize() output — add it as the
+    # first (starred) entry so the comparison is centred on the actual method.
     method_fns = OrderedDict([
-        ("★ normalize() [used by encoder]", normalize),
-        ("QuantileTransformer",             scale_quantile_transform),
-        ("log10+quantile",                  scale_emis_m1_p1_log10),
-        ("spatial-mean linear",             scale_cumulative_linear),
-        ("sqrt + min-max",                  scale_sqrt_m1_p1),
-        ("linear pctile-clip (1-99%)",      scale_linear_pctile_clip),
-        ("spatial-mean-first",              scale_spatial_mean_linear),
-        ("z-score (μ=0, σ=1)",              scale_zscore),
+        ("QuantileTransformer",        scale_quantile_transform),
+        ("log10+quantile",             scale_emis_m1_p1_log10),
+        ("spatial-mean linear",        scale_cumulative_linear),
+        ("sqrt + min-max",             scale_sqrt_m1_p1),
+        ("linear pctile-clip (1-99%)", scale_linear_pctile_clip),
+        ("spatial-mean-first",         scale_spatial_mean_linear),
+        ("z-score (μ=0, σ=1)",         scale_zscore),
     ])
 
-    # cached_normed[var][label] = xr.DataArray
+    # cached_normed[var][label] = xr.DataArray  (all applied to raw ds_raw)
     cached_normed = {}
     for var in cond_vars:
-        da = ds[var]
+        da = ds_raw[var]
         cached_normed[var] = OrderedDict()
+
+        # First entry: the actual ClimateDataset normalization (from xr_data)
+        cached_normed[var]["★ normalize() [ClimateDataset — pre-PCA]"] = \
+            dataset.dataset_cond[var]
+
         for label, fn in method_fns.items():
             print(f"  Computing {label} for {var}...", end=" ", flush=True)
             try:
@@ -509,20 +644,19 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
                 cached_normed[var][label] = None
                 print(f"ERROR: {e}")
 
-    # ── Print normalized stats ──
+    # ── Print normalized stats ────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("NORMALIZATION COMPARISON (latitude-weighted spatial-mean time series)")
     print("=" * 60)
     for var in cond_vars:
         print(f"\n{var}:")
         for label, normed in cached_normed[var].items():
-
             if normed is None:
                 print(f"  {label}: SKIPPED (error)")
                 continue
-            ts = lat_weighted_mean(normed)   # latitude-weighted
+            ts = lat_weighted_mean(normed)
             future = ts.sel(year=slice(2015, 2100))
-            hist = ts.sel(year=slice(1850, 2014))
+            hist   = ts.sel(year=slice(1850, 2014))
             print(f"\n  {label}:")
             print(f"    Full:       [{float(ts.min()):.4f}, {float(ts.max()):.4f}]")
             print(f"    Historical: [{float(hist.min()):.4f}, {float(hist.max()):.4f}]  "
@@ -531,37 +665,62 @@ def run_data_diagnostic(cond_file, cond_vars, output_dir):
                   f"delta={float(future.max()) - float(future.min()):.4f}")
             print(f"    Future std: {float(future.std()):.4f}")
 
-    # ── Plots (all use cached results, no recomputation) ──
-    plot_normalization_comparison(ds, cond_vars, cached_normed,
-                                  os.path.join(output_dir, "diag_normalization.png"))
-    plot_spatial_maps(ds, cond_vars,
-                      os.path.join(output_dir, "diag_spatial_maps.png"))
-    plot_spatial_maps_normalized(ds, cond_vars, cached_normed,
-                      os.path.join(output_dir, "diag_spatial_maps_normalized.png"))
+    # ── Plots ─────────────────────────────────────────────────────────────────
+    plot_normalization_comparison(
+        ds_raw, cond_vars, cached_normed,
+        os.path.join(output_dir, "diag_normalization.png"),
+    )
+    plot_spatial_maps(
+        dataset,
+        os.path.join(output_dir, "diag_spatial_maps.png"),
+    )
+    plot_spatial_maps_normalized(
+        dataset, cached_normed,
+        os.path.join(output_dir, "diag_spatial_maps_normalized.png"),
+    )
+    _plot_encoder_input_distributions(
+        dataset,
+        os.path.join(output_dir, "diag_encoder_input_distributions.png"),
+    )
+
+    ds_raw.close()
 
 
-def _plot_encoder_input_distributions(ds_normed: xr.Dataset, cond_vars: list,
-                                       save_path: str):
+def _plot_encoder_input_distributions(dataset: ClimateDataset, save_path: str):
     """
-    Plot the distribution of the values that are ACTUALLY fed into the encoder
-    (i.e. after ds_raw.map(normalize)), alongside the lat-weighted mean time
-    series and a per-decade box plot.
+    Plot the distribution of the values ACTUALLY fed into the encoder:
+    dataset.tensor_data_cond (post-PCA if enabled).
 
     One row per conditioning variable; three columns:
       [density histogram | CDF | lat-weighted mean vs year]
+
+    A second dashed overlay shows the pre-PCA normalised values from
+    dataset.dataset_cond so the effect of PCA denoising is visible.
     """
+    cond_vars = dataset.cond_vars
+    all_years = dataset.dataset_cond.year.values
+    pca_active = dataset._pca_cond is not None
+    cond_np = dataset.tensor_data_cond.numpy()   # (n_vars, T, H, W)
+
     n_vars = len(cond_vars)
     fig, axes = plt.subplots(n_vars, 3, figsize=(18, 5 * n_vars), squeeze=False)
+    pca_tag = ""
+    if pca_active:
+        pca_tag = " + PCA denoising"
     fig.suptitle(
-        "Encoder input distributions  —  ds_raw.map(normalize())\n"
-        "all years × all grid points",
+        f"Encoder input distributions — ClimateDataset.tensor_data_cond"
+        f"  (normalize(){pca_tag})\nall years × all grid points",
         fontsize=14, fontweight="bold",
     )
 
     for row, var in enumerate(cond_vars):
-        da   = ds_normed[var]
-        vals = da.values.ravel().astype(np.float64)
+        # ── Post-PCA values (what the encoder actually receives) ──────────────
+        vals = cond_np[row].ravel().astype(np.float64)
         vals = vals[~np.isnan(vals)]
+
+        # ── Pre-PCA values (normalized xarray, before PCA) ───────────────────
+        vals_prenorm = dataset.dataset_cond[var].values.ravel().astype(np.float64)
+        vals_prenorm = vals_prenorm[~np.isnan(vals_prenorm)]
 
         n       = len(vals)
         vmean   = vals.mean()
@@ -580,44 +739,65 @@ def _plot_encoder_input_distributions(ds_normed: xr.Dataset, cond_vars: list,
             f"zeros={zeros_pct:.1f}%"
         )
 
-        # ── col 0: density histogram ─────────────────────────────────────────
+        # ── col 0: density histogram ──────────────────────────────────────────
         ax0 = axes[row, 0]
         ax0.hist(vals, bins=100, color="royalblue", edgecolor="none",
-                 alpha=0.85, density=True)
+                 alpha=0.75, density=True, histtype='stepfilled',
+                 label="model input (post-PCA)" if pca_active else "model input")
+        if pca_active:
+            ax0.hist(vals_prenorm, bins=100, color="orange", edgecolor="none",
+                     alpha=0.45, density=True, histtype='stepfilled',
+                     label="pre-PCA normalised")
         ax0.axvline(vmean,   color="red",    ls="--", lw=1.5, label="mean")
         ax0.axvline(vmedian, color="orange", ls="--", lw=1.5, label="median")
         ax0.legend(fontsize=8)
         ax0.text(0.02, 0.97, stat_str, transform=ax0.transAxes,
                  fontsize=7, va="top", fontfamily="monospace",
                  bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-        ax0.set_title(f"{var}  —  normalize() output", fontsize=11)
-        ax0.set_xlabel(f"{var} (normalized)")
+        ax0.set_title(f"{var}  —  encoder input distribution", fontsize=11)
+        ax0.set_xlabel(f"{var} (normalised)")
         ax0.set_ylabel("Density")
         ax0.grid(True, alpha=0.3)
 
-        # ── col 1: CDF ───────────────────────────────────────────────────────
+        # ── col 1: CDF ────────────────────────────────────────────────────────
         ax1 = axes[row, 1]
         sv  = np.sort(vals)
         cdf = np.arange(1, len(sv) + 1) / len(sv)
-        ax1.plot(sv, cdf, lw=1.5, color="royalblue")
+        ax1.plot(sv, cdf, lw=1.5, color="royalblue",
+                 label="model input (post-PCA)" if pca_active else "model input")
+        if pca_active:
+            sv_pre = np.sort(vals_prenorm)
+            cdf_pre = np.arange(1, len(sv_pre) + 1) / len(sv_pre)
+            ax1.plot(sv_pre, cdf_pre, lw=1.5, color="orange", ls="--",
+                     label="pre-PCA normalised")
         for pct, col in [(0.05, "orange"), (0.50, "red"), (0.95, "orange")]:
             i = min(np.searchsorted(cdf, pct), len(sv) - 1)
             ax1.axvline(sv[i], color=col, ls=":", lw=1.2,
                         label=f"p{int(pct*100)}={sv[i]:.3f}")
         ax1.legend(fontsize=7)
         ax1.set_title("CDF")
-        ax1.set_xlabel(f"{var} (normalized)")
+        ax1.set_xlabel(f"{var} (normalised)")
         ax1.set_ylabel("Cumulative probability")
         ax1.grid(True, alpha=0.3)
 
-        # ── col 2: lat-weighted mean vs year ─────────────────────────────────
+        # ── col 2: spatial mean vs year ───────────────────────────────────────
         ax2 = axes[row, 2]
-        ts = lat_weighted_mean(da)
-        ax2.plot(da.year.values, ts.values, lw=1.8, color="darkblue")
+        # Post-PCA: mean over H, W dims
+        ts_post = cond_np[row].mean(axis=(1, 2))      # (T,)
+        ax2.plot(all_years, ts_post, lw=1.8, color="royalblue",
+                 label="model input (post-PCA)" if pca_active else "model input")
+        if pca_active:
+            # Pre-PCA spatial mean
+            ts_pre = dataset.dataset_cond[var].mean(
+                dim=[d for d in dataset.dataset_cond[var].dims if d != "year"]
+            ).values
+            ax2.plot(all_years, ts_pre, lw=1.5, color="orange", ls="--",
+                     label="pre-PCA normalised")
         ax2.axhline(0, color="gray", ls="--", lw=0.8, alpha=0.6)
-        ax2.set_title("Lat-weighted spatial mean vs year")
+        ax2.set_title("Spatial mean vs year")
         ax2.set_xlabel("Year")
-        ax2.set_ylabel(f"{var} — normalize()")
+        ax2.set_ylabel(f"{var} (normalised)")
+        ax2.legend(fontsize=8)
         ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -626,12 +806,16 @@ def _plot_encoder_input_distributions(ds_normed: xr.Dataset, cond_vars: list,
     plt.close()
 
 
-def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
-                            cond_vars, output_dir, device="cpu"):
-    """Full diagnostic: data + encoder layer activations + scale/shift."""
+def run_encoder_diagnostic(checkpoint_path: str, dataset: ClimateDataset,
+                            config_path: str, output_dir: str, device: str = "cpu"):
+    """Full diagnostic: data + encoder layer activations + scale/shift.
 
-    # First run data diagnostic
-    run_data_diagnostic(cond_file, cond_vars, output_dir)
+    Samples conditioning tensors directly from ``dataset.tensor_data_cond``
+    (the same post-PCA data the model sees during training/generation) rather
+    than re-normalising from the raw file.
+    """
+    # First run data diagnostic using the same dataset
+    run_data_diagnostic(dataset, output_dir)
 
     # Load model
     from omegaconf import OmegaConf
@@ -651,6 +835,11 @@ def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
         model.load_state_dict(chkpt["Unet"], strict=False)
         print("[INFO] Loaded Unet weights")
 
+    # Restore PCA state from checkpoint if present
+    if "PCA" in chkpt and chkpt["PCA"] is not None:
+        dataset.set_pca_state(chkpt["PCA"])
+        print("[INFO] Restored PCA state from checkpoint")
+
     model.eval().to(device)
 
     if model.cond_encoder is None:
@@ -660,42 +849,36 @@ def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
     # Hook up the encoder
     probe = EncoderProbe(model.cond_encoder, model.cond_scale, model.cond_shift)
 
-    # Load & normalize conditioning data using YOUR normalize()
-    ds_raw = xr.open_dataset(cond_file)[cond_vars]
-    ds_normed = ds_raw.map(normalize)
-
-    # ── Plot the actual normalized values fed into the encoder ────────────────
-    print("[INFO] Plotting encoder-input (normalize()) distributions...")
+    # ── Plot the actual normalised/PCA values fed into the encoder ────────────
+    print("[INFO] Plotting encoder-input distributions...")
     _plot_encoder_input_distributions(
-        ds_normed, cond_vars,
-        os.path.join(output_dir, "diag_encoder_input_distributions.png")
+        dataset,
+        os.path.join(output_dir, "diag_encoder_input_distributions.png"),
     )
 
-    # Pick ~10 representative years
-    all_years = ds_normed.year.values
-    idx = np.linspace(0, len(all_years) - 1, 10, dtype=int)
-    sample_years = all_years[idx]
+    # ── Sample ~10 representative years from tensor_data_cond ─────────────────
+    # tensor_data_cond: (n_vars, T, H, W) — this IS what the encoder receives
+    all_years = dataset.dataset_cond.year.values
+    cond_np   = dataset.tensor_data_cond.numpy()      # (n_vars, T, H, W)
+    n_vars, T, H, W = cond_np.shape
+
+    t_indices = np.linspace(0, T - 1, 10, dtype=int)
+    sample_years = all_years[t_indices]
     print(f"[INFO] Sampling years: {sample_years}")
 
     all_layer_acts = OrderedDict()
     scale_vals, shift_vals = [], []
     emission_levels, sample_labels = [], []
 
-    for year in sample_years:
-        year_ds = ds_normed.sel(year=[year])
+    for t_idx, year in zip(t_indices, sample_years):
+        # Extract single time step: (n_vars, 1, H, W) → unsqueeze → (1, n_vars, 1, H, W)
+        frame = cond_np[:, t_idx: t_idx + 1, :, :]            # (n_vars, 1, H, W)
+        cond_tensor = torch.tensor(frame, dtype=torch.float32).unsqueeze(0).to(device)
 
-        # Stack cond_vars into [C, T, H, W] -> [1, C, T, H, W]
-        arrays = [year_ds[v].values for v in cond_vars]
-        stacked = np.stack(arrays, axis=0)  # [C, T, H, W] or [C, H, W]
-        if stacked.ndim == 3:
-            stacked = stacked[:, np.newaxis, :, :]  # add T dim
-        cond_tensor = torch.tensor(stacked, dtype=torch.float32).unsqueeze(0).to(device)
-
-        # Use lat-weighted mean of the first cond_var as the emission level label
-        emis_da = year_ds[cond_vars[0]]
-        emis_level = float(lat_weighted_mean(emis_da))
+        # Use spatial mean of first cond_var as emission-level label
+        emis_level = float(cond_np[0, t_idx].mean())
         emission_levels.append(emis_level)
-        sample_labels.append(f"Year {year}\n(lat-wtd={emis_level:.3f})")
+        sample_labels.append(f"Year {year}\n(mean={emis_level:.3f})")
 
         probe.clear()
         with torch.no_grad():
@@ -712,15 +895,15 @@ def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
                 all_layer_acts[layer_name] = []
             all_layer_acts[layer_name].append(act)
 
-    # ── Plots ──
+    # ── Plots ──────────────────────────────────────────────────────────────────
     plot_encoder_activations(all_layer_acts, sample_labels,
-                              os.path.join(output_dir, "diag_encoder_layers.png"))
+                             os.path.join(output_dir, "diag_encoder_layers.png"))
     plot_scale_shift(scale_vals, shift_vals, emission_levels,
-                      os.path.join(output_dir, "diag_scale_shift.png"))
+                     os.path.join(output_dir, "diag_scale_shift.png"))
     plot_embedding_pca(scale_vals, shift_vals, emission_levels,
-                        os.path.join(output_dir, "diag_embedding_pca.png"))
+                       os.path.join(output_dir, "diag_embedding_pca.png"))
 
-    # ── Summary ──
+    # ── Summary ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("ENCODER DIAGNOSTIC SUMMARY")
     print("=" * 60)
@@ -760,26 +943,123 @@ def run_encoder_diagnostic(checkpoint_path, cond_file, config_path,
 # CLI
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Diagnose conditioning encoder")
-    parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--cond_file", type=str, required=True,
-                        help="Path to conditioning NetCDF file")
-    parser.add_argument("--config_path", type=str, default="./configs/config_aero.yaml")
-    parser.add_argument("--cond_vars", nargs="+", default=["CO2", "SO2"])
+    parser = argparse.ArgumentParser(
+        description="Diagnose conditioning encoder — reads dataset params from config_aero.yaml",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # ── Config (primary source of dataset params) ─────────────────────────────
+    parser.add_argument("--config_path", type=str, default="./configs/config_aero.yaml",
+                        help="Path to config_aero.yaml (provides data_dir, cond_file, "
+                             "variables, dataset._target_, etc.)")
+
+    # ── Optional overrides (take priority over config when supplied) ──────────
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Override config.data_dir")
+    parser.add_argument("--cond_file", type=str, default=None,
+                        help="Override config.cond_file (filename relative to data_dir)")
+    parser.add_argument("--cond_vars", nargs="+", default=None,
+                        help="Override conditioning variables, e.g. CO2 SO2")
+    parser.add_argument("--target_vars", nargs="+", default=None,
+                        help="Override target variables, e.g. TREFHT")
+    parser.add_argument("--realizations", nargs="+", default=None,
+                        help="Override realization(s) to load")
+
+    # ── PCA options ───────────────────────────────────────────────────────────
+    parser.add_argument("--n_components_target", type=int, default=None,
+                        help="PCA components for target fields (None = disabled)")
+    parser.add_argument("--n_components_cond", type=int, default=None,
+                        help="PCA components for conditioning fields (None = disabled)")
+
+    # ── Model / run options ───────────────────────────────────────────────────
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to model checkpoint (.pt) — omit for data-only mode")
     parser.add_argument("--output_dir", type=str, default="./diagnostics")
-    parser.add_argument("--data_only", action="store_true")
+    parser.add_argument("--data_only", action="store_true",
+                        help="Run data diagnostics only (no model or target files needed)")
     parser.add_argument("--device", type=str, default="cpu")
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # ── Load config_aero.yaml ─────────────────────────────────────────────────
+    from omegaconf import OmegaConf
+    from hydra.utils import instantiate
+
+    print(f"[INFO] Loading config: {args.config_path}")
+    cfg = OmegaConf.load(args.config_path)
+
+    # Dataset lives at cfg.data.train
+    ds_cfg = cfg.data.train
+
+    # ── Resolve each param: config value is default, CLI flag overrides ───────
+    data_dir     = args.data_dir     or str(ds_cfg.data_dir)
+    cond_file    = args.cond_file    or str(ds_cfg.cond_file)
+    cond_vars    = args.cond_vars    or list(OmegaConf.to_object(ds_cfg.cond_vars))
+    target_vars  = args.target_vars  or list(OmegaConf.to_object(ds_cfg.target_vars))
+    # Use only the first realization for diagnostics to keep it fast
+    realizations = (args.realizations
+                    or [list(OmegaConf.to_object(ds_cfg.realizations))[0]])
+
+    # PCA: config values are the default; CLI can override to a different N or
+    # pass 0 to explicitly disable (0 is treated as None = disabled).
+    def _pca(cli_val, cfg_val):
+        if cli_val is not None:
+            return cli_val if cli_val > 0 else None
+        return int(cfg_val) if cfg_val else None
+
+    n_components_target = _pca(args.n_components_target,
+                                ds_cfg.get("n_components_target"))
+    n_components_cond   = _pca(args.n_components_cond,
+                                ds_cfg.get("n_components_cond"))
+
+    print(f"[INFO] data_dir            = {data_dir}")
+    print(f"[INFO] cond_file           = {cond_file}")
+    print(f"[INFO] cond_vars           = {cond_vars}")
+    print(f"[INFO] target_vars         = {target_vars}")
+    print(f"[INFO] realizations        = {realizations}")
+    print(f"[INFO] n_components_target = {n_components_target}")
+    print(f"[INFO] n_components_cond   = {n_components_cond}")
+
+    # ── Build ClimateDataset via hydra instantiate (mirrors generate_ssp370.py) ─
+    # cond_only=True skips loading target realization NetCDFs, which is all we
+    # need for --data_only mode and avoids needing every realization on disk.
+    cond_only = args.data_only or (args.checkpoint is None)
+    print(f"[INFO] Building ClimateDataset via hydra instantiate "
+          f"(cond_only={cond_only})...")
+
+    dataset = instantiate(
+        ds_cfg,                        # _target_ + fixed kwargs from config
+        data_dir=data_dir,
+        realizations=realizations,
+        target_vars=target_vars,
+        cond_vars=cond_vars,
+        cond_file=cond_file,
+        n_components_target=n_components_target,
+        n_components_cond=n_components_cond,
+        cond_only=cond_only,
+    )
+
+    print(f"[INFO] Dataset loaded — cond tensor shape: "
+          f"{tuple(dataset.tensor_data_cond.shape)}  (n_vars, T, H, W)")
+    if dataset._pca_cond is not None:
+        for v_idx, var in enumerate(dataset.cond_vars):
+            pca = dataset._pca_cond[v_idx]
+            print(f"[INFO] PCA cond/{var}: {pca.n_components_} comps, "
+                  f"{pca.explained_variance_ratio_.sum()*100:.2f}% var")
+
+    # ── Run diagnostics ───────────────────────────────────────────────────────
     if args.data_only or args.checkpoint is None:
-        run_data_diagnostic(args.cond_file, args.cond_vars, args.output_dir)
+        run_data_diagnostic(dataset, args.output_dir)
     else:
         run_encoder_diagnostic(
-            args.checkpoint, args.cond_file, args.config_path,
-            args.cond_vars, args.output_dir, args.device,
+            args.checkpoint, dataset, args.config_path,
+            args.output_dir, args.device,
         )
 
     print(f"\n[DONE] Diagnostics saved to: {args.output_dir}")
