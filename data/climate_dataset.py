@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from functools import lru_cache
 
 from omegaconf import OmegaConf
@@ -50,7 +50,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
         Normalized array with mean ≈ 0 and std ≈ 1, same shape and coordinates.
     """
     vals=da.values.flatten()
-    mask = vals > 1e-5
+    mask = vals > 1e-7
 
     mu    = float(vals[mask].mean())
     sigma = float(vals[mask].std())
@@ -223,7 +223,7 @@ def apply_pca_denoise(data: np.ndarray, pca: PCA) -> np.ndarray:
 
 def pca_denoise_dataset(
     tensor: torch.Tensor,           # (n_vars, T, H, W)
-    n_components: int,
+    n_components: Union[int, list[int]],
     var_names: Optional[list] = None,
     pca_objects: Optional[list] = None,
 ) -> tuple[torch.Tensor, list[PCA]]:
@@ -235,10 +235,14 @@ def pca_denoise_dataset(
     at generation time).
 
     Args:
-        tensor:      Shape ``(n_vars, T, H, W)``.
-        n_components: Components to retain (only used when fitting).
-        var_names:   Optional list of variable names for diagnostic prints.
-        pca_objects: Pre-fitted PCA objects or ``None``.
+        tensor:       Shape ``(n_vars, T, H, W)``.
+        n_components: Components to retain when fitting.  Pass a single ``int``
+                      to use the same count for every channel, or a ``list``
+                      of ints (one per channel) for per-channel control.
+                      e.g. ``[10, 40]`` keeps 10 EOFs for CO2 and 40 for SO2.
+                      Only used when ``pca_objects`` is ``None``.
+        var_names:    Optional list of variable names for diagnostic prints.
+        pca_objects:  Pre-fitted PCA objects or ``None``.
 
     Returns:
         denoised_tensor: Same shape as input.
@@ -246,6 +250,18 @@ def pca_denoise_dataset(
     """
     n_vars = tensor.shape[0]
     var_names = var_names or [str(i) for i in range(n_vars)]
+
+    # Normalise to a per-channel list
+    if isinstance(n_components, int):
+        n_components_list = [n_components] * n_vars
+    else:
+        if len(n_components) != n_vars:
+            raise ValueError(
+                f"n_components has {len(n_components)} entries but tensor has "
+                f"{n_vars} channels.  Supply one value per channel or a single int."
+            )
+        n_components_list = list(n_components)
+
     np_data = tensor.numpy()
     denoised = np.empty_like(np_data)
     fitted_pcas: list[PCA] = []
@@ -253,7 +269,7 @@ def pca_denoise_dataset(
     for v in range(n_vars):
         channel = np_data[v]  # (T, H, W)
         if pca_objects is None:
-            recon, pca = fit_pca_denoise(channel, n_components, var_names[v])
+            recon, pca = fit_pca_denoise(channel, n_components_list[v], var_names[v])
             fitted_pcas.append(pca)
         else:
             recon = apply_pca_denoise(channel, pca_objects[v])
@@ -313,73 +329,110 @@ class ClimateDataset(Dataset):
         target_vars: list[str],
         cond_file: str,
         cond_vars: list[str],
-        # ── PCA denoising (set to None to disable) ──────────────────────────
-        n_components_target: Optional[int] = None,
-        n_components_cond: Optional[int] = None,
+        # ── PCA denoising ────────────────────────────────────────────────────
+        # Pass None to disable, a single int to use the same count for every
+        # channel, or a list of ints (one per variable) for per-channel control.
+        # e.g.  n_components_cond=[10, 40]  → 10 EOFs for CO2, 40 for SO2
+        n_components_target: Optional[Union[int, list[int]]] = None,
+        n_components_cond:   Optional[Union[int, list[int]]] = None,
+        # ── Set True to skip loading target climate files (diagnostics only) ─
+        cond_only: bool = False,
     ):
         self.seq_len = seq_len
         self.realizations = realizations
-
         self.data_dir = data_dir
+        self.cond_only = cond_only
 
         # Necessary to convert vars into a Python list
         self.vars = OmegaConf.to_object(target_vars) if not isinstance(target_vars, list) else target_vars
         self.cond_vars = OmegaConf.to_object(cond_vars) if not isinstance(cond_vars, list) else cond_vars
 
-        # PCA configuration and state
-        # n_components_* controls how many EOFs to retain (None = PCA off)
-        self.n_components_target = n_components_target
-        self.n_components_cond = n_components_cond
+        # Normalise n_components_* to a list (one entry per channel) or None.
+        # This is done once here so load_data always receives a consistent type.
+        self.n_components_target = self._norm_n_components(
+            n_components_target, len(self.vars), "target"
+        )
+        self.n_components_cond = self._norm_n_components(
+            n_components_cond, len(self.cond_vars), "cond"
+        )
+
         # Fitted PCA objects – populated on first load_data call, then reused
         self._pca_target: Optional[list[PCA]] = None
         self._pca_cond: Optional[list[PCA]] = None
 
         # Store one dataset (out of memory) as an xarray dataset for metadata
         # Store a different dataset as a torch tensor for speed
-        self.xr_data: xr.Dataset
-        self.tensor_data: torch.Tensor
+        self.xr_data: Optional[xr.Dataset] = None
+        self.tensor_data: Optional[torch.Tensor] = None
+        self.lats = None
         self.cond_file = cond_file
         # Load an example realization right off the bat
         self.load_data(self.realizations[0])
-        self.lats = 0
+
+    @staticmethod
+    def _norm_n_components(
+        value: Optional[Union[int, list[int]]],
+        n_vars: int,
+        label: str,
+    ) -> Optional[list[int]]:
+        """Normalise a PCA n_components spec to a per-channel list or None.
+
+        Accepts:
+          None          → PCA disabled, returns None
+          int           → same count for every channel
+          list[int]     → must match n_vars; returned as-is
+        """
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return [int(value)] * n_vars
+        lst = list(value)          # handles ListConfig from OmegaConf
+        lst = [int(v) for v in lst]
+        if len(lst) != n_vars:
+            raise ValueError(
+                f"n_components_{label} has {len(lst)} entries but there are "
+                f"{n_vars} {label} variable(s).  "
+                f"Supply one value per channel or a single int."
+            )
+        return lst
 
     def estimate_num_batches(self, batch_size: int) -> int:
         """Estimates the number of batches in the dataset."""
         return len(self) * len(self.realizations) // batch_size
 
     def load_data(self, realization: str):
-        """Loads the data from the specified paths and returns it as an xarray Dataset."""
+        """Loads the data from the specified paths and returns it as an xarray Dataset.
 
-        realization_dir = os.path.join(self.data_dir, realization, "*.nc")
-
+        When ``self.cond_only`` is True the target climate realization files
+        are skipped entirely, which is useful for diagnostics and tools that
+        only need the conditioning data.
+        """
         hist_years = list(range(1850, 2015, 5))  # every 5th year
         future_years = list(range(2015, 2101))   # every year
         selected_years = hist_years + future_years
 
-        dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
-        self.lats = dataset.lat
-        # Only select the variables we are interested in
-        dataset = dataset[self.vars]
+        # ── Target climate data (skipped in cond_only mode) ──────────────────
+        if not self.cond_only:
+            realization_dir = os.path.join(self.data_dir, realization, "*.nc")
+            dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
+            self.lats = dataset.lat
+            dataset = dataset[self.vars]
+            self.xr_data = dataset.map(preprocess).map(normalize).sel(year=selected_years)
+            self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
 
-        # Apply preprocessing and normalization
-        self.xr_data = dataset.map(preprocess).map(normalize)#.sel(year=selected_years)
+            if self.n_components_target is not None:
+                self.tensor_data, self._pca_target = pca_denoise_dataset(
+                    self.tensor_data,
+                    n_components=self.n_components_target,
+                    var_names=self.vars,
+                    pca_objects=self._pca_target,
+                )
 
-        self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
-
-        # ── PCA denoising on target ──────────────────────────────────────────
-        if self.n_components_target is not None:
-            # tensor_data shape: (n_vars, T, H, W)
-            self.tensor_data, self._pca_target = pca_denoise_dataset(
-                self.tensor_data,
-                n_components=self.n_components_target,
-                var_names=self.vars,
-                pca_objects=self._pca_target,   # None on first call → fits
-            )
-
+        # ── Conditioning data (always loaded) ────────────────────────────────
         cond_file = os.path.join(self.data_dir, self.cond_file)
         self.dataset_cond = xr.open_dataset(cond_file)
         self.dataset_cond = self.dataset_cond[self.cond_vars]
-        self.dataset_cond = self.dataset_cond.map(normalize)#.sel(year=selected_years)
+        self.dataset_cond = self.dataset_cond.map(normalize).sel(year=selected_years)
 
         self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
 
@@ -406,59 +459,86 @@ class ClimateDataset(Dataset):
             self._save_cond_diagnostics(diag_dir)
 
     def _save_cond_diagnostics(self, diag_dir: str):
-        """Save spatial maps of normalized conditioning data for visual inspection."""
-        years_to_show = [self.dataset_cond.year.values[0], 2015, 2050,
-                         self.dataset_cond.year.values[-1]]
-        years_to_show = [y for y in years_to_show
-                         if y in self.dataset_cond.year.values]
+        """Save spatial maps and time series of conditioning data.
 
-        for var in self.cond_vars:
-            da = self.dataset_cond[var]
+        When PCA denoising is enabled the plots show the PCA-filtered tensor
+        (i.e. exactly what the model receives).  When PCA is disabled they
+        fall back to the raw-normalised xarray values — the two are identical
+        in that case, so the plots are always consistent with model input.
+        """
+        all_years = self.dataset_cond.year.values
+        candidate_years = [all_years[0], 2015, 2050, all_years[-1]]
+        years_to_show   = [y for y in candidate_years if y in all_years]
+        year_indices    = [int(np.where(all_years == y)[0][0]) for y in years_to_show]
+
+        pca_active_cond = self._pca_cond is not None
+
+        # tensor_data_cond shape: (n_vars, T, H, W) — already PCA-filtered if enabled
+        cond_np = self.tensor_data_cond.numpy()   # (n_vars, T, H, W)
+
+        # ── spatial maps ─────────────────────────────────────────────────────
+        for v_idx, var in enumerate(self.cond_vars):
+            channel = cond_np[v_idx]              # (T, H, W)
             n_years = len(years_to_show)
 
             fig, axes = plt.subplots(1, n_years, figsize=(5 * n_years, 4))
             if n_years == 1:
                 axes = [axes]
 
-            for col, yr in enumerate(years_to_show):
+            for col, (yr, t_idx) in enumerate(zip(years_to_show, year_indices)):
                 ax = axes[col]
-                data = da.sel(year=yr).values
+                data = channel[t_idx]             # (H, W)
                 im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
                                vmin=-1, vmax=1, origin='lower')
-                ax.set_title(f"year={yr}\nmin={data.min():.3f} max={data.max():.3f}\n"
-                             f"mean={data.mean():.3f} std={data.std():.3f}",
-                             fontsize=9)
+                ax.set_title(
+                    f"year={yr}\nmin={data.min():.3f} max={data.max():.3f}\n"
+                    f"mean={data.mean():.3f} std={data.std():.3f}",
+                    fontsize=9,
+                )
                 plt.colorbar(im, ax=ax, shrink=0.8)
 
-            fig.suptitle(f"{var} — Normalized cond_map (what model sees)", fontsize=13)
+            pca_label = (
+                f" [PCA {self._pca_cond[v_idx].n_components_} comps, "
+                f"{self._pca_cond[v_idx].explained_variance_ratio_.sum()*100:.1f}% var]"
+                if pca_active_cond else ""
+            )
+            fig.suptitle(
+                f"{var} — cond_map seen by model{pca_label}",
+                fontsize=13,
+            )
             plt.tight_layout()
             save_path = os.path.join(diag_dir, f"cond_normalized_{var}.png")
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"[DIAG] Saved {save_path}")
 
-        # Also plot spatial-mean time series
+        # ── spatial-mean time series ──────────────────────────────────────────
         fig, axes = plt.subplots(len(self.cond_vars), 1,
-                                  figsize=(12, 4 * len(self.cond_vars)))
+                                 figsize=(12, 4 * len(self.cond_vars)))
         if len(self.cond_vars) == 1:
             axes = [axes]
 
-        for i, var in enumerate(self.cond_vars):
-            da = self.dataset_cond[var]
-            spatial_dims = [d for d in da.dims if d != "year"]
-            ts = da.mean(dim=spatial_dims)
-            years = da.year.values
+        for v_idx, var in enumerate(self.cond_vars):
+            channel = cond_np[v_idx]              # (T, H, W)
+            ts      = channel.mean(axis=(1, 2))   # (T,)  spatial mean
 
-            ax = axes[i]
-            ax.plot(years, ts.values, 'b-', linewidth=2)
-            ax.set_title(f"{var} — Spatial mean of normalized cond_map\n"
-                         f"range: [{float(ts.min()):.3f}, {float(ts.max()):.3f}]",
-                         fontsize=12)
+            ax = axes[v_idx]
+            ax.plot(all_years, ts, 'b-', linewidth=2)
+
+            pca_label = (
+                f" [PCA {self._pca_cond[v_idx].n_components_} comps]"
+                if pca_active_cond else ""
+            )
+            ax.set_title(
+                f"{var} — spatial mean of cond_map seen by model{pca_label}\n"
+                f"range: [{ts.min():.3f}, {ts.max():.3f}]",
+                fontsize=12,
+            )
             ax.set_xlabel("Year")
-            ax.set_ylabel("Normalized value")
+            ax.set_ylabel("Normalised value")
             ax.set_ylim(-1.15, 1.15)
             ax.axhline(-1, color='gray', ls='--', alpha=0.4)
-            ax.axhline(1, color='gray', ls='--', alpha=0.4)
+            ax.axhline(1,  color='gray', ls='--', alpha=0.4)
             ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
@@ -467,25 +547,39 @@ class ClimateDataset(Dataset):
         plt.close()
         print(f"[DIAG] Saved {save_path}")
 
-        # ── PCA scree / reconstruction diagnostics ───────────────────────────
+        # ── PCA scree + before/after maps ────────────────────────────────────
         self._save_pca_diagnostics(diag_dir)
 
     def _save_pca_diagnostics(self, diag_dir: str):
-        """Save scree plots and before/after spatial maps for PCA denoising."""
+        """Save scree plots and before/after spatial maps for PCA denoising.
 
+        The "raw" panel is derived fresh from the normalised xarray dataset so
+        it truly reflects the pre-PCA signal, while the "PCA filtered" panel
+        comes from the tensor that the model actually receives.
+        """
         pca_sets = [
-            ("target", self._pca_target, self.vars,
-             self.tensor_data, self.xr_data),
-            ("cond",   self._pca_cond,   self.cond_vars,
-             self.tensor_data_cond, self.dataset_cond),
+            (
+                "target",
+                self._pca_target,
+                self.vars,
+                self.tensor_data,                              # already PCA-filtered
+                self.convert_xarray_to_tensor(self.xr_data),  # raw normalised
+            ),
+            (
+                "cond",
+                self._pca_cond,
+                self.cond_vars,
+                self.tensor_data_cond,                                   # already PCA-filtered
+                self.convert_xarray_to_tensor(self.dataset_cond),        # raw normalised
+            ),
         ]
 
-        for tag, pca_list, var_names, tensor, xr_ref in pca_sets:
+        for tag, pca_list, var_names, filtered_tensor, raw_tensor in pca_sets:
             if pca_list is None:
                 continue  # PCA not enabled for this set
 
             for v_idx, (pca, vname) in enumerate(zip(pca_list, var_names)):
-                # ── scree plot ──────────────────────────────────────────────
+                # ── scree plot ───────────────────────────────────────────────
                 cumvar = np.cumsum(pca.explained_variance_ratio_) * 100
                 fig, ax = plt.subplots(figsize=(7, 4))
                 ax.plot(np.arange(1, len(cumvar) + 1), cumvar, 'o-', ms=4)
@@ -497,43 +591,48 @@ class ClimateDataset(Dataset):
                 ax.legend()
                 ax.grid(True, alpha=0.3)
                 plt.tight_layout()
-                scree_path = os.path.join(diag_dir,
-                                           f"pca_scree_{tag}_{vname}.png")
+                scree_path = os.path.join(diag_dir, f"pca_scree_{tag}_{vname}.png")
                 plt.savefig(scree_path, dpi=120, bbox_inches='tight')
                 plt.close()
                 print(f"[DIAG] Saved {scree_path}")
 
-                # ── before / after spatial map ──────────────────────────────
-                # Pick the most recent year for illustration
-                mid_t = tensor.shape[1] // 2
-                raw_map   = tensor[v_idx, mid_t].numpy()       # (H, W) raw
-                # recon via PCA
-                channel   = tensor[v_idx].numpy()              # (T, H, W)
-                recon_all = apply_pca_denoise(channel, pca)    # (T, H, W)
-                recon_map = recon_all[mid_t]                   # (H, W)
-                resid_map = raw_map - recon_map
+                # ── before / after spatial map ────────────────────────────────
+                # Use the middle time-step for a representative snapshot
+                mid_t = raw_tensor.shape[1] // 2
 
+                raw_map      = raw_tensor[v_idx, mid_t].numpy()       # (H, W)  pre-PCA
+                filtered_map = filtered_tensor[v_idx, mid_t].numpy()  # (H, W)  post-PCA
+                resid_map    = raw_map - filtered_map                  # (H, W)  removed noise
+
+                # Shared colour scale anchored on the raw field range
                 vmin, vmax = raw_map.min(), raw_map.max()
+                # Residual uses its own symmetric scale so small values show up
+                rvmax = np.abs(resid_map).max()
+
                 fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-                for ax, data, title in zip(
+                for ax, data, title, vm0, vm1 in zip(
                     axes,
-                    [raw_map, recon_map, resid_map],
-                    ["Raw (normalized)", f"PCA recon ({pca.n_components_} comps)",
-                     "Residual (noise removed)"],
+                    [raw_map,        filtered_map,                          resid_map],
+                    ["Raw (normalised)", f"PCA filtered ({pca.n_components_} comps)",  "Noise removed (raw − filtered)"],
+                    [vmin,           vmin,                                  -rvmax],
+                    [vmax,           vmax,                                   rvmax],
                 ):
                     im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
-                                   vmin=vmin, vmax=vmax, origin='lower')
-                    ax.set_title(title, fontsize=10)
+                                   vmin=vm0, vmax=vm1, origin='lower')
+                    ax.set_title(
+                        f"{title}\nmin={data.min():.3f}  max={data.max():.3f}",
+                        fontsize=9,
+                    )
                     plt.colorbar(im, ax=ax, shrink=0.8)
+
                 fig.suptitle(
                     f"PCA denoising — {tag}/{vname}  "
-                    f"(t_idx={mid_t}, "
-                    f"{pca.explained_variance_ratio_.sum()*100:.1f}% var kept)",
+                    f"(t_idx={mid_t},  "
+                    f"{pca.explained_variance_ratio_.sum()*100:.1f} % variance retained)",
                     fontsize=12,
                 )
                 plt.tight_layout()
-                map_path = os.path.join(diag_dir,
-                                        f"pca_map_{tag}_{vname}.png")
+                map_path = os.path.join(diag_dir, f"pca_map_{tag}_{vname}.png")
                 plt.savefig(map_path, dpi=120, bbox_inches='tight')
                 plt.close()
                 print(f"[DIAG] Saved {map_path}")
@@ -618,11 +717,18 @@ class ClimateDataset(Dataset):
         return ds
 
     def __len__(self):
+        if self.cond_only:
+            return len(self.dataset_cond.year) - self.seq_len + 1
         return len(self.xr_data.year) - self.seq_len + 1
 
     def __getitem__(self, idx: int):
         """Defines how to get a specific index from the dataset"""
-        return self.tensor_data[:, idx : idx + self.seq_len],self.tensor_data_cond[:, idx : idx + self.seq_len]
+        if self.cond_only:
+            raise RuntimeError(
+                "ClimateDataset was created with cond_only=True — "
+                "target tensor_data is not available for iteration."
+            )
+        return self.tensor_data[:, idx : idx + self.seq_len], self.tensor_data_cond[:, idx : idx + self.seq_len]
 
 
 class ClimateDataLoader:

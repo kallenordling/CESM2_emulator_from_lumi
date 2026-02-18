@@ -971,10 +971,16 @@ if __name__ == "__main__":
                         help="Override realization(s) to load")
 
     # ── PCA options ───────────────────────────────────────────────────────────
-    parser.add_argument("--n_components_target", type=int, default=None,
-                        help="PCA components for target fields (None = disabled)")
-    parser.add_argument("--n_components_cond", type=int, default=None,
-                        help="PCA components for conditioning fields (None = disabled)")
+    # Supply one integer per channel for per-channel control, or a single int
+    # to use the same count for all channels.  Pass 0 to disable PCA entirely.
+    # If omitted, values from config_aero.yaml are used.
+    #   --n_components_cond 10 40      →  10 EOFs for CO2, 40 for SO2
+    #   --n_components_cond 30         →  30 EOFs for every cond channel
+    #   --n_components_cond 0          →  disable PCA for cond
+    parser.add_argument("--n_components_target", type=int, nargs="+", default=None,
+                        help="PCA components per target channel (from config if omitted)")
+    parser.add_argument("--n_components_cond", type=int, nargs="+", default=None,
+                        help="PCA components per cond channel (from config if omitted)")
 
     # ── Model / run options ───────────────────────────────────────────────────
     parser.add_argument("--checkpoint", type=str, default=None,
@@ -1006,17 +1012,38 @@ if __name__ == "__main__":
     realizations = (args.realizations
                     or [list(OmegaConf.to_object(ds_cfg.realizations))[0]])
 
-    # PCA: config values are the default; CLI can override to a different N or
-    # pass 0 to explicitly disable (0 is treated as None = disabled).
-    def _pca(cli_val, cfg_val):
-        if cli_val is not None:
-            return cli_val if cli_val > 0 else None
-        return int(cfg_val) if cfg_val else None
 
-    n_components_target = _pca(args.n_components_target,
-                                ds_cfg.get("n_components_target"))
-    n_components_cond   = _pca(args.n_components_cond,
-                                ds_cfg.get("n_components_cond"))
+    def _resolve_pca(cli_val, cfg_val):
+        """Return per-channel list, single int, or None.
+
+        Priority: CLI > config.  A CLI value of [0] (or config value of 0)
+        means 'disable PCA'.  A single-element CLI list is unwrapped to int
+        so ClimateDataset._norm_n_components can broadcast it.
+        """
+        raw = cli_val  # list[int] from argparse nargs="+", or None
+        if raw is None:
+            # Fall back to config
+            cfg_raw = cfg_val
+            if cfg_raw is None:
+                return None
+            cfg_obj = OmegaConf.to_object(cfg_raw) if hasattr(cfg_raw, '_metadata') else cfg_raw
+            # Scalar 0 → disabled
+            if isinstance(cfg_obj, (int, float)):
+                return None if int(cfg_obj) == 0 else int(cfg_obj)
+            # List from config
+            lst = [int(v) for v in cfg_obj]
+            return None if all(v == 0 for v in lst) else lst
+
+        # CLI supplied
+        if all(v == 0 for v in raw):
+            return None  # explicit disable
+        return raw[0] if len(raw) == 1 else raw  # unwrap singleton
+
+
+    n_components_target = _resolve_pca(args.n_components_target,
+                                       ds_cfg.get("n_components_target"))
+    n_components_cond = _resolve_pca(args.n_components_cond,
+                                     ds_cfg.get("n_components_cond"))
 
     print(f"[INFO] data_dir            = {data_dir}")
     print(f"[INFO] cond_file           = {cond_file}")
@@ -1034,7 +1061,7 @@ if __name__ == "__main__":
           f"(cond_only={cond_only})...")
 
     dataset = instantiate(
-        ds_cfg,                        # _target_ + fixed kwargs from config
+        ds_cfg,  # _target_ + fixed kwargs from config
         data_dir=data_dir,
         realizations=realizations,
         target_vars=target_vars,
@@ -1042,6 +1069,7 @@ if __name__ == "__main__":
         cond_file=cond_file,
         n_components_target=n_components_target,
         n_components_cond=n_components_cond,
+        cond_only=cond_only,
     )
 
     print(f"[INFO] Dataset loaded — cond tensor shape: "
@@ -1050,7 +1078,7 @@ if __name__ == "__main__":
         for v_idx, var in enumerate(dataset.cond_vars):
             pca = dataset._pca_cond[v_idx]
             print(f"[INFO] PCA cond/{var}: {pca.n_components_} comps, "
-                  f"{pca.explained_variance_ratio_.sum()*100:.2f}% var")
+                  f"{pca.explained_variance_ratio_.sum() * 100:.2f}% var")
 
     # ── Run diagnostics ───────────────────────────────────────────────────────
     if args.data_only or args.checkpoint is None:
