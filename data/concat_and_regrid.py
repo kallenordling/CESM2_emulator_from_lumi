@@ -54,8 +54,8 @@ print(f"  Combined CO2: {ds_co2.year.values[0]}–{ds_co2.year.values[-1]} ({len
 
 # ── 2. Load and concat SO2 (hist + ssp370) ──────────────────────────────────
 print("\nLoading SO2 files...")
-ds_so2_hist = xr.open_dataset(SO2_HIST)
-ds_so2_ssp = xr.open_dataset(SO2_SSP)
+ds_so2_hist = xr.open_dataset(SO2_HIST)).sel(year=slice(1850,2014))
+ds_so2_ssp = xr.open_dataset(SO2_SSP).sel(year=slice(2015,2100))
 ds_so2_ssp = ds_so2_ssp.interp(year=np.arange(ds_so2_ssp.year.values[0], ds_so2_ssp.year.values[-1] + 1), method="linear")
 
 print(f"  hist: {ds_so2_hist.year.values[0]}–{ds_so2_hist.year.values[-1]}")
@@ -67,7 +67,8 @@ ds_so2_ssp = ds_so2_ssp.sel(year=ds_so2_ssp.year > last_hist_year)
 # SO2 is annual rate (not cumulative), so just concat directly
 ds_so2 = xr.concat([ds_so2_hist, ds_so2_ssp], dim="year").sel(year=slice(1850,2100))
 print(f"  Combined SO2: {ds_so2.year.values[0]}–{ds_so2.year.values[-1]} ({len(ds_so2.year)} years)")
-
+print(ds_co2)
+print(ds_so2)
 # ── 3. Merge CO2 and SO2 into one dataset ───────────────────────────────────
 print("\nMerging CO2 and SO2...")
 ds_merged = xr.merge([ds_co2, ds_so2])
