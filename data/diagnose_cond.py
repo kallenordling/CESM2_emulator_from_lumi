@@ -63,7 +63,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
 
     # Cells below the floor (ocean/background) pin to -1
     floor = {"SUL": 1e-19, "CO2": 1e-13}.get(da.name, 0)
-    normed = xr.where(da <= floor, -1.0, normed).clip(-1.0, 1.0)
+    #normed = xr.where(da <= floor, -1.0, normed)#.clip(-1.0, 1.0)
 
     normed = normed.astype("float32")
     normed.attrs["norm_lo"] = lo
