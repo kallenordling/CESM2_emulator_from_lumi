@@ -1188,6 +1188,282 @@ def plot_phase_heatmap(
     print(f"  [SAVED] {out_path}")
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Numerical report exporter
+# ──────────────────────────────────────────────────────────────────────────────
+
+def export_numerical_report(
+    stats_per_year: Dict[str, Tuple[Dict, Dict]],
+    cond_vectors_per_year: Dict[str, Dict[str, np.ndarray]],
+    diff_maps: Dict[str, np.ndarray],
+    lats: np.ndarray,
+    lons: np.ndarray,
+    checkpoint_path: str,
+    out_dir: str,
+):
+    """
+    Write three numerical output files:
+
+    1. model_phase_stats.csv
+       Columns: year, phase, rms_cond, rms_null, delta_rms, rel_effect_pct,
+                mean_cond, std_cond, mean_null, std_null, shape
+       One row per (year × phase). Suitable for pandas / spreadsheet analysis.
+
+    2. model_film_vectors.csv
+       Columns: year, stage, dim, value
+       Long-format table of the FiLM scale, shift, encoder_feat and time_emb
+       embedding vectors. Lets you inspect individual dimensions.
+
+    3. model_output_sensitivity.csv
+       Columns: year, lat, lon, abs_diff
+       Full spatial grid of |output(cond) - output(null)| per snapshot year.
+       Suitable for xarray / mapping.
+
+    4. model_summary.txt
+       Human-readable plain-text summary: key numbers at a glance, top-5
+       most and least affected phases per year, FiLM gate statistics, and
+       spatial hotspot coordinates.
+    """
+    import csv, json, datetime
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    years = list(stats_per_year.keys())
+
+    # ── 1. Phase stats CSV ────────────────────────────────────────────────────
+    phase_csv_path = os.path.join(out_dir, "model_phase_stats.csv")
+    phase_rows = []
+    for yr in years:
+        sc, sn = stats_per_year[yr]
+        for phase in _PHASE_ORDER:
+            if phase not in sc:
+                continue
+            rc  = sc[phase]["rms"]
+            rn  = sn[phase]["rms"] if phase in sn else 0.0
+            dlt = rc - rn
+            rel = (dlt / (rn + 1e-10)) * 100.0
+            phase_rows.append({
+                "year":           yr,
+                "phase":          phase,
+                "rms_cond":       round(rc, 8),
+                "rms_null":       round(rn, 8),
+                "delta_rms":      round(dlt, 8),
+                "rel_effect_pct": round(rel, 4),
+                "mean_cond":      round(sc[phase]["mean"], 8),
+                "std_cond":       round(sc[phase]["std"],  8),
+                "mean_null":      round(sn[phase]["mean"] if phase in sn else float("nan"), 8),
+                "std_null":       round(sn[phase]["std"]  if phase in sn else float("nan"), 8),
+                "shape":          str(sc[phase]["shape"]),
+            })
+
+    with open(phase_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(phase_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(phase_rows)
+    print(f"  [SAVED] {phase_csv_path}")
+
+    # ── 2. FiLM vectors CSV (long format) ────────────────────────────────────
+    film_csv_path = os.path.join(out_dir, "model_film_vectors.csv")
+    film_rows = []
+    stages_of_interest = ["encoder_feat", "scale", "shift", "time_emb_raw"]
+    for yr, vecs in cond_vectors_per_year.items():
+        for stage in stages_of_interest:
+            vec = vecs.get(stage)
+            if vec is None:
+                continue
+            flat = vec.ravel()
+            for dim_idx, val in enumerate(flat):
+                film_rows.append({
+                    "year":  yr,
+                    "stage": stage,
+                    "dim":   dim_idx,
+                    "value": round(float(val), 8),
+                })
+
+    if film_rows:
+        with open(film_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["year", "stage", "dim", "value"])
+            writer.writeheader()
+            writer.writerows(film_rows)
+        print(f"  [SAVED] {film_csv_path}")
+
+    # ── 2b. FiLM summary stats CSV (wide format – easier to inspect) ─────────
+    film_summary_path = os.path.join(out_dir, "model_film_summary.csv")
+    film_summary_rows = []
+    for yr, vecs in cond_vectors_per_year.items():
+        row = {"year": yr}
+        for stage in stages_of_interest:
+            vec = vecs.get(stage)
+            if vec is None:
+                continue
+            flat = vec.ravel()
+            row[f"{stage}_mean"]   = round(float(flat.mean()),  6)
+            row[f"{stage}_std"]    = round(float(flat.std()),   6)
+            row[f"{stage}_min"]    = round(float(flat.min()),   6)
+            row[f"{stage}_max"]    = round(float(flat.max()),   6)
+            row[f"{stage}_p25"]    = round(float(np.percentile(flat, 25)), 6)
+            row[f"{stage}_p50"]    = round(float(np.percentile(flat, 50)), 6)
+            row[f"{stage}_p75"]    = round(float(np.percentile(flat, 75)), 6)
+            row[f"{stage}_rms"]    = round(float(np.sqrt((flat**2).mean())), 6)
+            row[f"{stage}_n_dims"] = len(flat)
+        film_summary_rows.append(row)
+
+    if film_summary_rows:
+        with open(film_summary_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(film_summary_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(film_summary_rows)
+        print(f"  [SAVED] {film_summary_path}")
+
+    # ── 3. Spatial sensitivity CSV ───────────────────────────────────────────
+    spatial_csv_path = os.path.join(out_dir, "model_output_sensitivity.csv")
+    spatial_rows = []
+    for yr, diff_map in diff_maps.items():
+        for li, lat in enumerate(lats):
+            for lo, lon in enumerate(lons):
+                spatial_rows.append({
+                    "year":     yr,
+                    "lat":      round(float(lat), 4),
+                    "lon":      round(float(lon), 4),
+                    "abs_diff": round(float(diff_map[li, lo]), 8),
+                })
+
+    with open(spatial_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["year", "lat", "lon", "abs_diff"])
+        writer.writeheader()
+        writer.writerows(spatial_rows)
+    print(f"  [SAVED] {spatial_csv_path}")
+
+    # ── 4. Human-readable summary .txt ───────────────────────────────────────
+    summary_path = os.path.join(out_dir, "model_summary.txt")
+    lines = []
+    SEP  = "=" * 72
+    sep2 = "-" * 72
+
+    lines += [
+        SEP,
+        "  MODEL CONDITIONING DIAGNOSTIC  –  NUMERICAL SUMMARY",
+        SEP,
+        f"  Generated : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"  Checkpoint: {checkpoint_path}",
+        f"  Snap years: {', '.join(years)}",
+        "",
+    ]
+
+    # ── Per-year phase table ──────────────────────────────────────────────────
+    for yr in years:
+        sc, sn = stats_per_year[yr]
+        lines += [SEP, f"  YEAR {yr}  –  Per-phase activation stats", SEP]
+        lines.append(
+            f"  {'Phase':<28} {'RMS_cond':>10} {'RMS_null':>10}"
+            f" {'ΔRMS':>10} {'Rel%':>9}  Shape"
+        )
+        lines.append(sep2)
+
+        phase_rel = {}
+        for phase in _PHASE_ORDER:
+            if phase not in sc:
+                continue
+            rc  = sc[phase]["rms"]
+            rn  = sn[phase]["rms"] if phase in sn else 0.0
+            dlt = rc - rn
+            rel = (dlt / (rn + 1e-10)) * 100.0
+            phase_rel[phase] = rel
+            shp = str(sc[phase]["shape"])
+            lines.append(
+                f"  {phase:<28} {rc:>10.5f} {rn:>10.5f}"
+                f" {dlt:>+10.5f} {rel:>+8.2f}%  {shp}"
+            )
+
+        lines.append("")
+
+        # Top-5 most and least affected phases
+        sorted_phases = sorted(phase_rel.items(), key=lambda kv: abs(kv[1]), reverse=True)
+        lines.append(f"  TOP-5 MOST AFFECTED PHASES (by |rel effect|):")
+        for phase, rel in sorted_phases[:5]:
+            lines.append(f"    {phase:<30}  {rel:>+8.2f}%")
+        lines.append("")
+        lines.append(f"  TOP-5 LEAST AFFECTED PHASES:")
+        for phase, rel in sorted_phases[-5:]:
+            lines.append(f"    {phase:<30}  {rel:>+8.2f}%")
+        lines.append("")
+
+    # ── FiLM gate analysis ────────────────────────────────────────────────────
+    lines += [SEP, "  FILM GATE ANALYSIS  (scale γ and shift β vectors)", SEP]
+    lines.append(
+        f"  {'Year':<8} {'γ mean':>9} {'γ std':>9} {'γ min':>9} {'γ max':>9}"
+        f"  {'β mean':>9} {'β std':>9} {'β min':>9} {'β max':>9}"
+    )
+    lines.append(sep2)
+    for yr, vecs in cond_vectors_per_year.items():
+        scale = vecs.get("scale", np.array([float("nan")]))
+        shift = vecs.get("shift", np.array([float("nan")]))
+        lines.append(
+            f"  {yr:<8} {scale.mean():>9.4f} {scale.std():>9.4f}"
+            f" {scale.min():>9.4f} {scale.max():>9.4f}"
+            f"  {shift.mean():>9.4f} {shift.std():>9.4f}"
+            f" {shift.min():>9.4f} {shift.max():>9.4f}"
+        )
+    lines += [
+        "",
+        "  NOTE: γ (scale) starts initialised at 0.5; values far from 0.5 mean",
+        "  the encoder has learned to actively modulate the time embedding.",
+        "  β (shift) starts at 0; large magnitudes mean strong additive push.",
+        "",
+    ]
+
+    # ── Spatial sensitivity analysis ─────────────────────────────────────────
+    lines += [SEP, "  SPATIAL OUTPUT SENSITIVITY  |out(cond) − out(null)|", SEP]
+    lines.append(f"  {'Year':<8} {'Mean':>9} {'Std':>9} {'p50':>9} {'p90':>9}"
+                 f" {'p99':>9} {'Max':>9}")
+    lines.append(sep2)
+    for yr, diff_map in diff_maps.items():
+        flat = diff_map.ravel()
+        lines.append(
+            f"  {yr:<8} {flat.mean():>9.5f} {flat.std():>9.5f}"
+            f" {np.percentile(flat,50):>9.5f} {np.percentile(flat,90):>9.5f}"
+            f" {np.percentile(flat,99):>9.5f} {flat.max():>9.5f}"
+        )
+    lines.append("")
+
+    # Hotspot coordinates (top-10 cells by sensitivity)
+    for yr, diff_map in diff_maps.items():
+        lines.append(f"  TOP-10 SENSITIVITY HOTSPOTS  –  Year {yr}:")
+        lines.append(f"  {'Rank':<6} {'Lat':>7} {'Lon':>8} {'|Δ output|':>12}")
+        flat_idx = np.argsort(diff_map.ravel())[::-1][:10]
+        for rank, idx in enumerate(flat_idx, 1):
+            li, lo = np.unravel_index(idx, diff_map.shape)
+            lines.append(
+                f"  {rank:<6} {float(lats[li]):>7.2f} {float(lons[lo]):>8.2f}"
+                f" {diff_map[li, lo]:>12.6f}"
+            )
+        lines.append("")
+
+    # ── Conditioning encoder feature vector ──────────────────────────────────
+    lines += [SEP, "  CONDITIONING ENCODER FEATURE VECTORS  (summary)", SEP]
+    lines.append(
+        f"  {'Year':<8} {'mean':>9} {'std':>9} {'min':>9} {'max':>9} {'rms':>9} {'ndim':>6}"
+    )
+    lines.append(sep2)
+    for yr, vecs in cond_vectors_per_year.items():
+        feat = vecs.get("encoder_feat", np.array([float("nan")]))
+        flat = feat.ravel()
+        lines.append(
+            f"  {yr:<8} {flat.mean():>9.4f} {flat.std():>9.4f}"
+            f" {flat.min():>9.4f} {flat.max():>9.4f}"
+            f" {np.sqrt((flat**2).mean()):>9.4f} {len(flat):>6}"
+        )
+    lines += ["", SEP, "  END OF SUMMARY", SEP, ""]
+
+    summary_text = "\n".join(lines)
+    with open(summary_path, "w") as f:
+        f.write(summary_text)
+    print(f"  [SAVED] {summary_path}")
+
+    # Print to stdout too so it's visible in logs
+    print("\n" + summary_text)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Top-level model diagnostic orchestrator
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1286,6 +1562,17 @@ def diagnose_model_conditioning(
         cond_t = _build_cond_tensor(cond_np_dict, yr_idx, seq_len, device)
         diff_maps[yr_lbl] = _collect_output_diff_spatial(model, noise, cond_t, device)
     plot_output_diff_maps(diff_maps, lats, lons, out_dir)
+
+    # ── 6. Numerical outputs ───────────────────────────────────────────────────
+    export_numerical_report(
+        stats_per_year        = stats_per_year,
+        cond_vectors_per_year = cond_vectors_per_year,
+        diff_maps             = diff_maps,
+        lats                  = lats,
+        lons                  = lons,
+        checkpoint_path       = checkpoint_path,
+        out_dir               = out_dir,
+    )
 
     print(f"\n  [DONE] All model diagnostics written to: {out_dir}")
 
