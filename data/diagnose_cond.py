@@ -108,9 +108,9 @@ def norm_zscore(
     return result
 
 
-def normalize_var(da: xr.DataArray) -> xr.DataArray:
+def normalize_var(da: xr.DataArray, norm_mode: str = "percentile", n_std: float = 3.0) -> xr.DataArray:
     if da.name in ("CO2", "SO2", "SUL"):
-        return norm_zscore(da).fillna(0)
+        return norm_zscore(da, mode=norm_mode, n_std=n_std).fillna(0)
     raise ValueError(f"No normalization defined for variable '{da.name}'")
 
 
@@ -243,11 +243,13 @@ def plot_spatial_maps(fig, outer_gs, row_idx, snap_data_list,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def diagnose_variable(
-    da_raw    : xr.DataArray,       # original (un-normalised) DataArray, dims (year, lat, lon)
+    da_raw    : xr.DataArray,
     var_name  : str,
     n_components: Optional[int],
     out_dir   : str,
     years     : np.ndarray,
+    norm_mode : str = "percentile",
+    n_std     : float = 3.0,
 ):
     print(f"\n{'='*60}")
     print(f"  Diagnosing: {var_name}")
@@ -259,11 +261,11 @@ def diagnose_variable(
     T, H, W = raw_np.shape
 
     # ── 1. Normalize ──────────────────────────────────────────────────────────
-    da_norm  = normalize_var(da_raw)
+    da_norm  = normalize_var(da_raw, norm_mode=norm_mode, n_std=n_std)
     norm_np  = da_norm.values.astype(np.float32)  # (T, H, W)
-    mu       = da_norm.attrs.get("norm_mu", float("nan"))
-    sigma    = da_norm.attrs.get("norm_sigma", float("nan"))
-    print(f"  Norm params: log1p(x) → (x – {mu:.4f}) / {sigma:.4f}")
+    lo_val   = da_norm.attrs.get("norm_lo", float("nan"))
+    hi_val   = da_norm.attrs.get("norm_hi", float("nan"))
+    print(f"  Norm params: log1p(x) percentiles → lo={lo_val:.4f}  hi={hi_val:.4f}")
     print(f"  Raw   stats: min={raw_np.min():.4g}  max={raw_np.max():.4g}  "
           f"std={raw_np.std():.4g}")
     print(f"  Norm  stats: min={norm_np.min():.4f}  max={norm_np.max():.4f}  "
@@ -325,6 +327,7 @@ def diagnose_variable(
 
     fig_ts.suptitle(
         f"{var_name} — Global-mean time series  "
+        f"[norm={norm_mode}]  "
         f"({'PCA: ' + str(n_components) + ' comps' if pca_np is not None else 'no PCA'})",
         fontsize=13, fontweight="bold",
     )
@@ -589,6 +592,12 @@ def parse_args():
     p.add_argument("--n_components", nargs="+", type=int, default=None,
                    help="PCA components per variable (same order as --cond_vars). "
                         "Pass 0 or omit to skip PCA.")
+    p.add_argument("--norm_mode",    default="percentile",
+                   choices=["percentile", "zscore"],
+                   help="Normalisation mode: 'percentile' (p1/p99 of log1p) or "
+                        "'zscore' (mean ± n_std of log1p). Default: percentile")
+    p.add_argument("--n_std",        type=float, default=3.0,
+                   help="Std devs used in zscore mode (default: 3.0)")
     p.add_argument("--out_dir",      default="./cond_diagnostics",
                    help="Output directory for figures")
     return p.parse_args()
@@ -647,6 +656,8 @@ def main():
             n_components= n_comp,
             out_dir     = args.out_dir,
             years       = all_years,
+            norm_mode   = args.norm_mode,
+            n_std       = args.n_std,
         )
 
     print(f"\n{'='*60}")
