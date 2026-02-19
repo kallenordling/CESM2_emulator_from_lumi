@@ -600,16 +600,22 @@ class _HookStore:
     """Lightweight container that registers forward hooks and collects outputs."""
 
     def __init__(self):
-        self.records: Dict[str, torch.Tensor] = {}
+        self.records: Dict[str, "torch.Tensor"] = {}
         self._handles = []
 
     def register(self, module: "torch.nn.Module", name: str) -> None:
+        # Capture the name in the closure; import torch inside the hook so it
+        # is always resolved at call-time regardless of lazy import ordering.
+        _name = name
+
         def _hook(mod, inp, out):
-            # Store a detached CPU copy; handle tuple outputs (e.g. schedulers)
-            if isinstance(out, torch.Tensor):
-                self.records[name] = out.detach().cpu()
-            elif isinstance(out, (tuple, list)) and len(out) > 0 and isinstance(out[0], torch.Tensor):
-                self.records[name] = out[0].detach().cpu()
+            import torch as _torch  # always available here – the model already ran
+            if isinstance(out, _torch.Tensor):
+                self.records[_name] = out.detach().cpu()
+            elif (isinstance(out, (tuple, list))
+                  and len(out) > 0
+                  and isinstance(out[0], _torch.Tensor)):
+                self.records[_name] = out[0].detach().cpu()
 
         handle = module.register_forward_hook(_hook)
         self._handles.append(handle)
@@ -802,7 +808,8 @@ def _collect_cond_vectors(
         def __init__(self, key):
             self.key = key
         def __call__(self, mod, inp, out):
-            if isinstance(out, torch.Tensor):
+            import torch as _torch
+            if isinstance(out, _torch.Tensor):
                 vectors[self.key] = out.squeeze().detach().cpu().numpy()
 
     handles = []
