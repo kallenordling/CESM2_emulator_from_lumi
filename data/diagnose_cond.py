@@ -52,7 +52,7 @@ def scale_cumulative_linear(da: xr.DataArray):
     lo = float(ts.min(skipna=True))
     hi = float(ts.max(skipna=True))
     normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
-    return normed.broadcast_like(da).astype("float32"
+    return normed.broadcast_like(da).astype("float32")
 
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     vals = da.values.flatten()
