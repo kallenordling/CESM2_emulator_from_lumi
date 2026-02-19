@@ -784,8 +784,11 @@ class UNetModel3D(nn.Module):
             # Symmetric projections for the up blocks (same channel widths,
             # mirrored order, same resolutions due to skip connections).
             self.cond_up_projs = nn.ModuleList([
-                nn.Conv3d(dim_in, dim_in * 2, 1)
-                for (dim_in, _) in reversed(in_out)
+                # Input channels must match cond_spatial_feats[down_level_idx],
+                # which has dim_out channels (SpatialCondEncoder output at that level).
+                # Output = dim_in * 2 for FiLM scale+shift applied to block2 (dim_in channels).
+                nn.Conv3d(dim_out, dim_in * 2, 1)
+                for (dim_in, dim_out) in reversed(in_out)
             ])
             # Bottleneck: mid_dim channels (computed later, use dims[-1] here)
             mid_dim_for_proj = dims[-1]
