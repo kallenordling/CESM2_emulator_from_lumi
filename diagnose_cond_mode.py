@@ -38,6 +38,7 @@ from matplotlib.colors import SymLogNorm, Normalize
 from matplotlib.cm import ScalarMappable
 import matplotlib.patches as mpatches
 from sklearn.decomposition import PCA
+from functools import lru_cache
 
 warnings.filterwarnings("ignore")
 
