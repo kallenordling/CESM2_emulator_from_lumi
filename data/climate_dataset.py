@@ -350,8 +350,20 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
     if ds.name in ["CO2", "SO2", "SUL"]:
-        result = norm_zscore(ds).fillna(0) #scale_quantile_transform(ds).fillna(0)
-        return result
+        minmax = _get_emissions_minmax()
+        min_val, max_val = minmax[ds.name]
+
+        # Center and scale similar to temperature
+        mean_val = (min_val + max_val) / 2
+        range_val = max_val - min_val
+
+        if range_val == 0:
+            norm = xr.zeros_like(ds)
+        else:
+            # Scale to roughly [-1, 1] range
+            norm = (ds - mean_val) / (range_val / 2)
+
+        return norm.fillna(0)
 
     # Other variables use predefined normalization functions
     norm = NORM_FN[ds.name](ds)
