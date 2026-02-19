@@ -336,8 +336,11 @@ def _get_emissions_minmax():
     ds_emis = xr.open_dataset(EMISSIONS_PATH)
 
     minmax = {}
-    for var in ["CO2", "SO2"]:
-        da = ds_emis[var]
+    for var in ["CO2", "SO2",'SUL','sul']:
+        if var in ds_emis.data_vars:
+            da = ds_emis[var]
+        else:
+            continue
         min_val = float(da.min())
         max_val = float(da.max())
         minmax[var] = (min_val, max_val)
