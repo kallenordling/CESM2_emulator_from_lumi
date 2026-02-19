@@ -45,6 +45,41 @@ warnings.filterwarnings("ignore")
 # Normalisation helpers  (mirrors climate_dataset.py exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
+EMISSIONS_PATH = "/fmi/scratch/project_2001927/nordlin1/emulator_data/emissions.nc"
+
+@lru_cache(maxsize=1)
+def _get_emissions_minmax():
+    """
+    Lataa emissions.nc vain kerran ja palauttaa min/max-arvot
+    CO2_em_anthro:lle ja sul:lle.
+    """
+    ds_emis = xr.open_dataset(EMISSIONS_PATH)
+
+    minmax = {}
+    for var in ["CO2_em_anthro", "sul"]:
+        da = ds_emis[var]
+        min_val = float(da.min())
+        max_val = float(da.max())
+        minmax[var] = (min_val, max_val)
+
+    ds_emis.close()
+    return minmax
+
+def norm2(ds):
+    minmax = _get_emissions_minmax()
+    min_val, max_val = minmax[ds.name]
+
+    # Center and scale similar to temperature
+    mean_val = (min_val + max_val) / 2
+    range_val = max_val - min_val
+
+    if range_val == 0:
+        norm = xr.zeros_like(ds)
+    else:
+        # Scale to roughly [-1, 1] range
+        norm = (ds - mean_val) / (range_val / 2)
+
+    return norm.fillna(0)
 def norm_zscore(
     da: xr.DataArray,
     lo_pct: float = 1.0,
