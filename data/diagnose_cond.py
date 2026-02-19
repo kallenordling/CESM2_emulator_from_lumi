@@ -42,6 +42,18 @@ warnings.filterwarnings("ignore")
 # Normalisation helpers  (mirrors climate_dataset.py exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def scale_cumulative_linear(da: xr.DataArray):
+    """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
+    Preserves temporal signal perfectly; every grid cell gets the same
+    value per year (the global mean emission level for that year).
+    Best for well-mixed gases like CO2."""
+    spatial_dims = [d for d in da.dims if d != "year"]
+    ts = da.mean(dim=spatial_dims)  # [year]
+    lo = float(ts.min(skipna=True))
+    hi = float(ts.max(skipna=True))
+    normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
+    return normed.broadcast_like(da).astype("float32"
+
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     vals = da.values.flatten()
     if da.name == "SUL":
@@ -62,7 +74,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
 
 def normalize_var(da: xr.DataArray) -> xr.DataArray:
     if da.name in ("CO2", "SO2", "SUL"):
-        return norm_zscore(da).fillna(0)
+        return  scale_cumulative_linear(da).fillna(0)
     raise ValueError(f"No normalization defined for variable '{da.name}'")
 
 
