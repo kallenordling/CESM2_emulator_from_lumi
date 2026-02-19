@@ -42,33 +42,49 @@ warnings.filterwarnings("ignore")
 # Normalisation helpers  (mirrors climate_dataset.py exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def norm_zscore(da: xr.DataArray) -> xr.DataArray:
-    vals = da.values.flatten().astype(np.float64)
+def norm_zscore(da: xr.DataArray, lo_pct: float = 1.0, hi_pct: float = 99.0) -> xr.DataArray:
+    """
+    Log1p normalisation to [-1, 1].
 
-    #if da.name == "SUL":
-    #    mask = vals > 1e-9
-    #elif da.name == "CO2":
-    #    mask = vals > 1e-3
-    #else:
-    mask = vals > 0
+    The old version had two bugs:
+      1. log1p was only used to compute mu/sigma, but raw linear da was
+         normalised — stats and transform in different spaces.
+      2. No output bounds: z-score is unbounded, hence max >> 1.
 
-    log_vals = np.log1p(np.clip(vals, 0, None))  # log1p of the data, not just for stats
+    This version:
+      1. Applies log1p to da itself (consistent space).
+      2. Uses percentile-based lo/hi on non-ocean cells only, so a handful
+         of extreme point-source outliers don't stretch the scale and collapse
+         aviation corridors / shipping lanes to indistinguishable near -1.
+      3. Hard numpy clip — avoids any xarray clip edge-cases.
+    """
+    floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0.0)
 
-    lo = np.percentile(log_vals, 5) #float(log_vals[mask].min())   # or use np.percentile(..., 1) to be robust to outliers
-    hi = np.percentile(log_vals,99)#float(log_vals[mask].max())   # or np.percentile(..., 99)
+    vals     = da.values.flatten().astype(np.float64)
+    log_vals = np.log1p(np.clip(vals, 0.0, None))
+    mask     = vals > floor
 
-    # Apply log1p to the DataArray itself, then stretch [lo, hi] -> [-1, 1]
+    if mask.sum() == 0:
+        result = xr.full_like(da, -1.0).astype("float32")
+        result.attrs.update(norm_lo=0.0, norm_hi=1.0)
+        return result
+
+    lo = float(np.percentile(log_vals[mask], lo_pct))
+    hi = float(np.percentile(log_vals[mask], hi_pct))
+
+    # Transform DataArray in log-space, stretch to [-1, 1]
     log_da = np.log1p(da.clip(min=0))
     normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
 
-    # Cells below the floor (ocean/background) pin to -1
-    floor = {"SUL": 1e-19, "CO2": 1e-13}.get(da.name, 0)
-    #normed = xr.where(da <= floor, -1.0, normed)#.clip(-1.0, 1.0)
+    # Pin ocean / below-floor cells to exactly -1
+    normed = xr.where(da <= floor, -1.0, normed)
 
-    normed = normed.astype("float32")
-    normed.attrs["norm_lo"] = lo
-    normed.attrs["norm_hi"] = hi
-    return normed
+    # Hard clip via numpy — guarantees [-1, 1] regardless of outliers
+    out = np.clip(normed.values, -1.0, 1.0).astype(np.float32)
+    result = xr.DataArray(out, dims=da.dims, coords=da.coords, name=da.name)
+    result.attrs["norm_lo"] = lo
+    result.attrs["norm_hi"] = hi
+    return result
 
 
 def normalize_var(da: xr.DataArray) -> xr.DataArray:
