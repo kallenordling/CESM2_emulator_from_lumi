@@ -45,12 +45,12 @@ warnings.filterwarnings("ignore")
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     vals = da.values.flatten().astype(np.float64)
 
-    if da.name == "SUL":
-        mask = vals > 1e-9
-    elif da.name == "CO2":
-        mask = vals > 1e-3
-    else:
-        mask = vals > 0
+    #if da.name == "SUL":
+    #    mask = vals > 1e-9
+    #elif da.name == "CO2":
+    #    mask = vals > 1e-3
+    #else:
+    mask = vals > 0
 
     log_vals = np.log1p(np.clip(vals, 0, None))  # log1p of the data, not just for stats
 
@@ -62,7 +62,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
 
     # Cells below the floor (ocean/background) pin to -1
-    floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0)
+    floor = {"SUL": 1e-19, "CO2": 1e-13}.get(da.name, 0)
     normed = xr.where(da <= floor, -1.0, normed).clip(-1.0, 1.0)
 
     normed = normed.astype("float32")
