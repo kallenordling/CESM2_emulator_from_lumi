@@ -45,17 +45,15 @@ warnings.filterwarnings("ignore")
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     vals = da.values.flatten()
     if da.name == "SUL":
-        mask = vals > 1e-13
+        mask = vals > 1e-9
     elif da.name == "CO2":
-        mask = vals > 1e-8
+        mask = vals > 1e-3
     else:
         mask = vals > 0
     vals_log = np.log1p(vals)
     mu    = float(vals_log[mask].mean())
     sigma = float(vals_log[mask].std())
     result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
-    result = result.clip(max=1)
-
     # Store params on the DataArray for display
     result.attrs["norm_mu"]    = mu
     result.attrs["norm_sigma"] = sigma
@@ -101,6 +99,35 @@ def _symlog_lims(data: np.ndarray, pct=99.5):
     """Symmetric percentile bounds, useful for raw SO2 with huge dynamic range."""
     hi = float(np.nanpercentile(np.abs(data), pct))
     return -hi, hi
+
+
+def make_symlog_norm(data: np.ndarray, pct_hi=99.5, linthresh_pct=5.0):
+    """Build a SymLogNorm that works for both raw (positive-only) and
+    signed (normalised / PCA) arrays.
+
+    * ``linthresh`` is set to the *linthresh_pct*-th percentile of the
+      absolute non-zero values so the linear region spans the typical
+      noise floor, not just one tick.
+    * ``vmin`` / ``vmax`` are clipped at the *pct_hi* percentile of |data|
+      so a handful of extreme outliers don't crush the colour scale.
+    """
+    flat = data.ravel()
+    finite = flat[np.isfinite(flat)]
+    abs_nonzero = np.abs(finite[finite != 0])
+
+    if len(abs_nonzero) == 0:
+        return SymLogNorm(linthresh=1e-6, vmin=-1, vmax=1)
+
+    linthresh = max(float(np.percentile(abs_nonzero, linthresh_pct)), 1e-10)
+    hi = float(np.nanpercentile(np.abs(finite), pct_hi))
+
+    # For all-positive data keep vmin=0; for signed data use -hi
+    if float(finite.min()) >= 0:
+        vmin, vmax = 0.0, hi
+    else:
+        vmin, vmax = -hi, hi
+
+    return SymLogNorm(linthresh=linthresh, vmin=vmin, vmax=vmax)
 
 
 def plot_timeseries(axes_row, years, ts_raw, ts_norm, ts_pca,
@@ -272,29 +299,17 @@ def diagnose_variable(
         if n_cols == 2:
             axes_sp = list(axes_sp) + [None]
 
-        # Raw  –  use symlog norm so both near-zero (ocean) and peaks are visible
-        linthresh_raw = max(float(np.percentile(raw_snap[raw_snap > 0], 10)), 1e-10) \
-                        if (raw_snap > 0).any() else 1.0
-        raw_hi = float(np.nanpercentile(np.abs(raw_snap), 99.5))
-
         panels = [
-            (axes_sp[0], raw_snap,  "Raw",          "YlOrRd",
-             SymLogNorm(linthresh=linthresh_raw, vmin=0, vmax=raw_hi)),
-            (axes_sp[1], norm_snap, "Normalised",   "RdBu_r",
-             None),   # plain linear, centered
-            (axes_sp[2], pca_snap,  "PCA-filtered", "RdBu_r",
-             None),
+            (axes_sp[0], raw_snap,  "Raw",          "YlOrRd"),
+            (axes_sp[1], norm_snap, "Normalised",   "RdBu_r"),
+            (axes_sp[2], pca_snap,  "PCA-filtered", "RdBu_r"),
         ]
-        for ax, data, label, cmap, snorm in panels:
+        for ax, data, label, cmap in panels:
             if ax is None or data is None:
                 continue
-            if snorm is not None:
-                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
-                                   norm=snorm, shading="auto")
-            else:
-                vabs = max(abs(float(data.min())), abs(float(data.max())), 0.01)
-                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
-                                   vmin=-vabs, vmax=vabs, shading="auto")
+            snorm = make_symlog_norm(data)
+            im = ax.pcolormesh(lons, lats, data, cmap=cmap,
+                               norm=snorm, shading="auto")
             ax.set_title(
                 f"{label}\nmin={data.min():.3g}  max={data.max():.3g}  "
                 f"mean={data.mean():.3g}  std={data.std():.3g}",
@@ -335,27 +350,15 @@ def diagnose_variable(
     stage_cmaps  = ["YlOrRd", "RdBu_r"] + (["RdBu_r"] if pca_np is not None else [])
 
     for row, (arr, cmap, stage) in enumerate(zip(stage_arrays, stage_cmaps, stages)):
-        # Compute colour limits across all snapshot years for this stage
+        # Build a single shared SymLogNorm from all snapshot values for this stage
         snap_vals = np.concatenate([arr[si].ravel() for si, _, _ in valid_snaps])
-        if stage == "Raw":
-            lo_c, hi_c = 0, float(np.nanpercentile(snap_vals, 99.5))
-            linthresh = max(float(np.percentile(snap_vals[snap_vals > 0], 5)), 1e-10) \
-                        if (snap_vals > 0).any() else 1.0
-            shared_norm = SymLogNorm(linthresh=linthresh, vmin=lo_c, vmax=hi_c)
-        else:
-            vabs = max(abs(float(snap_vals.min())), abs(float(snap_vals.max())), 0.01)
-            shared_norm = None
-            lo_c, hi_c = -vabs, vabs
+        shared_norm = make_symlog_norm(snap_vals)
 
         for col, (si, slbl, scol) in enumerate(valid_snaps):
             ax = axes_cmp[row, col]
             data = arr[si]
-            if shared_norm is not None:
-                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
-                                   norm=shared_norm, shading="auto")
-            else:
-                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
-                                   vmin=lo_c, vmax=hi_c, shading="auto")
+            im = ax.pcolormesh(lons, lats, data, cmap=cmap,
+                               norm=shared_norm, shading="auto")
             ax.set_title(
                 f"Year {slbl}\nmin={data.min():.3g}  max={data.max():.3g}",
                 fontsize=8.5, color=scol,
@@ -475,9 +478,8 @@ def diagnose_variable(
             axes_eof = [axes_eof]
         for k, ax in enumerate(axes_eof[:n_eofs]):
             eof = components[k]
-            vabs = float(np.abs(eof).max())
             im = ax.pcolormesh(lons, lats, eof, cmap="RdBu_r",
-                               vmin=-vabs, vmax=vabs, shading="auto")
+                               norm=make_symlog_norm(eof), shading="auto")
             pct_k = pca_obj.explained_variance_ratio_[k] * 100
             ax.set_title(f"EOF {k+1}  ({pct_k:.2f}% var)", fontsize=9)
             ax.set_xlabel("Lon"); ax.set_ylabel("Lat" if k == 0 else "")
