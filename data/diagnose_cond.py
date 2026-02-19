@@ -54,6 +54,20 @@ def scale_cumulative_linear(da: xr.DataArray):
     normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
     return normed.broadcast_like(da).astype("float32")
 
+def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
+    """Log10 normalization to [-1, 1] preserving spatial structure.
+    Percentiles computed only on non-zero cells to avoid ocean domination.
+    Near-zero cells (ocean) mapped to -1.
+    Best for regionally varying emissions like SO2."""
+    positive = da.where(da > floor)
+    lx = np.log10(positive)
+    lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
+    hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
+    z = (lx - lo) / max(hi - lo, 1e-30)
+    result = (2.0 * z.clip(0, 1) - 1.0)
+    result = xr.where(da <= floor, -1.0, result)
+    return result.fillna(-1.0).astype("float32")
+
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
     vals = da.values.flatten()
     if da.name == "SUL":
@@ -74,7 +88,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
 
 def normalize_var(da: xr.DataArray) -> xr.DataArray:
     if da.name in ("CO2", "SO2", "SUL"):
-        return  scale_cumulative_linear(da).fillna(0)
+        return  scale_spatial_log10(da).fillna(0)
     raise ValueError(f"No normalization defined for variable '{da.name}'")
 
 
