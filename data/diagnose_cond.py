@@ -50,7 +50,7 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
         mask = vals > 1e-3
     else:
         mask = vals > 0
-    vals_log = np.log1p(vals[mask])
+    vals_log = np.log1p(vals)
     mu    = float(vals_log[mask].mean())
     sigma = float(vals_log[mask].std())
     result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
