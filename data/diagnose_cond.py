@@ -42,21 +42,33 @@ warnings.filterwarnings("ignore")
 # Normalisation helpers  (mirrors climate_dataset.py exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def norm_zscore(da: xr.DataArray, lo_pct: float = 1.0, hi_pct: float = 99.0) -> xr.DataArray:
+def norm_zscore(
+    da: xr.DataArray,
+    lo_pct: float = 1.0,
+    hi_pct: float = 99.0,
+    mode: str = "percentile",   # "percentile" | "zscore"
+    n_std: float = 3.0,         # only used when mode="zscore"
+) -> xr.DataArray:
     """
     Log1p normalisation to [-1, 1].
 
-    The old version had two bugs:
-      1. log1p was only used to compute mu/sigma, but raw linear da was
-         normalised — stats and transform in different spaces.
-      2. No output bounds: z-score is unbounded, hence max >> 1.
+    mode='percentile'  (default)
+        lo = p(lo_pct) of log1p(non-ocean values)
+        hi = p(hi_pct) of log1p(non-ocean values)
+        Robust to outliers; the bulk of real-emission cells fill [-1, 1].
 
-    This version:
-      1. Applies log1p to da itself (consistent space).
-      2. Uses percentile-based lo/hi on non-ocean cells only, so a handful
-         of extreme point-source outliers don't stretch the scale and collapse
-         aviation corridors / shipping lanes to indistinguishable near -1.
-      3. Hard numpy clip — avoids any xarray clip edge-cases.
+    mode='zscore'
+        lo = mean - n_std * std   of log1p(non-ocean values)
+        hi = mean + n_std * std
+        Keeps the Gaussian shape centred; n_std=3 maps ±3σ → ±1.
+        Useful when you want the model to see relative anomalies rather than
+        the absolute rank of each cell.
+
+    Both modes:
+      - Operate on log1p(da) so transform and statistics are in the same space.
+      - Compute statistics on non-ocean (above-floor) cells only.
+      - Pin below-floor cells to exactly -1.
+      - Hard-clip output to [-1, 1] via numpy (bypasses xarray edge-cases).
     """
     floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0.0)
 
@@ -69,10 +81,18 @@ def norm_zscore(da: xr.DataArray, lo_pct: float = 1.0, hi_pct: float = 99.0) -> 
         result.attrs.update(norm_lo=0.0, norm_hi=1.0)
         return result
 
-    lo = float(np.percentile(log_vals[mask], lo_pct))
-    hi = float(np.percentile(log_vals[mask], hi_pct))
+    if mode == "percentile":
+        lo = float(np.percentile(log_vals[mask], lo_pct))
+        hi = float(np.percentile(log_vals[mask], hi_pct))
+    elif mode == "zscore":
+        mu  = float(log_vals[mask].mean())
+        std = float(log_vals[mask].std())
+        lo  = mu - n_std * std
+        hi  = mu + n_std * std
+    else:
+        raise ValueError(f"mode must be 'percentile' or 'zscore', got '{mode}'")
 
-    # Transform DataArray in log-space, stretch to [-1, 1]
+    # Transform DataArray in log-space, stretch [lo, hi] -> [-1, 1]
     log_da = np.log1p(da.clip(min=0))
     normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
 
@@ -82,8 +102,9 @@ def norm_zscore(da: xr.DataArray, lo_pct: float = 1.0, hi_pct: float = 99.0) -> 
     # Hard clip via numpy — guarantees [-1, 1] regardless of outliers
     out = np.clip(normed.values, -1.0, 1.0).astype(np.float32)
     result = xr.DataArray(out, dims=da.dims, coords=da.coords, name=da.name)
-    result.attrs["norm_lo"] = lo
-    result.attrs["norm_hi"] = hi
+    result.attrs["norm_lo"]   = lo
+    result.attrs["norm_hi"]   = hi
+    result.attrs["norm_mode"] = mode
     return result
 
 
