@@ -42,64 +42,27 @@ warnings.filterwarnings("ignore")
 # Normalisation helpers  (mirrors climate_dataset.py exactly)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def scale_cumulative_linear(da: xr.DataArray):
-    """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
-    Preserves temporal signal perfectly; every grid cell gets the same
-    value per year (the global mean emission level for that year).
-    Best for well-mixed gases like CO2."""
-    spatial_dims = [d for d in da.dims if d != "year"]
-    ts = da.mean(dim=spatial_dims)  # [year]
-    lo = float(ts.min(skipna=True))
-    hi = float(ts.max(skipna=True))
-    normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
-    return normed.broadcast_like(da).astype("float32")
-
-def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
-    """Log10 normalization to [-1, 1] preserving spatial structure.
-    Percentiles computed only on non-zero cells to avoid ocean domination.
-    Near-zero cells (ocean) mapped to -1.
-    Best for regionally varying emissions like SO2."""
-    positive = da.where(da > floor)
-    lx = np.log10(positive)
-    lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
-    hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
-    z = (lx - lo) / max(hi - lo, 1e-30)
-    result = (2.0 * z.clip(0, 1) - 1.0)
-    result = xr.where(da <= floor, -1.0, result)
-    return result.fillna(-1.0).astype("float32")
-
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
-    vals = da.values.flatten().astype(np.float64)
-
+    vals = da.values.flatten()
     if da.name == "SUL":
         mask = vals > 1e-9
     elif da.name == "CO2":
         mask = vals > 1e-3
     else:
         mask = vals > 0
-
-    log_vals = np.log1p(np.clip(vals, 0, None))  # log1p of the data, not just for stats
-
-    lo = float(log_vals[mask].min())   # or use np.percentile(..., 1) to be robust to outliers
-    hi = float(log_vals[mask].max())   # or np.percentile(..., 99)
-
-    # Apply log1p to the DataArray itself, then stretch [lo, hi] -> [-1, 1]
-    log_da = np.log1p(da.clip(min=0))
-    normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
-
-    # Cells below the floor (ocean/background) pin to -1
-    floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0)
-    normed = xr.where(da <= floor, -1.0, normed).clip(-1.0, 1.0)
-
-    normed = normed.astype("float32")
-    normed.attrs["norm_lo"] = lo
-    normed.attrs["norm_hi"] = hi
-    return normed
+    vals_log = np.log1p(vals)
+    mu    = float(vals_log[mask].mean())
+    sigma = float(vals_log[mask].std())
+    result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
+    # Store params on the DataArray for display
+    result.attrs["norm_mu"]    = mu
+    result.attrs["norm_sigma"] = sigma
+    return result
 
 
 def normalize_var(da: xr.DataArray) -> xr.DataArray:
     if da.name in ("CO2", "SO2", "SUL"):
-        return  norm_zscore(da).fillna(0)
+        return norm_zscore(da).fillna(0)
     raise ValueError(f"No normalization defined for variable '{da.name}'")
 
 
@@ -336,17 +299,24 @@ def diagnose_variable(
         if n_cols == 2:
             axes_sp = list(axes_sp) + [None]
 
+        # Shared linear scale for norm/PCA panels (both already in [-1, 1])
+        signed_data = [d for d in [norm_snap, pca_snap] if d is not None]
+        vabs = max(float(np.abs(np.concatenate([d.ravel() for d in signed_data])).max()), 0.01)
+
         panels = [
-            (axes_sp[0], raw_snap,  "Raw",          "YlOrRd"),
-            (axes_sp[1], norm_snap, "Normalised",   "RdBu_r"),
-            (axes_sp[2], pca_snap,  "PCA-filtered", "RdBu_r"),
+            (axes_sp[0], raw_snap,  "Raw",          "YlOrRd",  True),
+            (axes_sp[1], norm_snap, "Normalised",   "RdBu_r",  False),
+            (axes_sp[2], pca_snap,  "PCA-filtered", "RdBu_r",  False),
         ]
-        for ax, data, label, cmap in panels:
+        for ax, data, label, cmap, use_symlog in panels:
             if ax is None or data is None:
                 continue
-            snorm = make_symlog_norm(data)
-            im = ax.pcolormesh(lons, lats, data, cmap=cmap,
-                               norm=snorm, shading="auto")
+            if use_symlog:
+                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
+                                   norm=make_symlog_norm(data), shading="auto")
+            else:
+                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
+                                   vmin=-vabs, vmax=vabs, shading="auto")
             ax.set_title(
                 f"{label}\nmin={data.min():.3g}  max={data.max():.3g}  "
                 f"mean={data.mean():.3g}  std={data.std():.3g}",
@@ -387,15 +357,27 @@ def diagnose_variable(
     stage_cmaps  = ["YlOrRd", "RdBu_r"] + (["RdBu_r"] if pca_np is not None else [])
 
     for row, (arr, cmap, stage) in enumerate(zip(stage_arrays, stage_cmaps, stages)):
-        # Build a single shared SymLogNorm from all snapshot values for this stage
         snap_vals = np.concatenate([arr[si].ravel() for si, _, _ in valid_snaps])
-        shared_norm = make_symlog_norm(snap_vals)
+
+        if stage == "Raw":
+            # SymLogNorm for raw — shared across snapshot columns
+            shared_norm = make_symlog_norm(snap_vals)
+            vmin_l, vmax_l = None, None   # unused when norm is set
+        else:
+            # Linear symmetric scale for normalised / PCA-filtered
+            shared_norm = None
+            vabs = max(float(np.abs(snap_vals).max()), 0.01)
+            vmin_l, vmax_l = -vabs, vabs
 
         for col, (si, slbl, scol) in enumerate(valid_snaps):
             ax = axes_cmp[row, col]
             data = arr[si]
-            im = ax.pcolormesh(lons, lats, data, cmap=cmap,
-                               norm=shared_norm, shading="auto")
+            if shared_norm is not None:
+                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
+                                   norm=shared_norm, shading="auto")
+            else:
+                im = ax.pcolormesh(lons, lats, data, cmap=cmap,
+                                   vmin=vmin_l, vmax=vmax_l, shading="auto")
             ax.set_title(
                 f"Year {slbl}\nmin={data.min():.3g}  max={data.max():.3g}",
                 fontsize=8.5, color=scol,

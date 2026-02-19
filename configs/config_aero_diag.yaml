@@ -21,7 +21,7 @@ data:
     target_vars: ["TREFHT"]
     cond_vars: ["CO2",'SUL']
     n_components_target: 10
-    n_components_cond: [3, 5]
+    n_components_cond: [0, 0]
 
 # Model (your diffusion / UNet wrapper that exposes loss_components or loss)
 
