@@ -43,21 +43,32 @@ warnings.filterwarnings("ignore")
 # ──────────────────────────────────────────────────────────────────────────────
 
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
-    vals = da.values.flatten()
+    vals = da.values.flatten().astype(np.float64)
+
     if da.name == "SUL":
         mask = vals > 1e-9
     elif da.name == "CO2":
         mask = vals > 1e-3
     else:
         mask = vals > 0
-    vals_log = np.log1p(vals)
-    mu    = float(vals_log[mask].mean())
-    sigma = float(vals_log[mask].std())
-    result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
-    # Store params on the DataArray for display
-    result.attrs["norm_mu"]    = mu
-    result.attrs["norm_sigma"] = sigma
-    return result
+
+    log_vals = np.log1p(np.clip(vals, 0, None))  # log1p of the data, not just for stats
+
+    lo = float(log_vals[mask].min())   # or use np.percentile(..., 1) to be robust to outliers
+    hi = float(log_vals[mask].max())   # or np.percentile(..., 99)
+
+    # Apply log1p to the DataArray itself, then stretch [lo, hi] -> [-1, 1]
+    log_da = np.log1p(da.clip(min=0))
+    normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
+
+    # Cells below the floor (ocean/background) pin to -1
+    floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0)
+    normed = xr.where(da <= floor, -1.0, normed).clip(-1.0, 1.0)
+
+    normed = normed.astype("float32")
+    normed.attrs["norm_lo"] = lo
+    normed.attrs["norm_hi"] = hi
+    return normed
 
 
 def normalize_var(da: xr.DataArray) -> xr.DataArray:
