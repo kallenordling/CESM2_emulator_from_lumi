@@ -351,7 +351,7 @@ class UNetTrainer:
 
                 # We want mse_correct < mse_null (correct conditioning should help)
                 # Hinge: penalize if correct isn't better than null by margin
-                margin = 0.01
+                margin = 0.1
                 cond_loss = torch.relu(margin + mse_correct - mse_null).mean()
 
                 # Diagnostic: log how much the conditioning actually changes the output
