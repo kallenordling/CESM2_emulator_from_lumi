@@ -54,8 +54,8 @@ def norm_zscore(da: xr.DataArray) -> xr.DataArray:
 
     log_vals = np.log1p(np.clip(vals, 0, None))  # log1p of the data, not just for stats
 
-    lo = np.percentile(log_vals, 0.01) #float(log_vals[mask].min())   # or use np.percentile(..., 1) to be robust to outliers
-    hi = np.percentile(log_vals,.99)#float(log_vals[mask].max())   # or np.percentile(..., 99)
+    lo = np.percentile(log_vals, 1) #float(log_vals[mask].min())   # or use np.percentile(..., 1) to be robust to outliers
+    hi = np.percentile(log_vals,99)#float(log_vals[mask].max())   # or np.percentile(..., 99)
 
     # Apply log1p to the DataArray itself, then stretch [lo, hi] -> [-1, 1]
     log_da = np.log1p(da.clip(min=0))
