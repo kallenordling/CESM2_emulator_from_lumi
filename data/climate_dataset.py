@@ -35,23 +35,70 @@ DENORM_FN = {
 # These functions transform the range of the data to [-1, 1]
 MIN_MAX_FN = {"TREFHT": lambda x: x}
 
-def norm_zscore(da: xr.DataArray) -> xr.DataArray:
-    vals = da.values.flatten()
-    if da.name == "SUL":
-        mask = vals > 1e-9
-    elif da.name == "CO2":
-        mask = vals > 1e-3
-    else:
-        mask = vals > 0
-    vals_log = np.log1p(vals)
-    mu    = float(vals_log[mask].mean())
-    sigma = float(vals_log[mask].std())
-    result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
-    # Store params on the DataArray for display
-    result.attrs["norm_mu"]    = mu
-    result.attrs["norm_sigma"] = sigma
-    return result
+def norm_zscore(
+    da: xr.DataArray,
+    lo_pct: float = 1.0,
+    hi_pct: float = 99.0,
+    mode: str = "zscore",   # "percentile" | "zscore"
+    n_std: float = 3.0,         # only used when mode="zscore"
+) -> xr.DataArray:
+    """
+    Log1p normalisation to [-1, 1].
 
+    mode='percentile'  (default)
+        lo = p(lo_pct) of log1p(non-ocean values)
+        hi = p(hi_pct) of log1p(non-ocean values)
+        Robust to outliers; the bulk of real-emission cells fill [-1, 1].
+
+    mode='zscore'
+        lo = mean - n_std * std   of log1p(non-ocean values)
+        hi = mean + n_std * std
+        Keeps the Gaussian shape centred; n_std=3 maps ±3σ → ±1.
+        Useful when you want the model to see relative anomalies rather than
+        the absolute rank of each cell.
+
+    Both modes:
+      - Operate on log1p(da) so transform and statistics are in the same space.
+      - Compute statistics on non-ocean (above-floor) cells only.
+      - Pin below-floor cells to exactly -1.
+      - Hard-clip output to [-1, 1] via numpy (bypasses xarray edge-cases).
+    """
+    floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0.0)
+
+    vals     = da.values.flatten().astype(np.float64)
+    log_vals = np.log1p(np.clip(vals, 0.0, None))
+    mask     = vals > floor
+
+    if mask.sum() == 0:
+        result = xr.full_like(da, -1.0).astype("float32")
+        result.attrs.update(norm_lo=0.0, norm_hi=1.0)
+        return result
+
+    if mode == "percentile":
+        lo = float(np.percentile(log_vals[mask], lo_pct))
+        hi = float(np.percentile(log_vals[mask], hi_pct))
+    elif mode == "zscore":
+        mu  = float(log_vals[mask].mean())
+        std = float(log_vals[mask].std())
+        lo  = mu - n_std * std
+        hi  = mu + n_std * std
+    else:
+        raise ValueError(f"mode must be 'percentile' or 'zscore', got '{mode}'")
+
+    # Transform DataArray in log-space, stretch [lo, hi] -> [-1, 1]
+    log_da = np.log1p(da.clip(min=0))
+    normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
+
+    # Pin ocean / below-floor cells to exactly -1
+    normed = xr.where(da <= floor, -1.0, normed)
+
+    # Hard clip via numpy — guarantees [-1, 1] regardless of outliers
+    out = np.clip(normed.values, -1.0, 1.0).astype(np.float32)
+    result = xr.DataArray(out, dims=da.dims, coords=da.coords, name=da.name)
+    result.attrs["norm_lo"]   = lo
+    result.attrs["norm_hi"]   = hi
+    result.attrs["norm_mode"] = mode
+    return result
 
 
 def min_max_norm(x: Any, min_val: float, max_val: float) -> Any:
