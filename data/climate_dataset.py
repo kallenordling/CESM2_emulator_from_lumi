@@ -36,28 +36,23 @@ DENORM_FN = {
 MIN_MAX_FN = {"TREFHT": lambda x: x}
 
 def norm_zscore(da: xr.DataArray) -> xr.DataArray:
-    """
-    Z-score normalization: (x - mean) / std, computed over all values globally.
-
-    Parameters
-    ----------
-    da : xr.DataArray
-        Input data array.
-
-    Returns
-    -------
-    xr.DataArray
-        Normalized array with mean ≈ 0 and std ≈ 1, same shape and coordinates.
-    """
-    vals=da.values.flatten()
+    vals = da.values.flatten()
     if da.name == "SUL":
-        mask = vals > 1e-13
-    if da.name == "CO2":
-        mask = vals > 1e-8
-    vals=np.log1p(vals)
-    mu    = float(vals[mask].mean())
-    sigma = float(vals[mask].std())
-    return ((da - mu) / max(sigma, 1e-30)).astype("float32")
+        mask = vals > 1e-9
+    elif da.name == "CO2":
+        mask = vals > 1e-3
+    else:
+        mask = vals > 0
+    vals_log = np.log1p(vals)
+    mu    = float(vals_log[mask].mean())
+    sigma = float(vals_log[mask].std())
+    result = ((da - mu) / max(sigma, 1e-30)).astype("float32")
+    # Store params on the DataArray for display
+    result.attrs["norm_mu"]    = mu
+    result.attrs["norm_sigma"] = sigma
+    return result
+
+
 
 def min_max_norm(x: Any, min_val: float, max_val: float) -> Any:
     """Normalizes a data array to the range [-1, 1]"""
