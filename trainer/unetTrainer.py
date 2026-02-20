@@ -449,6 +449,11 @@ class UNetTrainer:
             os.makedirs(self.save_dir, exist_ok=True)
             save_name = "best_epoch" + "" + f"_{epoch}.pt"
             torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
+            # Confirm new architecture keys are present in the saved checkpoint
+            new_arch_keys = [k for k in state_dict["EMA"] if
+                             "residual_projs" in k or "block1_proj" in k]
+            print(f"[SAVE] best_epoch_{epoch}: {len(state_dict["EMA"])} EMA keys, "
+                  f"{len(new_arch_keys)} new-arch keys present.")
     def save(self, epoch: int):
         """Saves the state of training to disk."""
         if self.save_name is None:
@@ -471,6 +476,11 @@ class UNetTrainer:
 
             # Save the State dictionary to disk
             torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
+            # Confirm new architecture keys are present in the saved checkpoint
+            new_arch_keys = [k for k in state_dict["EMA"] if
+                             "residual_projs" in k or "block1_proj" in k]
+            print(f"[SAVE] epoch_{epoch}: {len(state_dict["EMA"])} EMA keys, "
+                  f"{len(new_arch_keys)} new-arch keys present.")
 
             base = self.save_name.split(".pt")[0]
             save_name = f"{base}_{epoch}.pt"
@@ -499,36 +509,66 @@ class UNetTrainer:
                 except OSError:
                     pass
 
+    def _compat_load_state_dict(self, model, state_dict, label="model"):
+        """
+        Load state_dict with architecture-change tolerance.
+
+        Uses strict=False so weights that exist in both checkpoint and current
+        model are restored exactly.  Any keys present in the current model but
+        missing from the checkpoint (new architecture additions) are zero-inited
+        — identical to their initialisation at the start of training, so
+        training can resume safely and the new modules learn from scratch on top
+        of the restored backbone.
+
+        Unexpected keys (old architecture keys no longer in the model) are
+        logged but ignored.
+        """
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+        if missing:
+            print(f"[LOAD] {label}: {len(missing)} new keys not in checkpoint — zero-initing:")
+            current_sd = model.state_dict()
+            for key in missing:
+                if key in current_sd:
+                    current_sd[key].zero_()
+                    print(f"  zero-init: {key}  shape={tuple(current_sd[key].shape)}")
+                else:
+                    print(f"  [WARN] {key!r} not found in current model — skipping")
+        else:
+            print(f"[LOAD] {label}: clean load, all keys matched.")
+
+        if unexpected:
+            print(f"[LOAD] {label}: {len(unexpected)} old keys ignored (not in current model):")
+            for k in unexpected[:10]:
+                print(f"  {k}")
+
     def load(self, path):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
-        # Restore model
-        self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["Unet"], strict=True)
+        print(f"[LOAD] Checkpoint keys: {list(checkpoint.keys())}")
+        print(f"[LOAD] Global step in checkpoint: {checkpoint.get('Global Step', 'n/a')}")
 
-        # Restore EMA (optional)
+        # ── Restore online model (Unet) ───────────────────────────────────────
+        # strict=False via _compat_load_state_dict so resuming an old checkpoint
+        # into a new architecture doesn't crash — new params are zero-inited.
+        self._compat_load_state_dict(
+            self.accelerator.unwrap_model(self.model),
+            checkpoint["Unet"],
+            label="Unet (online)",
+        )
+
+        # ── Restore EMA model ─────────────────────────────────────────────────
+        # EMA weights (checkpoint["EMA"]) are a plain UNetModel3D state dict.
+        # Load them directly into self.ema_model.ema_model using the same
+        # compat loader so new keys are zero-inited consistently.
         if "EMA" in checkpoint and checkpoint["EMA"] is not None and hasattr(self, "ema_model"):
             try:
-                # self.ema_model.load_state_dict(checkpoint["EMA"], strict=False)
-                # self.ema_model = checkpoint["EMA"].to(self.device)
-
-                ema_model_sd = checkpoint["EMA"]  # full EMA state dict (online_model + ema_model)
-
-                # Extract only EMA weights and strip "ema_model." prefix
-                # ema_model_sd = {
-                #     k.replace("ema_model.", ""): v
-                #     for k, v in ema_wrapped_sd.items()
-                #     if k.startswith("ema_model.")
-                # }
-
-                ema_model = EMA(
-                    self.model,
-                    beta=0.9999,  # exponential moving average factor
-                    update_after_step=100,  # only after this number of .update() calls will it start updating
-                    update_every=10,
-                ).to(self.device)
-                ema_model.ema_model.load_state_dict(ema_model_sd)
-                ema_model.eval()
-
+                self._compat_load_state_dict(
+                    self.ema_model.ema_model,
+                    checkpoint["EMA"],
+                    label="EMA",
+                )
+                self.ema_model.eval()
             except Exception as e:
                 print(f"[WARN] Could not load EMA: {e}")
 
