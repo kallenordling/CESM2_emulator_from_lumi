@@ -26,8 +26,10 @@ cond_file: emissions_co2_so2_regridded.nc #emissions.nc
 sul_mul: 0
 co2_mul: 1
 dataset:
-  _target_: data.climate_datasetv2.ClimateDataset
+  _target_: data.climate_dataset.ClimateDataset
   seq_len: 1
+  n_components_target: 10
+  n_components_cond: [ 3, 5 ]
 
 accelerator:
     mixed_precision: bf16
