@@ -450,10 +450,9 @@ class UNetTrainer:
             save_name = "best_epoch" + "" + f"_{epoch}.pt"
             torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
             # Confirm new architecture keys are present in the saved checkpoint
-            new_arch_keys = [k for k in state_dict["EMA"] if
-                             "residual_projs" in k or "block1_proj" in k]
-            print(f"[SAVE] best_epoch_{epoch}: {len(state_dict["EMA"])} EMA keys, "
-                  f"{len(new_arch_keys)} new-arch keys present.")
+            ema_sd = state_dict["EMA"]
+            new_arch_keys = [k for k in ema_sd if "residual_projs" in k or "block1_proj" in k]
+            print(f"[SAVE] best_epoch_{epoch}: {len(ema_sd)} EMA keys, {len(new_arch_keys)} new-arch keys present.")
     def save(self, epoch: int):
         """Saves the state of training to disk."""
         if self.save_name is None:
@@ -477,10 +476,9 @@ class UNetTrainer:
             # Save the State dictionary to disk
             torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
             # Confirm new architecture keys are present in the saved checkpoint
-            new_arch_keys = [k for k in state_dict["EMA"] if
-                             "residual_projs" in k or "block1_proj" in k]
-            print(f"[SAVE] epoch_{epoch}: {len(state_dict["EMA"])} EMA keys, "
-                  f"{len(new_arch_keys)} new-arch keys present.")
+            ema_sd = state_dict["EMA"]
+            new_arch_keys = [k for k in ema_sd if "residual_projs" in k or "block1_proj" in k]
+            print(f"[SAVE] epoch_{epoch}: {len(ema_sd)} EMA keys, {len(new_arch_keys)} new-arch keys present.")
 
             base = self.save_name.split(".pt")[0]
             save_name = f"{base}_{epoch}.pt"
