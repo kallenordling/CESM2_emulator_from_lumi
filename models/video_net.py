@@ -644,17 +644,19 @@ class SpatialCondEncoder(nn.Module):
                       Each features[i] accumulates context from all levels 0..i
                       via the cross-level residual projections.
         """
-        features  = []
-        prev_feat = None
+        features     = []
+        prev_feat_ds = None   # previous level features AFTER downsampling
         for level, ds, res_proj in zip(self.levels, self.downsamplers, self.residual_projs):
             feat = level(x)
-            # Add projected previous-level features as a residual so deeper
-            # features carry the full multi-scale conditioning context.
-            if res_proj is not None and prev_feat is not None:
-                feat = feat + res_proj(prev_feat)
-            features.append(feat)   # save BEFORE downsampling
-            prev_feat = feat
-            x = ds(feat)            # downsample for next level
+            # Cross-level residual: add a 1x1x1 projection of the previous
+            # level features to carry multi-scale context forward.
+            # We use prev_feat_ds (already downsampled to this level H x W)
+            # so spatial sizes always match for the addition.
+            if res_proj is not None and prev_feat_ds is not None:
+                feat = feat + res_proj(prev_feat_ds)
+            features.append(feat)      # save BEFORE downsampling
+            prev_feat_ds = ds(feat)    # downsample; reuse as residual next iter
+            x = prev_feat_ds           # also feed into next level conv
         return features
 
 
