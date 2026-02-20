@@ -105,26 +105,84 @@ def main(config: DictConfig) -> None:
     model_conf: UNetModel3D = instantiate(conf.model)
 
     if config.gen_mode == "gen":
-        # Load the model from the checkpoint
+        # ── Load checkpoint ───────────────────────────────────────────────────
+        # The trainer (unetTrainer.py) saves the following structure:
+        #   {
+        #     "EMA":         ema_model.ema_model.state_dict(),  # raw UNetModel3D weights
+        #     "Unet":        model.state_dict(),                 # online model weights
+        #     "Optimizer":   optimizer.state_dict(),
+        #     "Global Step": int,
+        #     "PCA":         dataset.get_pca_state(),
+        #   }
+        #
+        # For inference we only need "EMA" (the averaged weights are better
+        # than the online "Unet" weights) and "PCA" (so normalisation matches
+        # exactly what was used during training).
         chkpt: Checkpoint = torch.load(config.load_path, map_location="cpu", weights_only=False)
 
-        # ── Restore PCA projection used during training ───────────────────────
+        print(f"[GENERATE] Loaded checkpoint keys: {list(chkpt.keys())}")
+        print(f"[GENERATE] Global step: {chkpt.get('Global Step', 'n/a')}")
+
+        # ── Restore PCA state ─────────────────────────────────────────────────
+        # Must happen before any use of the dataset so that normalisation is
+        # identical to training. If the checkpoint has no PCA key the dataset
+        # was trained without PCA and we skip this step.
         if "PCA" in chkpt and chkpt["PCA"] is not None:
             dataset.set_pca_state(chkpt["PCA"])
             print("[GENERATE] Restored PCA state from checkpoint")
-            # Re-apply PCA to the already-loaded conditioning tensor
-            # (dataset.load_data was called in __init__ before PCA state was set)
             dataset.load_data(realization_dict[config.gen_mode])
+        else:
+            print("[GENERATE] No PCA state in checkpoint — skipping")
 
-        ema_model_sd = chkpt["EMA"]
+        # ── Build model and load EMA weights ─────────────────────────────────
+        # model_conf is a bare UNetModel3D instance (from config_aero.yaml).
+        # The trainer saves ema_model.ema_model.state_dict(), which is the
+        # plain UNetModel3D state dict — load it directly into model_conf,
+        # then wrap in EMA purely so generate_samples2() can call model(x, t).
+        #
+        # strict=True: if the checkpoint was saved with the same architecture
+        #              as model_conf this is the safe default.
+        # strict=False fallback: if the checkpoint is from an older architecture
+        #              (missing new FiLM keys) we zero-init the missing params
+        #              so inference is identical to the old model.
+        ema_sd = chkpt["EMA"]
 
+        missing, unexpected = model_conf.load_state_dict(ema_sd, strict=False)
+
+        if missing:
+            print(f"[GENERATE] WARNING: {len(missing)} keys missing from checkpoint.")
+            print(f"  These are new architecture params not present in this checkpoint.")
+            print(f"  Zero-initialising them (inference will use old conditioning behaviour).")
+            current_sd = model_conf.state_dict()
+            for key in missing:
+                if key in current_sd:
+                    current_sd[key].zero_()
+                    print(f"    zero-init: {key}  shape={tuple(current_sd[key].shape)}")
+        else:
+            print("[GENERATE] All checkpoint keys matched — clean load.")
+
+        if unexpected:
+            print(f"[GENERATE] WARNING: {len(unexpected)} unexpected keys in checkpoint ")
+            print(f"  (checkpoint has keys the current model does not — likely old arch).")
+            for k in unexpected[:10]:
+                print(f"    {k}")
+
+        # Move to device and wrap in EMA for the sampling interface
+        model_conf = model_conf.to(accelerator.device)
+        model_conf.eval()
+
+        # generate_samples2 expects an ema wrapper with .ema_model attribute
+        # so it can assert the right object was passed. We wrap here to satisfy
+        # that interface without re-averaging any weights.
         model = EMA(
             model_conf,
             beta=0.9999,
             update_after_step=100,
             update_every=10,
         ).to(accelerator.device)
-        model.ema_model.load_state_dict(ema_model_sd)
+        # Replace the freshly-initialised ema_model with our loaded weights.
+        # (EMA.__init__ copies the online model into ema_model, so we overwrite.)
+        model.ema_model.load_state_dict(model_conf.state_dict())
         model.eval()
 
     else:
