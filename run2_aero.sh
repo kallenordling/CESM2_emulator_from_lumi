@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=128G
-#SBATCH --time=10:10:00
+#SBATCH --time=20:10:00
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail
