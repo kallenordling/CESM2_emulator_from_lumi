@@ -352,7 +352,7 @@ def _get_emissions_minmax():
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalizes a data array"""
 
-    if ds.name in ["CO2", "SO2", "SUL"]:
+    if ds.name in ["CO2", "SUL"]:
         minmax = _get_emissions_minmax()
         min_val, max_val = minmax[ds.name]
 
@@ -468,7 +468,7 @@ class ClimateDataset(Dataset):
         only need the conditioning data.
         """
         hist_years = list(range(1850, 2015, 5))  # every 5th year
-        future_years = list(range(2015, 2101))   # every year
+        future_years = list(range(2015, 2101,2))   # every year
         selected_years = hist_years + future_years
 
         # ── Target climate data (skipped in cond_only mode) ──────────────────
