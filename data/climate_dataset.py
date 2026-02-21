@@ -509,8 +509,8 @@ class ClimateDataset(Dataset):
         cond_tensor = self.tensor_data_cond
         for i, var in enumerate(self.cond_vars):
             vals = cond_tensor[i]
-            print(f"{var}: min={vals.min():.4f} max={vals.max():.4f} "
-                  f"std={vals.std():.4f} unique_range={vals.max() - vals.min():.4f}")
+            #print(f"{var}: min={vals.min():.4f} max={vals.max():.4f} "
+            #      f"std={vals.std():.4f} unique_range={vals.max() - vals.min():.4f}")
 
         # Save diagnostic spatial plots (only on first load)
         diag_dir = os.path.join(self.data_dir, "diagnostics")
@@ -570,7 +570,7 @@ class ClimateDataset(Dataset):
             save_path = os.path.join(diag_dir, f"cond_normalized_{var}.png")
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close()
-            print(f"[DIAG] Saved {save_path}")
+            #print(f"[DIAG] Saved {save_path}")
 
         # ── spatial-mean time series ──────────────────────────────────────────
         fig, axes = plt.subplots(len(self.cond_vars), 1,
@@ -605,7 +605,7 @@ class ClimateDataset(Dataset):
         save_path = os.path.join(diag_dir, "cond_timeseries.png")
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"[DIAG] Saved {save_path}")
+        #print(f"[DIAG] Saved {save_path}")
 
         # ── PCA scree + before/after maps ────────────────────────────────────
         self._save_pca_diagnostics(diag_dir)
@@ -654,7 +654,7 @@ class ClimateDataset(Dataset):
                 scree_path = os.path.join(diag_dir, f"pca_scree_{tag}_{vname}.png")
                 plt.savefig(scree_path, dpi=120, bbox_inches='tight')
                 plt.close()
-                print(f"[DIAG] Saved {scree_path}")
+                #print(f"[DIAG] Saved {scree_path}")
 
                 # ── before / after spatial map ────────────────────────────────
                 # Use the middle time-step for a representative snapshot
@@ -695,7 +695,7 @@ class ClimateDataset(Dataset):
                 map_path = os.path.join(diag_dir, f"pca_map_{tag}_{vname}.png")
                 plt.savefig(map_path, dpi=120, bbox_inches='tight')
                 plt.close()
-                print(f"[DIAG] Saved {map_path}")
+                #print(f"[DIAG] Saved {map_path}")
 
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
         """Generate a tensor of data from an xarray dataset"""
