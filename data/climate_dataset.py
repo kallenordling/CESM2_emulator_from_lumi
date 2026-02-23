@@ -167,28 +167,18 @@ def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, 
 
 
 def scale_quantile_transform(da: xr.DataArray, n_quantiles=1000, floor=1e-30):
-    """sklearn QuantileTransformer: rank-based normalization to [-1, 1].
-
-    - Smooth and monotonic — no sudden jumps from hard clipping
-    - Handles extreme skew naturally (rank-based, not value-based)
-    - Preserves spatial structure (high-emission cells get higher values)
-    - Preserves temporal trend (increasing emissions → increasing values)
-    - Ocean/near-zero cells are handled separately → mapped to -1
-    """
+    """sklearn QuantileTransformer: rank-based normalization to [-1, 1]."""
     shape = da.shape
     vals = da.values.copy()
 
-    # Separate ocean/near-zero cells
-    real_mask = vals #vals > floor
+    real_mask = vals
 
     if real_mask.sum() == 0:
-        # All zeros — return flat -1
         return xr.DataArray(
             np.full(shape, -1.0, dtype=np.float32),
             dims=da.dims, coords=da.coords,
         )
 
-    # Fit QuantileTransformer only on non-zero values
     real_vals = vals[real_mask].reshape(-1, 1)
 
     qt = QuantileTransformer(
@@ -198,11 +188,11 @@ def scale_quantile_transform(da: xr.DataArray, n_quantiles=1000, floor=1e-30):
     )
     qt.fit(real_vals)
 
-    # Transform ALL non-zero values → [0, 1] → [-1, 1]
-    transformed = np.full(shape, -1.0, dtype=np.float32)  # ocean = -1
+    transformed = np.full(shape, -1.0, dtype=np.float32)
     transformed[real_mask] = (
         2.0 * qt.transform(vals[real_mask].reshape(-1, 1)).ravel() - 1.0
     )
+    del vals, real_vals
 
     return xr.DataArray(
         transformed, dims=da.dims, coords=da.coords,
@@ -217,28 +207,15 @@ def fit_pca_denoise(
     n_components: int,
     var_name: str = "",
 ) -> tuple[np.ndarray, PCA]:
-    """Fit PCA on a single-variable spatial field and return the denoised
-    reconstruction together with the fitted PCA object.
-
-    Args:
-        data:         Float32 array of shape ``(T, H, W)`` — one variable,
-                      all timesteps.
-        n_components: Number of leading EOF components to retain.  Values
-                      above ``min(T, H*W)`` are silently clamped.
-        var_name:     Optional name used only for the diagnostic print.
-
-    Returns:
-        denoised: Reconstructed array, same shape ``(T, H, W)``.
-        pca:      Fitted :class:`sklearn.decomposition.PCA` object that can
-                  be passed to :func:`apply_pca_denoise` for new data.
-    """
     T, H, W = data.shape
     flat = data.reshape(T, H * W).astype(np.float64)  # PCA needs float64
 
     n_components = min(n_components, T, H * W)
     pca = PCA(n_components=n_components, whiten=False)
     scores = pca.fit_transform(flat)           # (T, n_components)
+    del flat                                   # free before inverse_transform
     recon = pca.inverse_transform(scores)      # (T, H*W)
+    del scores
 
     var_explained = pca.explained_variance_ratio_.sum() * 100
     print(
@@ -246,24 +223,22 @@ def fit_pca_denoise(
         f"{var_explained:.2f}% variance explained"
     )
 
-    return recon.reshape(T, H, W).astype(np.float32), pca
+    result = recon.reshape(T, H, W).astype(np.float32)
+    del recon
+    return result, pca
 
 
 def apply_pca_denoise(data: np.ndarray, pca: PCA) -> np.ndarray:
-    """Project new data through an already-fitted PCA and reconstruct.
-
-    Args:
-        data: Float32 array of shape ``(T, H, W)``.
-        pca:  PCA object previously returned by :func:`fit_pca_denoise`.
-
-    Returns:
-        Denoised array of the same shape.
-    """
+    """Project new data through an already-fitted PCA and reconstruct."""
     T, H, W = data.shape
     flat = data.reshape(T, H * W).astype(np.float64)
     scores = pca.transform(flat)
+    del flat
     recon = pca.inverse_transform(scores)
-    return recon.reshape(T, H, W).astype(np.float32)
+    del scores
+    result = recon.reshape(T, H, W).astype(np.float32)
+    del recon
+    return result
 
 
 def pca_denoise_dataset(
@@ -312,7 +287,7 @@ def pca_denoise_dataset(
     fitted_pcas: list[PCA] = []
 
     for v in range(n_vars):
-        channel = np_data[v]  # (T, H, W)
+        channel = np_data[v]  # (T, H, W) — view, no copy
         if pca_objects is None:
             recon, pca = fit_pca_denoise(channel, n_components_list[v], var_names[v])
             fitted_pcas.append(pca)
@@ -320,8 +295,12 @@ def pca_denoise_dataset(
             recon = apply_pca_denoise(channel, pca_objects[v])
             fitted_pcas.append(pca_objects[v])
         denoised[v] = recon
+        del recon
 
-    return torch.from_numpy(denoised), fitted_pcas
+    del np_data
+    result = torch.from_numpy(denoised)
+    del denoised
+    return result, fitted_pcas
 
 
 # ---------------------------------------------------------------------------
@@ -468,17 +447,29 @@ class ClimateDataset(Dataset):
         only need the conditioning data.
         """
         hist_years = list(range(1850, 2015, 5))  # every 5th year
-        future_years = list(range(2015, 2101,2))   # every year
+        future_years = list(range(2015, 2101, 2))  # every other year
         selected_years = hist_years + future_years
 
         # ── Target climate data (skipped in cond_only mode) ──────────────────
         if not self.cond_only:
+            # Close previous dataset to free file handles and memory
+            if self.xr_data is not None:
+                self.xr_data.close()
+                self.xr_data = None
+            del self.tensor_data
+            self.tensor_data = None
+
             realization_dir = os.path.join(self.data_dir, realization, "*.nc")
-            dataset = xr.open_mfdataset(realization_dir, combine="by_coords").sortby("year")
+            # Open lazily; only materialise when we call convert_xarray_to_tensor
+            dataset = xr.open_mfdataset(
+                realization_dir, combine="by_coords", chunks={"year": 50}
+            ).sortby("year")
             self.lats = dataset.lat
             dataset = dataset[self.vars]
-            self.xr_data = dataset.map(preprocess).map(normalize)#.sel(year=selected_years)
+            self.xr_data = dataset.map(preprocess).map(normalize)
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
+            # Trigger compute and release the dask graph immediately
+            self.tensor_data = self.tensor_data.contiguous()
 
             if self.n_components_target is not None:
                 self.tensor_data, self._pca_target = pca_denoise_dataset(
@@ -489,12 +480,21 @@ class ClimateDataset(Dataset):
                 )
 
         # ── Conditioning data (always loaded) ────────────────────────────────
-        cond_file = os.path.join(self.data_dir, self.cond_file)
-        self.dataset_cond = xr.open_dataset(cond_file)
-        self.dataset_cond = self.dataset_cond[self.cond_vars]
-        self.dataset_cond = self.dataset_cond.map(normalize)#.sel(year=selected_years)
+        if hasattr(self, "dataset_cond") and self.dataset_cond is not None:
+            self.dataset_cond.close()
+        del self.tensor_data_cond
+        self.tensor_data_cond = None
 
-        self.tensor_data_cond = self.convert_xarray_to_tensor(self.dataset_cond)
+        cond_file = os.path.join(self.data_dir, self.cond_file)
+        # Open conditioning file lazily too
+        raw_cond = xr.open_dataset(cond_file, chunks={"year": 50})
+        raw_cond = raw_cond[self.cond_vars].map(normalize)
+        # Materialise into a float32 tensor and immediately close the dataset
+        self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
+        # Keep a lightweight (no-data) reference for coordinate lookups
+        self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars]
+        raw_cond.close()
+        del raw_cond
 
         # ── PCA denoising on conditioning ────────────────────────────────────
         if self.n_components_cond is not None:
@@ -504,13 +504,6 @@ class ClimateDataset(Dataset):
                 var_names=self.cond_vars,
                 pca_objects=self._pca_cond,     # None on first call → fits
             )
-
-        # Print normalized stats
-        cond_tensor = self.tensor_data_cond
-        for i, var in enumerate(self.cond_vars):
-            vals = cond_tensor[i]
-            #print(f"{var}: min={vals.min():.4f} max={vals.max():.4f} "
-            #      f"std={vals.std():.4f} unique_range={vals.max() - vals.min():.4f}")
 
         # Save diagnostic spatial plots (only on first load)
         diag_dir = os.path.join(self.data_dir, "diagnostics")
