@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 from accelerate import Accelerator
@@ -67,22 +67,15 @@ def _list_ckpts_sorted(ckpt_dir, pattern="ckpt_epoch_*.pt"):
     return sorted(paths, key=_key, reverse=True)
 
 
-def calc_mse_loss(model_output, target, lats):
-    """Manually calculate mse loss"""
+def calc_mse_loss(model_output, target, lats, lat_weight: Optional[torch.Tensor] = None):
+    """Latitude-weighted MSE loss. Pass pre-computed lat_weight to avoid re-allocation."""
     spatial_loss = (model_output - target) ** 2
 
-    # Weight the equator more heavily than the poles
-    latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
+    if lat_weight is None:
+        latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
+        lat_weight = torch.cos(torch.deg2rad(latitude))
 
-    latitude_rad = torch.deg2rad(latitude)
-    latitude_weight = torch.cos(latitude_rad)
-
-    # Weight the loss
-    # print(spatial_loss.shape,latitude_weight.shape)
-    lat_weighted_loss = torch.einsum('...yx,y->...yx', spatial_loss,
-                                     latitude_weight).mean()  # (spatial_loss * latitude_weight).mean()
-
-    return lat_weighted_loss
+    return torch.einsum('...yx,y->...yx', spatial_loss, lat_weight).mean()
 
 
 class UNetTrainer:
@@ -160,8 +153,8 @@ class UNetTrainer:
         #    self.batch_size,
         # )
 
-        # Initialize counters
-        self.global_step = 0
+        # Pre-compute latitude weights once and cache on device
+        self._lat_weights: Optional[torch.Tensor] = None
         self.first_epoch = 0
 
         # Keep track of important variables for logging
@@ -234,7 +227,12 @@ class UNetTrainer:
                 ):
                     continue
                 # print("COND SHAPE in train",cond.shape)
-                loss,mse_loss,cond_loss = self.get_loss(batch, cond)
+                loss, mse_loss, cond_loss = self.get_loss(batch, cond)
+                # Detach immediately — we only need scalar values for logging.
+                # Holding live tensors keeps the full computation graph in memory.
+                loss = loss.detach()
+                mse_loss = mse_loss.detach()
+                cond_loss = cond_loss.detach()
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -273,7 +271,9 @@ class UNetTrainer:
                 self.accelerator.print(log_dict, {"Epoch": epoch}, )
                         # progress_bar.set_postfix(**log_dict)
 
-            # progress_bar.close()
+            # Free any leftover GPU memory at epoch boundary
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
 
@@ -316,7 +316,13 @@ class UNetTrainer:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
             # Primary loss: latitude-weighted MSE
-            mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
+            # Build lat_weight once and cache it on the device for speed/memory
+            if self._lat_weights is None or self._lat_weights.device != self.device:
+                lats = torch.as_tensor(
+                    self.train_set.lats.values, dtype=self.weight_dtype, device=self.device
+                )
+                self._lat_weights = torch.cos(torch.deg2rad(lats))
+            mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
 
             # Conditioning loss: trend loss in data space (no second forward pass)
             if self.cond_loss_scaling > 0:
@@ -337,28 +343,38 @@ class UNetTrainer:
                         pred_original_sample = (
                                 alpha_prod_t ** 0.5 * noisy_samples - beta_prod_t ** 0.5 * model_output
                         )
+                    del alpha_prod_t, beta_prod_t
+
+                # Free large intermediates as soon as we're done with them
+                del model_output, noisy_samples
 
                 T = pred_original_sample.shape[2]  # year dim
+
                 if T > 1:
                     half = T // 2
-                    # Trend: difference between second half mean and first half mean
                     pred_trend = pred_original_sample[..., half:, :, :].mean(dim=2) \
                                  - pred_original_sample[..., :half, :, :].mean(dim=2)
                     clean_trend = clean_samples[..., half:, :, :].mean(dim=2) \
                                   - clean_samples[..., :half, :, :].mean(dim=2)
+                    del pred_original_sample
 
                     diff = (pred_trend - clean_trend) ** 2  # (B, V, H, W)
+                    del pred_trend, clean_trend
                     latitude = torch.as_tensor(
                         self.train_set.lats.values,
                         dtype=diff.dtype, device=diff.device
                     )
                     lat_weight = torch.cos(torch.deg2rad(latitude))
                     cond_loss = torch.einsum('bvyx,y->bvyx', diff, lat_weight).mean()
+                    del diff
                 else:
-                    # seq_len=1: trend undefined, skip
+                    del pred_original_sample
                     cond_loss = torch.zeros(1, device=self.device)
             else:
+                del model_output, noisy_samples
                 cond_loss = torch.zeros(1, device=self.device)
+
+            del noise, clean_samples, target
 
             loss = mse_loss + cond_loss * self.cond_loss_scaling
 
@@ -367,7 +383,7 @@ class UNetTrainer:
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)  # set_to_none frees grad memory
 
         return loss, mse_loss, cond_loss
 
