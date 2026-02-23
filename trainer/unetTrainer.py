@@ -142,10 +142,10 @@ class UNetTrainer:
             self.train_set,
             self.accelerator,
             self.batch_size,
-            # shuffle=True,
-            # drop_last=True,              # avoid short last batch on any rank
-            # pin_memory=True,
-            # persistent_workers=True,num_workers=4
+            num_workers=4,
+            prefetch_factor=2,
+            persistent_workers=True,
+            pin_memory=False,  # False for ROCm
         )
         # self.val_loader: ClimateDataLoader = dataloader(
         #    self.val_set,
