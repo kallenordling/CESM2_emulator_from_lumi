@@ -33,8 +33,10 @@ export ACCELERATE_USE_FSDP=0
 export CUDA_LAUNCH_BLOCKING=0
 export NCCL_DEBUG=WARN
 export NCCL_SOCKET_IFNAME=hsn
-export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
-
+export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+export HSA_ENABLE_SDMA=0          # sometimes helps with memory transfer issues
+export ROCM_VISIBLE_DEVICES=0     # ensure clean device assignment per rank
+export MIOPEN_FIND_ENFORCE=2      # use cached kernels, avoid recompilation overhead
 NUM_PROCESSES=$(expr $SLURM_NNODES \* $SLURM_GPUS_PER_NODE)
 MAIN_PROCESS_IP=$(hostname -i)
 
