@@ -339,7 +339,6 @@ class UNetTrainer:
                         )
 
                 T = pred_original_sample.shape[2]  # year dim
-                print(T,"T value")
                 if T > 1:
                     half = T // 2
                     # Trend: difference between second half mean and first half mean
