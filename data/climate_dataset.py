@@ -739,6 +739,64 @@ class ClimateDataset(Dataset):
         self._pca_target = state.get("target")
         self._pca_cond = state.get("cond")
 
+    def get_baseline_mean(
+        self,
+        baseline_start: int = 1850,
+        baseline_end: int = 1900,
+    ) -> torch.Tensor:
+        """Compute the 1850-1900 climatological mean in *normalised* model space.
+
+        The mean is computed from the currently loaded ``self.tensor_data``
+        (shape ``[n_vars, T, H, W]``) by selecting the time indices that
+        correspond to years in ``[baseline_start, baseline_end]``.
+
+        The tensor is already in normalised space (post-preprocessing +
+        normalisation, optionally PCA-filtered), so the result is directly
+        comparable to model outputs and targets during training.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape ``[1, n_vars, 1, H, W]`` — broadcast-ready for
+            ``[B, n_vars, T, H, W]`` tensors used in training.
+
+        Raises
+        ------
+        RuntimeError
+            If no target data is loaded (``cond_only=True``) or if the loaded
+            dataset contains no years in the requested baseline window.
+        """
+        if self.tensor_data is None or self.xr_data is None:
+            raise RuntimeError(
+                "get_baseline_mean() requires target data to be loaded.  "
+                "Call load_data() first and make sure cond_only=False."
+            )
+
+        all_years = self.xr_data.year.values.astype(int)
+        mask = (all_years >= baseline_start) & (all_years <= baseline_end)
+
+        if not mask.any():
+            raise RuntimeError(
+                f"No years found in the baseline window "
+                f"[{baseline_start}, {baseline_end}].  "
+                f"Dataset years run from {all_years.min()} to {all_years.max()}."
+            )
+
+        # tensor_data: [n_vars, T, H, W]
+        indices = torch.from_numpy(np.where(mask)[0])
+        baseline_tensor = self.tensor_data[:, indices, :, :]  # [n_vars, T_base, H, W]
+        mean = baseline_tensor.mean(dim=1, keepdim=True)      # [n_vars, 1, H, W]
+        mean = mean.unsqueeze(0)                               # [1, n_vars, 1, H, W]
+
+        n_years = int(mask.sum())
+        print(
+            f"[BASELINE] Computed climatological mean over {n_years} years "
+            f"({baseline_start}–{baseline_end})  "
+            f"shape={tuple(mean.shape)}  "
+            f"mean={mean.mean().item():.4f}  std={mean.std().item():.4f}"
+        )
+        return mean.float()
+
     def convert_tensor_to_xarray(
         self, tensor: torch.Tensor, coords: xr.DataArray = None
     ) -> xr.Dataset:
