@@ -342,7 +342,7 @@ class UNetTrainer:
                 else:
                     pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps,
                                                                                    model_output)
-
+                print(pred_original_sample.shape, "pre original sampel shape")
                 # Get the mean of both the clean and the predicted original sample
                 clean_mean = clean_samples#.mean(dim=-3)
                 pred_mean = pred_original_sample#.mean(dim=-3)
