@@ -155,6 +155,9 @@ class UNetTrainer:
 
         # Pre-compute latitude weights once and cache on device
         self._lat_weights: Optional[torch.Tensor] = None
+
+        # Initialize counters
+        self.global_step = 0
         self.first_epoch = 0
 
         # Keep track of important variables for logging
