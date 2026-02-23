@@ -6,7 +6,7 @@ seed: 1337
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 16
+    gradient_accumulation_steps: 8
     device_placement: True
     sync_batchnorm: True
 
@@ -41,7 +41,7 @@ model:
     attn_heads: 8
     init_kernel_size: 7
     model_dim: 64
-    use_checkpoint: true
+#    use_checkpoint: true
 
 
 # Optional noise scheduler for sampling (if your model uses one externally)
