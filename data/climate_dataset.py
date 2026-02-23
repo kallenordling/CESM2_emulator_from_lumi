@@ -453,10 +453,11 @@ class ClimateDataset(Dataset):
         # ── Target climate data (skipped in cond_only mode) ──────────────────
         if not self.cond_only:
             # Close previous dataset to free file handles and memory
-            if self.xr_data is not None:
+            if getattr(self, "xr_data", None) is not None:
                 self.xr_data.close()
                 self.xr_data = None
-            del self.tensor_data
+            if hasattr(self, "tensor_data"):
+                del self.tensor_data
             self.tensor_data = None
 
             realization_dir = os.path.join(self.data_dir, realization, "*.nc")
@@ -480,9 +481,10 @@ class ClimateDataset(Dataset):
                 )
 
         # ── Conditioning data (always loaded) ────────────────────────────────
-        if hasattr(self, "dataset_cond") and self.dataset_cond is not None:
+        if getattr(self, "dataset_cond", None) is not None:
             self.dataset_cond.close()
-        del self.tensor_data_cond
+        if hasattr(self, "tensor_data_cond"):
+            del self.tensor_data_cond
         self.tensor_data_cond = None
 
         cond_file = os.path.join(self.data_dir, self.cond_file)
