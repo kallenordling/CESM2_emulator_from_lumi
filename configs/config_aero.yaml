@@ -40,6 +40,8 @@ model:
     attn_heads: 8
     init_kernel_size: 7
     model_dim: 64
+    use_checkpoint: true
+
 
 # Optional noise scheduler for sampling (if your model uses one externally)
 # Remove this block if not needed by your code.
