@@ -106,7 +106,7 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 0 #1.2
+        self.cond_loss_scaling = 0.5#1.2
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -334,34 +334,22 @@ class UNetTrainer:
             # should be closer to the target than output with null conditioning.
             # ================================================================
             if self.cond_loss_scaling > 0:
-                # Null conditioning = zeros (matches CFG training dropout)
-                cond_null = torch.zeros_like(cond_map)
+                # Calculate the avg conditional loss
+                if hasattr(self.scheduler, "alphas_cumprod"):
+                    pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
+                elif self.scheduler.config.prediction_type == "v_prediction":
+                    pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
+                else:
+                    pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps,
+                                                                                   model_output)
 
-                with torch.no_grad():
-                    model_output_null = self.model(
-                        noisy_samples,
-                        timesteps,
-                        cond_map=cond_null,
-                    )
+                # Get the mean of both the clean and the predicted original sample
+                clean_mean = clean_samples#.mean(dim=-3)
+                pred_mean = pred_original_sample#.mean(dim=-3)
+                cond_loss = ((clean_mean - pred_mean) ** 2).mean()
 
-                # Per-sample MSE for correct vs null conditioning
-                reduce_dims = tuple(range(1, model_output.ndim))
-                mse_correct = ((model_output - target) ** 2).mean(dim=reduce_dims)
-                mse_null = ((model_output_null - target) ** 2).mean(dim=reduce_dims)
+                # Calculate the loss
 
-                # We want mse_correct < mse_null (correct conditioning should help)
-                # Hinge: penalize if correct isn't better than null by margin
-                margin = 0.1
-                cond_loss = torch.relu(margin + mse_correct - mse_null).mean()
-
-                # Diagnostic: log how much the conditioning actually changes the output
-                if self.global_step % 200 == 0:
-                    output_diff = (model_output - model_output_null).abs().mean().item()
-                    print(f"[COND DIAG] step={self.global_step} "
-                          f"output_diff={output_diff:.6f} "
-                          f"mse_correct={mse_correct.mean().item():.6f} "
-                          f"mse_null={mse_null.mean().item():.6f} "
-                          f"cond_loss={cond_loss.item():.6f}")
             else:
                 cond_loss = torch.zeros(1, device=self.device)
 
