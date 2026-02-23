@@ -286,11 +286,8 @@ class UNetTrainer:
 
     def get_loss(self, batch, cond_map):
         clean_samples = batch.to(self.weight_dtype)
-
-        # Sample noise that we'll add to the clean images
         noise = torch.randn_like(clean_samples)
 
-        # If we are doing continuous diffusion, timesteps need to be from 0 - 1
         if isinstance(self.scheduler, ContinuousDDPM):
             timesteps = torch.rand(clean_samples.shape[0], device=self.device)
             timesteps = self.scheduler.log_snr(timesteps)
@@ -302,7 +299,6 @@ class UNetTrainer:
                 device=self.device,
             ).long()
 
-        # Add noise to the clean images according to the noise magnitude at each timestep
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
         with self.accelerator.accumulate(self.model):
@@ -312,7 +308,6 @@ class UNetTrainer:
                 cond_map=cond_map,
             )
 
-            # Make sure to get the right target for the loss
             if self.scheduler.config.prediction_type == "epsilon":
                 target = noise
             elif self.scheduler.config.prediction_type == "v_prediction":
@@ -320,50 +315,62 @@ class UNetTrainer:
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
-            # Primary loss: latitude-weighted MSE in v-space
+            # Primary loss: latitude-weighted MSE
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
 
-            # ================================================================
-            # Conditioning loss: NULL vs CORRECT conditioning
-            #
-            # Unlike shuffling (where adjacent years have similar CO2/SO2),
-            # comparing against ZERO conditioning is always a big difference.
-            # This directly penalizes the model for ignoring the conditioning.
-            #
-            # We use a soft version: the output with correct conditioning
-            # should be closer to the target than output with null conditioning.
-            # ================================================================
+            # Conditioning loss: trend loss in data space (no second forward pass)
             if self.cond_loss_scaling > 0:
-                # Calculate the avg conditional loss
-                if hasattr(self.scheduler, "alphas_cumprod"):
-                    pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
-                elif self.scheduler.config.prediction_type == "v_prediction":
-                    pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
+                # Reconstruct x0 estimate — handle both scheduler types
+                if isinstance(self.scheduler, ContinuousDDPM):
+                    pred_original_sample = self.scheduler.predict_start_from_v(
+                        noisy_samples, timesteps, model_output
+                    )
                 else:
-                    pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps,
-                                                                                   model_output)
-                print(pred_original_sample.shape, "pre original sampel shape")
-                # Get the mean of both the clean and the predicted original sample
-                clean_mean = clean_samples#.mean(dim=-3)
-                pred_mean = pred_original_sample#.mean(dim=-3)
-                cond_loss = ((clean_mean - pred_mean) ** 2).mean()
+                    # Standard DDPM: x0 = (x_t - sqrt(1-alpha)*eps) / sqrt(alpha)
+                    alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                    beta_prod_t = 1 - alpha_prod_t
+                    if self.scheduler.config.prediction_type == "epsilon":
+                        pred_original_sample = (
+                                                       noisy_samples - beta_prod_t ** 0.5 * model_output
+                                               ) / alpha_prod_t ** 0.5
+                    else:  # v_prediction
+                        pred_original_sample = (
+                                alpha_prod_t ** 0.5 * noisy_samples - beta_prod_t ** 0.5 * model_output
+                        )
 
-                # Calculate the loss
+                T = pred_original_sample.shape[2]  # year dim
 
+                if T > 1:
+                    half = T // 2
+                    # Trend: difference between second half mean and first half mean
+                    pred_trend = pred_original_sample[..., half:, :, :].mean(dim=2) \
+                                 - pred_original_sample[..., :half, :, :].mean(dim=2)
+                    clean_trend = clean_samples[..., half:, :, :].mean(dim=2) \
+                                  - clean_samples[..., :half, :, :].mean(dim=2)
+
+                    diff = (pred_trend - clean_trend) ** 2  # (B, V, H, W)
+                    latitude = torch.as_tensor(
+                        self.train_set.lats.values,
+                        dtype=diff.dtype, device=diff.device
+                    )
+                    lat_weight = torch.cos(torch.deg2rad(latitude))
+                    cond_loss = torch.einsum('bvyx,y->bvyx', diff, lat_weight).mean()
+                else:
+                    # seq_len=1: trend undefined, skip
+                    cond_loss = torch.zeros(1, device=self.device)
             else:
                 cond_loss = torch.zeros(1, device=self.device)
 
-            # Total loss
             loss = mse_loss + cond_loss * self.cond_loss_scaling
 
-            # Scale the loss by cosine-weighted latitude
             self.accelerator.backward(loss)
 
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss,mse_loss,cond_loss
+
+        return loss, mse_loss, cond_loss
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
