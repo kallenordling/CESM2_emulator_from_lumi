@@ -299,6 +299,17 @@ class UNetTrainer:
 
         return pred_original_sample
 
+    def _decode_x0(self, model_output, noisy_samples, timesteps):
+        """Reconstruct x0 from model output. Gradients flow through model_output."""
+        if isinstance(self.scheduler, ContinuousDDPM):
+            return self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
+        alpha_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+        beta_t = 1.0 - alpha_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            return (noisy_samples - beta_t.sqrt() * model_output) / alpha_t.sqrt()
+        else:  # v_prediction
+            return alpha_t.sqrt() * noisy_samples - beta_t.sqrt() * model_output
+
     def get_loss(self, batch, cond_map):
         clean_samples = batch.to(self.weight_dtype)
         noise = torch.randn_like(clean_samples)
@@ -317,7 +328,7 @@ class UNetTrainer:
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
         with self.accelerator.accumulate(self.model):
-            # ── First forward pass: conditioned ──────────────────────────────
+            # ── Forward pass: correct conditioning (gradients ON) ─────────────
             model_output = self.model(
                 noisy_samples,
                 timesteps,
@@ -338,61 +349,96 @@ class UNetTrainer:
                 )
                 self._lat_weights = torch.cos(torch.deg2rad(lats))
 
-            # Primary latitude-weighted MSE loss
+            # ── Primary MSE loss ──────────────────────────────────────────────
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
 
             # ================================================================
-            # Contrastive conditioning loss — NULL vs CORRECT conditioning
+            # Contrastive anomaly conditioning loss
             #
-            # Compares model_output (conditioned, has grad_fn) against
-            # model_output_null (no_grad, detached). The hinge is differentiable
-            # because mse_correct is computed from model_output which IS part of
-            # the autograd graph. A single combined backward() handles both
-            # mse_loss and cond_loss together — no double-backward issue.
+            # Compares predicted x0 anomaly (w.r.t. 1850-1900 baseline) under
+            # correct vs shuffled conditioning. Shuffled pass runs no_grad since
+            # it only provides the detached reference score. Correct pass keeps
+            # gradients by decoding x0 WITHOUT no_grad — so the path:
+            #
+            #   model_output → x0_correct → anomaly_correct → mse_correct → cond_loss
+            #
+            # is fully differentiable. A single combined backward() handles
+            # mse_loss + cond_loss together with no double-backward issue.
+            #
+            # Shuffled conditioning is a harder/more meaningful contrast than
+            # null (zeros) because it presents a realistic but wrong forcing.
             # ================================================================
-            do_contrast = self.cond_loss_scaling > 0
+            do_contrast = (
+                self.cond_loss_scaling > 0
+                and getattr(self, '_baseline_mean', None) is not None
+            )
 
             if do_contrast:
-                # Null conditioning = zeros (matches CFG dropout null case)
-                cond_null = torch.zeros_like(cond_map)
+                # ── x0 from correct pass — gradients flow through model_output ─
+                x0_correct = self._decode_x0(model_output, noisy_samples, timesteps)
+
+                # ── Shuffled forward pass — no_grad, detached reference only ──
+                B = cond_map.shape[0]
+                min_shuffle = max(1, B // 3)
+                offset = random.randint(min_shuffle, max(min_shuffle, B - 1))
+                cond_shuffled = torch.roll(cond_map, shifts=offset, dims=0)
 
                 with torch.no_grad():
-                    model_output_null = self.model(
+                    model_output_shuffled = self.model(
                         noisy_samples,
                         timesteps,
-                        cond_map=cond_null,
+                        cond_map=cond_shuffled,
                     )
-                del cond_null
+                    # Decode x0 for shuffled pass — no grad needed here
+                    x0_shuffled = self._decode_x0(model_output_shuffled, noisy_samples, timesteps)
+                del cond_shuffled, model_output_shuffled
 
-                # Per-sample MSE — model_output retains grad, model_output_null is detached
-                reduce_dims = tuple(range(1, model_output.ndim))
-                mse_correct = ((model_output - target) ** 2).mean(dim=reduce_dims)
-                mse_null    = ((model_output_null - target) ** 2).mean(dim=reduce_dims)
-                del model_output_null
+                # ── Per-sample lat-weighted MSE in anomaly space ──────────────
+                # anom_clean: the ground-truth anomaly we want the model to match
+                anom_clean = clean_samples.detach() - self._baseline_mean
 
-                # Hinge: penalise if correct conditioning doesn't beat null by margin
-                # cond_loss is differentiable through mse_correct → model_output
-                margin = getattr(self, 'contrastive_margin', 0.01)
-                cond_loss = torch.relu(margin + mse_correct - mse_null).mean()
+                def _anomaly_mse(x0, anom_ref):
+                    """Lat-weighted per-sample MSE between predicted and reference anomaly."""
+                    anom = x0 - self._baseline_mean          # predicted anomaly
+                    diff2 = (anom - anom_ref).pow(2)
+                    del anom
+                    n = diff2.shape[1] * diff2.shape[2] * diff2.shape[4]
+                    lat_sum = self._lat_weights.sum() * n
+                    return torch.einsum('bvtyx,y->b', diff2, self._lat_weights) / lat_sum
+
+                # mse_correct retains grad through x0_correct → model_output
+                mse_correct  = _anomaly_mse(x0_correct, anom_clean)
+                del x0_correct
+
+                # mse_shuffled is fully detached — safe reference baseline
+                with torch.no_grad():
+                    mse_shuffled = _anomaly_mse(x0_shuffled, anom_clean)
+                del x0_shuffled, anom_clean
+
+                # ── Contrastive hinge ─────────────────────────────────────────
+                # Penalise if correct conditioning doesn't beat shuffled by margin.
+                # Differentiable through mse_correct → model_output.
+                margin = getattr(self, 'contrastive_margin', 0.02)
+                cond_loss = torch.relu(margin + mse_correct - mse_shuffled.detach()).mean()
 
                 if self.global_step % 200 == 0 and self.accelerator.is_main_process:
-                    frac_winning = (mse_correct.detach() < mse_null.detach()).float().mean().item()
+                    frac_winning = (mse_correct.detach() < mse_shuffled).float().mean().item()
                     print(
-                        f"[COND DIAG] step={self.global_step}  "
-                        f"mse_correct={mse_correct.detach().mean().item():.6f}  "
-                        f"mse_null={mse_null.detach().mean().item():.6f}  "
-                        f"cond_loss={cond_loss.item():.6f}  "
+                        f"[CONTRAST] step={self.global_step}  "
+                        f"mse_correct={mse_correct.detach().mean().item():.5f}  "
+                        f"mse_shuffled={mse_shuffled.mean().item():.5f}  "
+                        f"cond_loss={cond_loss.item():.5f}  "
                         f"winning={frac_winning*100:.1f}%"
                     )
-                del mse_correct, mse_null
+                del mse_correct, mse_shuffled
             else:
                 cond_loss = torch.zeros(1, device=self.device)
 
             del target, model_output, noisy_samples, noise, clean_samples
 
             # ── Single combined backward ──────────────────────────────────────
-            # Both mse_loss and cond_loss share the same forward graph through
-            # model_output. One backward call handles everything correctly.
+            # mse_loss and cond_loss both flow through the same forward graph.
+            # One backward call is correct — no double-backward, no freed graph.
             loss = mse_loss + cond_loss * self.cond_loss_scaling
             self.accelerator.backward(loss)
 
