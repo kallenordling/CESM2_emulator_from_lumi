@@ -83,7 +83,7 @@ trainer:
   dataloader:
     _target_: data.climate_dataset.ClimateDataLoader
     _partial_: True
-    shuffle: False
+    shuffle: True
     num_workers: 0
     pin_memory: false
     drop_last: false
