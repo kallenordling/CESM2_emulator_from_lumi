@@ -68,19 +68,14 @@ def _list_ckpts_sorted(ckpt_dir, pattern="ckpt_epoch_*.pt"):
 
 
 def calc_mse_loss(model_output, target, lats, lat_weight: Optional[torch.Tensor] = None):
-    """Latitude-weighted MSE loss. Pass pre-computed lat_weight to avoid re-allocation.
+    """Latitude-weighted MSE loss. Pass pre-computed lat_weight to avoid re-allocation."""
+    spatial_loss = (model_output - target) ** 2
 
-    Uses a reducing einsum so the lat-weighted result collapses immediately to a
-    scalar — never materialising a second full [B,V,T,H,W] tensor alongside diff².
-    """
     if lat_weight is None:
-        latitude = torch.as_tensor(lats.values, dtype=model_output.dtype, device=model_output.device)
+        latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
         lat_weight = torch.cos(torch.deg2rad(latitude))
 
-    diff = model_output - target   # [B,V,T,H,W]
-    diff.pow_(2)                   # in-place: no extra allocation
-    # '...yx,y->' contracts the lat dim with weights and reduces everything to scalar
-    return torch.einsum('...yx,y->', diff, lat_weight) / diff.numel()
+    return torch.einsum('...yx,y->...yx', spatial_loss, lat_weight).mean()
 
 
 class UNetTrainer:
@@ -252,7 +247,7 @@ class UNetTrainer:
                     continue
                 # print("COND SHAPE in train",cond.shape)
                 loss, mse_loss, cond_loss = self.get_loss(batch, cond)
-                # get_loss returns already-detached scalars — no graph held
+                # get_loss returns already-detached scalars
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -343,26 +338,26 @@ class UNetTrainer:
                 self._lat_weights = torch.cos(torch.deg2rad(lats))
 
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
-            del target  # free immediately — no longer needed
+            del target
 
             # ================================================================
             # Contrastive anomaly conditioning loss — fully memory-safe
             #
-            # KEY INSIGHT: model_output holds the entire first-pass activation
-            # cache alive (needed for backward). The previous version deleted it
-            # AFTER the contrastive block, meaning the activation cache was live
-            # during the second forward pass → peak = 2x activation memory.
+            # THE ORDERING IS CRITICAL FOR MEMORY:
             #
-            # CORRECT ORDERING:
-            #   1. Compute x0_correct (detached) from model_output
-            #   2. Delete model_output — activation cache is now freeable
-            #   3. Call backward() on mse_loss — this triggers cache release
-            #   4. THEN run second forward pass — only 1x activation at a time
-            #   5. Compute contrastive hinge entirely in no_grad space
-            #   6. Backward on cond_loss separately
+            # model_output holds the entire first-pass activation cache alive.
+            # If we run a second forward pass while model_output exists, both
+            # caches overlap in memory (2x peak). Fix: extract x0_correct from
+            # model_output using no_grad (so no new graph is created and the
+            # result is already detached), then delete model_output, then call
+            # backward() to release the first cache, then run the second pass.
             #
-            # This guarantees peak GPU memory = 1x UNet activation cache at all
-            # times, not 2x.
+            # THE NAMEERROR IS AVOIDED BY NOT USING A CLOSURE:
+            #
+            # A nested function that closes over `noisy_samples` causes
+            # "NameError: cannot access free variable" if noisy_samples is
+            # deleted before the closure is called. Instead we pass noisy_samples
+            # explicitly as an argument to a plain helper.
             # ================================================================
 
             do_contrast = (
@@ -371,39 +366,34 @@ class UNetTrainer:
             )
 
             if do_contrast:
-                # ── Step 1: reconstruct x0 from first pass, DETACHED ─────────
-                # Must happen before del model_output so we still have the output,
-                # but result is detached so x0_correct holds no graph reference.
-                def _x0(out):
+                # ── Step 1: x0 from first pass — no closure, explicit args ───
+                # Passing noisy_samples explicitly avoids the NameError that
+                # occurs when a closure tries to capture a deleted variable.
+                def _decode_x0(out, xt, ts):
+                    """Reconstruct x0 from model output. All args explicit — no closure."""
                     with torch.no_grad():
                         if isinstance(self.scheduler, ContinuousDDPM):
-                            return self.scheduler.predict_start_from_v(
-                                noisy_samples, timesteps, out
-                            )
-                        alpha_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                            return self.scheduler.predict_start_from_v(xt, ts, out)
+                        alpha_t = self.scheduler.alphas_cumprod[ts].view(-1, 1, 1, 1, 1)
                         beta_t  = 1.0 - alpha_t
                         if self.scheduler.config.prediction_type == "epsilon":
-                            return (noisy_samples - beta_t.sqrt() * out) / alpha_t.sqrt()
+                            return (xt - beta_t.sqrt() * out) / alpha_t.sqrt()
                         else:  # v_prediction
-                            return alpha_t.sqrt() * noisy_samples - beta_t.sqrt() * out
+                            return alpha_t.sqrt() * xt - beta_t.sqrt() * out
 
-                x0_correct = _x0(model_output)   # detached via no_grad
+                x0_correct = _decode_x0(model_output, noisy_samples, timesteps)
 
-            # ── Step 2: delete model_output NOW ──────────────────────────────
-            # This drops the reference that was keeping the first-pass activation
-            # cache alive. After backward() below, PyTorch can reclaim it.
+            # ── Step 2: release first-pass activation cache ───────────────────
+            # Delete model_output so its autograd graph has no live references.
+            # backward() below will then free the activation cache completely.
             del model_output
 
-            # ── Step 3: backward on MSE loss ─────────────────────────────────
-            # mse_loss still holds a reference to the graph via its computation
-            # history. Calling backward() here triggers the cache release.
-            # We scale by cond_loss_scaling complement later in a second backward.
+            # ── Step 3: backward on MSE — frees first-pass activation cache ──
             self.accelerator.backward(mse_loss)
-            # Activation cache is now freed. noisy_samples still needed below.
 
-            # ── Contrastive block (no activation cache alive) ─────────────────
+            # ── Contrastive block (activation cache now freed) ─────────────────
             if do_contrast:
-                # ── Step 4: shuffled second forward pass ─────────────────────
+                # ── Step 4: shuffled second forward pass ──────────────────────
                 B = cond_map.shape[0]
                 min_shuffle = max(1, B // 3)
                 offset = random.randint(min_shuffle, max(min_shuffle, B - 1))
@@ -415,23 +405,25 @@ class UNetTrainer:
                         timesteps,
                         cond_map=cond_shuffled,
                     )
-                del cond_shuffled, noisy_samples  # free immediately
+                del cond_shuffled
 
-                x0_shuffled = _x0(model_output_shuffled)
-                del model_output_shuffled
+                # Pass noisy_samples explicitly — safe even though it will be
+                # deleted shortly after, because we're not using a closure.
+                x0_shuffled = _decode_x0(model_output_shuffled, noisy_samples, timesteps)
+                del model_output_shuffled, noisy_samples  # free now — done with both
 
                 # ── Step 5: per-sample lat-weighted MSE in anomaly space ──────
-                # Reducing einsum 'bvtyx,y->b' collapses to [B] directly —
-                # never materialises a full [B,V,T,H,W] weighted tensor.
+                # Fully-reducing einsum 'bvtyx,y->b' → [B] directly, never
+                # materialising a full [B,V,T,H,W] weighted intermediate tensor.
                 anom_clean = clean_samples.detach() - self._baseline_mean
 
                 def _contrast_mse(x0, anom_ref):
-                    anom = x0 - self._baseline_mean       # [B,V,T,H,W]
+                    anom  = x0 - self._baseline_mean
                     diff2 = (anom - anom_ref)
-                    diff2.pow_(2)                         # in-place
+                    diff2.pow_(2)
                     del anom
-                    # Fully reducing: lat-weights y-dim, mean over all others → [B]
-                    lat_sum = self._lat_weights.sum() * (diff2.shape[1] * diff2.shape[2] * diff2.shape[4])
+                    n = diff2.shape[1] * diff2.shape[2] * diff2.shape[4]
+                    lat_sum = self._lat_weights.sum() * n
                     return torch.einsum('bvtyx,y->b', diff2, self._lat_weights) / lat_sum
 
                 mse_correct  = _contrast_mse(x0_correct,  anom_clean)
@@ -455,8 +447,7 @@ class UNetTrainer:
                 del mse_correct, mse_shuffled
 
                 # ── Step 7: backward on contrastive loss ──────────────────────
-                # Gradient accumulates on top of the mse_loss backward above.
-                # Scale applied here so total loss = mse_loss + scaling*cond_loss.
+                # Accumulates on top of mse_loss gradients from Step 3.
                 self.accelerator.backward(cond_loss * self.cond_loss_scaling)
 
             else:
@@ -465,7 +456,7 @@ class UNetTrainer:
 
             del noise, clean_samples
 
-            # loss scalar for logging only (no graph attached after two backwards)
+            # Logging scalar — graphs already consumed by the two backward calls
             loss = mse_loss.detach() + cond_loss.detach() * self.cond_loss_scaling
 
             if self.accelerator.sync_gradients:
