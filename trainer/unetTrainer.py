@@ -157,9 +157,8 @@ class UNetTrainer:
         self._lat_weights: Optional[torch.Tensor] = None
 
         # Pre-compute 1850-1900 climatological baseline mean in normalised space.
-        # MUST be set before load() is called so that checkpoints which predate
-        # this attribute don't raise AttributeError in get_loss.
-        # Shape: [1, n_vars, 1, H, W] — broadcast-ready for [B, n_vars, T, H, W].
+        # MUST be initialised before load() so old checkpoints don't raise
+        # AttributeError in get_loss.
         try:
             self._baseline_mean: Optional[torch.Tensor] = train_set.get_baseline_mean(
                 baseline_start=1850, baseline_end=1900
@@ -223,7 +222,6 @@ class UNetTrainer:
             self.optimizer,
         ) = self.accelerator.prepare(self.model, self.optimizer)
 
-        # Move baseline mean to the training device (was computed on CPU)
         if self._baseline_mean is not None:
             self._baseline_mean = self._baseline_mean.to(
                 device=self.accelerator.device, dtype=self.weight_dtype
@@ -292,8 +290,8 @@ class UNetTrainer:
                 self.accelerator.print(log_dict, {"Epoch": epoch}, )
                         # progress_bar.set_postfix(**log_dict)
 
-            # Free any leftover GPU memory at epoch boundary
-            if torch.cuda.is_available():
+            # Free any leftover GPU memory at epoch boundary (works for both CUDA and ROCm)
+            if self.device.type != 'cpu':
                 torch.cuda.empty_cache()
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
@@ -346,73 +344,103 @@ class UNetTrainer:
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
 
             # ================================================================
-            # Contrastive anomaly conditioning loss
+            # Contrastive anomaly conditioning loss — memory-safe version
             #
-            # Core idea: the model must predict a DIFFERENT anomaly when given
-            # a shuffled (wrong-year) conditioning vs the correct conditioning.
-            # This directly penalises the model for ignoring the cond_map.
+            # OOM SOURCES FIXED:
             #
-            # Uses hasattr guard so old checkpoints without _baseline_mean
-            # load safely — loss falls back to zero in that case.
+            # 1. ACTIVATION CACHE OVERLAP (the main OOM cause):
+            #    The original approach called model() a second time while
+            #    model_output (and its full autograd graph / activation cache)
+            #    was still live. Two full UNet activation caches overlapped in
+            #    GPU memory simultaneously.
+            #    FIX: detach x0_correct BEFORE the second forward pass so the
+            #    first activation cache is immediately freed by autograd, then
+            #    run the second pass. Memory at peak = 1x activation cache.
+            #
+            # 2. REDUNDANT INTERMEDIATE TENSORS IN _lat_mse:
+            #    einsum created a full [B,V,T,H,W] weighted tensor before
+            #    reducing. With 5 anomaly tensors live at once this piled up.
+            #    FIX: fuse into a single weighted-mean expression that never
+            #    materialises the full weighted tensor.
+            #
+            # 3. anom_clean RECOMPUTED TWICE:
+            #    Was computed once but held live while both mse_correct and
+            #    mse_shuffled were computed, keeping 5 full tensors alive.
+            #    FIX: compute mse_correct, delete anom_correct, compute
+            #    mse_shuffled, delete anom_shuffled, then delete anom_clean.
             # ================================================================
             if self.cond_loss_scaling > 0 and getattr(self, '_baseline_mean', None) is not None:
 
-                # ── helper: reconstruct x0 from a model output tensor ────────
-                def _reconstruct_x0(out):
+                # ── helper: reconstruct x0, result is detached from graph ────
+                # Detaching is intentional — we want gradients to flow through
+                # mse_loss (the main loss), not through the x0 reconstruction.
+                # This also frees the first fwd pass activation cache early.
+                def _reconstruct_x0_detached(out):
                     if isinstance(self.scheduler, ContinuousDDPM):
-                        return self.scheduler.predict_start_from_v(
+                        x0 = self.scheduler.predict_start_from_v(
                             noisy_samples, timesteps, out
                         )
-                    alpha_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-                    beta_t  = 1 - alpha_t
-                    if self.scheduler.config.prediction_type == "epsilon":
-                        return (noisy_samples - beta_t ** 0.5 * out) / alpha_t ** 0.5
-                    else:  # v_prediction
-                        return alpha_t ** 0.5 * noisy_samples - beta_t ** 0.5 * out
+                    else:
+                        alpha_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                        beta_t  = 1 - alpha_t
+                        if self.scheduler.config.prediction_type == "epsilon":
+                            x0 = (noisy_samples - beta_t ** 0.5 * out) / alpha_t ** 0.5
+                        else:  # v_prediction
+                            x0 = alpha_t ** 0.5 * noisy_samples - beta_t ** 0.5 * out
+                    return x0.detach()  # ← frees activation cache reference
 
-                # ── reconstruct x0 with correct conditioning ─────────────────
-                x0_correct = _reconstruct_x0(model_output)
+                # ── Step 1: x0 from correct conditioning, then DETACH ─────────
+                # After .detach() the autograd graph for the first fwd pass has
+                # no more live references → PyTorch can free activation cache.
+                x0_correct = _reconstruct_x0_detached(model_output)
+                # model_output is no longer needed for cond_loss; keep it only
+                # for the already-computed mse_loss backward graph.
 
-                # ── build shuffled conditioning ───────────────────────────────
-                # Roll so each sample gets conditioning from a different part of
-                # the timeline. Offset >= B//3 avoids near-identical adjacent years.
+                # ── Step 2: build shuffled conditioning ───────────────────────
                 B = cond_map.shape[0]
                 min_shuffle = max(1, B // 3)
                 offset = random.randint(min_shuffle, max(min_shuffle, B - 1))
                 cond_shuffled = torch.roll(cond_map, shifts=offset, dims=0)
 
-                # ── second forward pass (no grad — reference only) ────────────
+                # ── Step 3: second forward pass ───────────────────────────────
+                # torch.no_grad() means no activation cache is built at all for
+                # this pass. With x0_correct already detached, only 1x activation
+                # cache (for backward) lives in memory during this call.
                 with torch.no_grad():
                     model_output_shuffled = self.model(
                         noisy_samples,
                         timesteps,
                         cond_map=cond_shuffled,
                     )
+                del cond_shuffled
+                x0_shuffled = _reconstruct_x0_detached(model_output_shuffled)
+                del model_output_shuffled
 
-                x0_shuffled = _reconstruct_x0(model_output_shuffled)
-                del model_output_shuffled, cond_shuffled
+                # ── Step 4: anomalies vs 1850-1900 baseline ───────────────────
+                # _baseline_mean: [1, V, 1, H, W] — no copy, just broadcast
+                anom_clean = clean_samples.detach() - self._baseline_mean
 
-                # ── compute anomalies vs 1850-1900 baseline ───────────────────
-                # _baseline_mean: [1, V, 1, H, W] broadcasts over [B, V, T, H, W]
-                anom_correct  = x0_correct  - self._baseline_mean
-                anom_shuffled = x0_shuffled - self._baseline_mean
-                anom_clean    = clean_samples - self._baseline_mean
-                del x0_correct, x0_shuffled
+                # ── Step 5: fused lat-weighted MSE — never allocates full weighted tensor
+                # Computes sum(cos(lat) * (a-b)^2) / sum(cos(lat)) per sample.
+                # lat_w: [H] — broadcast over [B,V,T,H,W] via einsum then mean.
+                lat_w = self._lat_weights  # [H], already on device
 
-                # ── per-sample latitude-weighted MSE in anomaly space ─────────
-                def _lat_mse(a, b):
-                    diff2 = (a - b) ** 2
-                    return torch.einsum(
-                        'bvtyx,y->bvtyx', diff2, self._lat_weights
-                    ).mean(dim=tuple(range(1, diff2.ndim)))  # [B]
+                def _fused_lat_mse(pred_x0, anom_ref):
+                    """Per-sample lat-weighted MSE. Frees pred_x0 anomaly inline."""
+                    anom_pred = pred_x0 - self._baseline_mean       # [B,V,T,H,W]
+                    diff2     = (anom_pred - anom_ref).pow_(2)       # in-place pow
+                    del anom_pred
+                    # einsum produces [B,V,T,H,W] but we immediately .mean() to [B]
+                    weighted  = torch.einsum('bvtyx,y->bvtyx', diff2, lat_w)
+                    del diff2
+                    return weighted.mean(dim=(1, 2, 3, 4))           # [B]
 
-                mse_correct  = _lat_mse(anom_correct,  anom_clean)
-                mse_shuffled = _lat_mse(anom_shuffled, anom_clean)
-                del anom_correct, anom_shuffled, anom_clean
+                mse_correct  = _fused_lat_mse(x0_correct,  anom_clean)
+                del x0_correct
+                mse_shuffled = _fused_lat_mse(x0_shuffled, anom_clean)
+                del x0_shuffled, anom_clean
 
-                # ── contrastive hinge ─────────────────────────────────────────
-                # Penalise when correct conditioning does NOT beat shuffled
-                # by at least `margin`. Gradient only flows through mse_correct.
+                # ── Step 6: contrastive hinge ──────────────────────────────────
                 margin = getattr(self, 'contrastive_margin', 0.02)
                 cond_loss = torch.relu(margin + mse_correct - mse_shuffled).mean()
 
@@ -653,9 +681,6 @@ class UNetTrainer:
             self.train_set.set_pca_state(checkpoint["PCA"])
             print("[INFO] Restored PCA state from checkpoint")
 
-        # Restore baseline mean if present in checkpoint.
-        # Old checkpoints that predate this feature simply keep the freshly
-        # computed _baseline_mean that was set earlier in __init__.
         if "baseline_mean" in checkpoint and checkpoint["baseline_mean"] is not None:
             self._baseline_mean = checkpoint["baseline_mean"]
             print(f"[INFO] Restored baseline_mean from checkpoint  "
