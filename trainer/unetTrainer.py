@@ -317,6 +317,7 @@ class UNetTrainer:
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
         with self.accelerator.accumulate(self.model):
+            # ── First forward pass: conditioned ──────────────────────────────
             model_output = self.model(
                 noisy_samples,
                 timesteps,
@@ -337,134 +338,70 @@ class UNetTrainer:
                 )
                 self._lat_weights = torch.cos(torch.deg2rad(lats))
 
+            # Primary latitude-weighted MSE loss
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
-            del target
 
             # ================================================================
-            # Contrastive anomaly conditioning loss — fully memory-safe
+            # Contrastive conditioning loss — NULL vs CORRECT conditioning
             #
-            # THE ORDERING IS CRITICAL FOR MEMORY:
-            #
-            # model_output holds the entire first-pass activation cache alive.
-            # If we run a second forward pass while model_output exists, both
-            # caches overlap in memory (2x peak). Fix: extract x0_correct from
-            # model_output using no_grad (so no new graph is created and the
-            # result is already detached), then delete model_output, then call
-            # backward() to release the first cache, then run the second pass.
-            #
-            # THE NAMEERROR IS AVOIDED BY NOT USING A CLOSURE:
-            #
-            # A nested function that closes over `noisy_samples` causes
-            # "NameError: cannot access free variable" if noisy_samples is
-            # deleted before the closure is called. Instead we pass noisy_samples
-            # explicitly as an argument to a plain helper.
+            # Compares model_output (conditioned, has grad_fn) against
+            # model_output_null (no_grad, detached). The hinge is differentiable
+            # because mse_correct is computed from model_output which IS part of
+            # the autograd graph. A single combined backward() handles both
+            # mse_loss and cond_loss together — no double-backward issue.
             # ================================================================
-
-            do_contrast = (
-                self.cond_loss_scaling > 0
-                and getattr(self, '_baseline_mean', None) is not None
-            )
+            do_contrast = self.cond_loss_scaling > 0
 
             if do_contrast:
-                # ── Step 1: x0 from first pass — no closure, explicit args ───
-                # Passing noisy_samples explicitly avoids the NameError that
-                # occurs when a closure tries to capture a deleted variable.
-                def _decode_x0(out, xt, ts):
-                    """Reconstruct x0 from model output. All args explicit — no closure."""
-                    with torch.no_grad():
-                        if isinstance(self.scheduler, ContinuousDDPM):
-                            return self.scheduler.predict_start_from_v(xt, ts, out)
-                        alpha_t = self.scheduler.alphas_cumprod[ts].view(-1, 1, 1, 1, 1)
-                        beta_t  = 1.0 - alpha_t
-                        if self.scheduler.config.prediction_type == "epsilon":
-                            return (xt - beta_t.sqrt() * out) / alpha_t.sqrt()
-                        else:  # v_prediction
-                            return alpha_t.sqrt() * xt - beta_t.sqrt() * out
-
-                x0_correct = _decode_x0(model_output, noisy_samples, timesteps)
-
-            # ── Step 2: release first-pass activation cache ───────────────────
-            # Delete model_output so its autograd graph has no live references.
-            # backward() below will then free the activation cache completely.
-            del model_output
-
-            # ── Step 3: backward on MSE — frees first-pass activation cache ──
-            self.accelerator.backward(mse_loss)
-
-            # ── Contrastive block (activation cache now freed) ─────────────────
-            if do_contrast:
-                # ── Step 4: shuffled second forward pass ──────────────────────
-                B = cond_map.shape[0]
-                min_shuffle = max(1, B // 3)
-                offset = random.randint(min_shuffle, max(min_shuffle, B - 1))
-                cond_shuffled = torch.roll(cond_map, shifts=offset, dims=0)
+                # Null conditioning = zeros (matches CFG dropout null case)
+                cond_null = torch.zeros_like(cond_map)
 
                 with torch.no_grad():
-                    model_output_shuffled = self.model(
+                    model_output_null = self.model(
                         noisy_samples,
                         timesteps,
-                        cond_map=cond_shuffled,
+                        cond_map=cond_null,
                     )
-                del cond_shuffled
+                del cond_null
 
-                # Pass noisy_samples explicitly — safe even though it will be
-                # deleted shortly after, because we're not using a closure.
-                x0_shuffled = _decode_x0(model_output_shuffled, noisy_samples, timesteps)
-                del model_output_shuffled, noisy_samples  # free now — done with both
+                # Per-sample MSE — model_output retains grad, model_output_null is detached
+                reduce_dims = tuple(range(1, model_output.ndim))
+                mse_correct = ((model_output - target) ** 2).mean(dim=reduce_dims)
+                mse_null    = ((model_output_null - target) ** 2).mean(dim=reduce_dims)
+                del model_output_null
 
-                # ── Step 5: per-sample lat-weighted MSE in anomaly space ──────
-                # Fully-reducing einsum 'bvtyx,y->b' → [B] directly, never
-                # materialising a full [B,V,T,H,W] weighted intermediate tensor.
-                anom_clean = clean_samples.detach() - self._baseline_mean
-
-                def _contrast_mse(x0, anom_ref):
-                    anom  = x0 - self._baseline_mean
-                    diff2 = (anom - anom_ref)
-                    diff2.pow_(2)
-                    del anom
-                    n = diff2.shape[1] * diff2.shape[2] * diff2.shape[4]
-                    lat_sum = self._lat_weights.sum() * n
-                    return torch.einsum('bvtyx,y->b', diff2, self._lat_weights) / lat_sum
-
-                mse_correct  = _contrast_mse(x0_correct,  anom_clean)
-                del x0_correct
-                mse_shuffled = _contrast_mse(x0_shuffled, anom_clean)
-                del x0_shuffled, anom_clean
-
-                # ── Step 6: contrastive hinge ─────────────────────────────────
-                margin = getattr(self, 'contrastive_margin', 0.02)
-                cond_loss = torch.relu(margin + mse_correct - mse_shuffled).mean()
+                # Hinge: penalise if correct conditioning doesn't beat null by margin
+                # cond_loss is differentiable through mse_correct → model_output
+                margin = getattr(self, 'contrastive_margin', 0.01)
+                cond_loss = torch.relu(margin + mse_correct - mse_null).mean()
 
                 if self.global_step % 200 == 0 and self.accelerator.is_main_process:
-                    frac_winning = (mse_correct < mse_shuffled).float().mean().item()
+                    frac_winning = (mse_correct.detach() < mse_null.detach()).float().mean().item()
                     print(
-                        f"[CONTRAST] step={self.global_step}  "
-                        f"mse_correct={mse_correct.mean().item():.5f}  "
-                        f"mse_shuffled={mse_shuffled.mean().item():.5f}  "
-                        f"cond_loss={cond_loss.item():.5f}  "
+                        f"[COND DIAG] step={self.global_step}  "
+                        f"mse_correct={mse_correct.detach().mean().item():.6f}  "
+                        f"mse_null={mse_null.detach().mean().item():.6f}  "
+                        f"cond_loss={cond_loss.item():.6f}  "
                         f"winning={frac_winning*100:.1f}%"
                     )
-                del mse_correct, mse_shuffled
-
-                # ── Step 7: backward on contrastive loss ──────────────────────
-                # Accumulates on top of mse_loss gradients from Step 3.
-                self.accelerator.backward(cond_loss * self.cond_loss_scaling)
-
+                del mse_correct, mse_null
             else:
                 cond_loss = torch.zeros(1, device=self.device)
-                del noisy_samples
 
-            del noise, clean_samples
+            del target, model_output, noisy_samples, noise, clean_samples
 
-            # Logging scalar — graphs already consumed by the two backward calls
-            loss = mse_loss.detach() + cond_loss.detach() * self.cond_loss_scaling
+            # ── Single combined backward ──────────────────────────────────────
+            # Both mse_loss and cond_loss share the same forward graph through
+            # model_output. One backward call handles everything correctly.
+            loss = mse_loss + cond_loss * self.cond_loss_scaling
+            self.accelerator.backward(loss)
 
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad(set_to_none=True)
 
-        return loss, mse_loss.detach(), cond_loss.detach()
+        return loss.detach(), mse_loss.detach(), cond_loss.detach()
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
