@@ -75,7 +75,7 @@ trainer:
     save_every: 100
     batch_size: 8
     save_dir: runs/
-    save_name: run_test_aero_condenc.pt
+    save_name: run_test_aero_condenc2.pt
     load_path: 0 #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc_658.pt # RESET - architecture changed, old checkpoints incompatible
     lr: 0.00002 #0.0001
     sample_steps: 250
