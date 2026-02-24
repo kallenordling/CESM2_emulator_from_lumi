@@ -99,7 +99,7 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 5#1.2
+        self.cond_loss_scaling = 0.5#1.2
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -142,6 +142,10 @@ class UNetTrainer:
             self.train_set,
             self.accelerator,
             self.batch_size,
+            num_workers=4,
+            prefetch_factor=2,
+            persistent_workers=True,
+            pin_memory=False,  # False for ROCm
         )
         # self.val_loader: ClimateDataLoader = dataloader(
         #    self.val_set,
@@ -151,17 +155,6 @@ class UNetTrainer:
 
         # Pre-compute latitude weights once and cache on device
         self._lat_weights: Optional[torch.Tensor] = None
-
-        # Pre-compute 1850-1900 climatological baseline mean in normalised space.
-        # Stored as CPU tensor here; moved to device inside prepare().
-        # Shape: [1, n_vars, 1, H, W] — broadcasts over [B, n_vars, T, H, W].
-        try:
-            self._baseline_mean: Optional[torch.Tensor] = train_set.get_baseline_mean(
-                baseline_start=1850, baseline_end=1900
-            )
-        except RuntimeError as e:
-            print(f"[WARN] Could not compute baseline mean — anomaly cond_loss disabled: {e}")
-            self._baseline_mean = None
 
         # Initialize counters
         self.global_step = 0
@@ -217,12 +210,6 @@ class UNetTrainer:
             self.model,
             self.optimizer,
         ) = self.accelerator.prepare(self.model, self.optimizer)
-
-        # Move baseline mean to the training device (was computed on CPU)
-        if self._baseline_mean is not None:
-            self._baseline_mean = self._baseline_mean.to(
-                device=self.accelerator.device, dtype=self.weight_dtype
-            )
 
     def train(self):
         # Sanity check the validation loop and sampling before training
@@ -341,59 +328,109 @@ class UNetTrainer:
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
 
             # ================================================================
-            # Conditioning loss: anomaly-based comparison in data space
+            # Contrastive anomaly conditioning loss
             #
-            # Computes the 1850-1900 baseline anomaly of the predicted x0 and
-            # compares it against the clean-sample anomaly.  Working in anomaly
-            # space removes the climatological mean so the loss focuses on the
-            # *forced* signal (the 1-5 % of variance that conditioning controls)
-            # rather than absolute temperatures that MSE already handles.
+            # Core idea: the model must predict a DIFFERENT anomaly when given
+            # a shuffled (wrong-year) conditioning vs the correct conditioning.
+            # This directly penalises the model for ignoring the cond_map.
             #
-            # No second forward pass is needed — we reuse model_output and the
-            # already-reconstructed pred_original_sample.
+            # Algorithm:
+            #   1. Reconstruct x0_correct from model_output (correct cond)
+            #   2. Run a second forward pass with shuffled cond_map
+            #   3. Reconstruct x0_shuffled from that output
+            #   4. Compute anomalies of both against the 1850-1900 baseline
+            #   5. Contrastive hinge loss:
+            #        penalty when  ||anom_correct - anom_clean||
+            #                    > ||anom_shuffled - anom_clean|| - margin
+            #      i.e. correct conditioning must outperform wrong conditioning
+            #      by at least `margin` in anomaly-MSE space.
+            #
+            # Shuffle strategy: roll the batch by a random offset of at least
+            # min_shuffle steps. This guarantees the shuffled conditioning
+            # comes from a different part of the timeline and avoids pairing
+            # e.g. year 2050 with year 2051 (nearly identical emissions).
             # ================================================================
             if self.cond_loss_scaling > 0 and self._baseline_mean is not None:
-                # ── Reconstruct x0 estimate from model output ────────────────
-                if isinstance(self.scheduler, ContinuousDDPM):
-                    pred_original_sample = self.scheduler.predict_start_from_v(
-                        noisy_samples, timesteps, model_output
-                    )
-                else:
-                    alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-                    beta_prod_t  = 1 - alpha_prod_t
-                    if self.scheduler.config.prediction_type == "epsilon":
-                        pred_original_sample = (
-                            noisy_samples - beta_prod_t ** 0.5 * model_output
-                        ) / alpha_prod_t ** 0.5
-                    else:  # v_prediction
-                        pred_original_sample = (
-                            alpha_prod_t ** 0.5 * noisy_samples
-                            - beta_prod_t ** 0.5 * model_output
+
+                # ── helper: reconstruct x0 from a model output tensor ────────
+                def _reconstruct_x0(out):
+                    if isinstance(self.scheduler, ContinuousDDPM):
+                        return self.scheduler.predict_start_from_v(
+                            noisy_samples, timesteps, out
                         )
-                    del alpha_prod_t, beta_prod_t
+                    alpha_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                    beta_t  = 1 - alpha_t
+                    if self.scheduler.config.prediction_type == "epsilon":
+                        return (noisy_samples - beta_t ** 0.5 * out) / alpha_t ** 0.5
+                    else:  # v_prediction
+                        return alpha_t ** 0.5 * noisy_samples - beta_t ** 0.5 * out
 
-                # ── Anomalies: subtract 1850-1900 climatological mean ────────
-                # _baseline_mean: [1, n_vars, 1, H, W] → broadcasts over B and T
-                anom_pred  = pred_original_sample - self._baseline_mean  # [B, V, T, H, W]
-                anom_clean = clean_samples        - self._baseline_mean  # [B, V, T, H, W]
-                del pred_original_sample
+                # ── reconstruct x0 with correct conditioning ─────────────────
+                x0_correct = _reconstruct_x0(model_output)
 
-                # ── Latitude-weighted MSE in anomaly space ───────────────────
-                diff = (anom_pred - anom_clean) ** 2  # [B, V, T, H, W]
-                del anom_pred, anom_clean
+                # ── build shuffled conditioning ───────────────────────────────
+                # Roll the batch so each sample gets a cond from a different
+                # position in the sequence.  The offset is chosen so it is
+                # always >= min_shuffle AND != 0, preventing near-identity pairs.
+                B = cond_map.shape[0]
+                min_shuffle = max(1, B // 3)   # at least 1/3 of batch away
+                offset = random.randint(min_shuffle, max(min_shuffle, B - 1))
+                cond_shuffled = torch.roll(cond_map, shifts=offset, dims=0)
 
-                cond_loss = torch.einsum(
-                    'bvtyx,y->bvtyx', diff, self._lat_weights
-                ).mean()
-                del diff
+                # ── second forward pass (no grad accumulation — just inference)
+                with torch.no_grad():
+                    model_output_shuffled = self.model(
+                        noisy_samples,
+                        timesteps,
+                        cond_map=cond_shuffled,
+                    )
+
+                x0_shuffled = _reconstruct_x0(model_output_shuffled)
+                del model_output_shuffled, cond_shuffled
+
+                # ── compute anomalies (subtract 1850-1900 baseline) ──────────
+                # baseline: [1, V, 1, H, W] — broadcasts over [B, V, T, H, W]
+                anom_correct  = x0_correct  - self._baseline_mean
+                anom_shuffled = x0_shuffled - self._baseline_mean
+                anom_clean    = clean_samples - self._baseline_mean
+                del x0_correct, x0_shuffled
+
+                # ── latitude-weighted per-sample MSE in anomaly space ────────
+                # Result shape: [B] — one scalar per sample
+                reduce_dims = tuple(range(1, anom_correct.ndim))   # all but batch
+
+                def _lat_mse(a, b):
+                    diff2 = (a - b) ** 2                           # [B, V, T, H, W]
+                    weighted = torch.einsum(
+                        'bvtyx,y->bvtyx', diff2, self._lat_weights
+                    )
+                    return weighted.mean(dim=reduce_dims)           # [B]
+
+                mse_correct  = _lat_mse(anom_correct,  anom_clean)
+                mse_shuffled = _lat_mse(anom_shuffled, anom_clean)
+                del anom_correct, anom_shuffled, anom_clean
+
+                # ── contrastive hinge ─────────────────────────────────────────
+                # We want mse_correct < mse_shuffled (correct cond wins).
+                # Penalise whenever that is NOT the case by at least `margin`.
+                # margin=0.0 is a strict "correct must beat shuffled" rule.
+                # Start with a small positive margin so gradients stay alive
+                # even when correct is already a bit better.
+                margin = getattr(self, 'contrastive_margin', 0.02)
+                cond_loss = torch.relu(margin + mse_correct - mse_shuffled).mean()
 
                 # Diagnostic every 200 steps
                 if self.global_step % 200 == 0 and self.accelerator.is_main_process:
+                    frac_winning = (mse_correct < mse_shuffled).float().mean().item()
                     print(
-                        f"[ANOM COND] step={self.global_step}  "
-                        f"cond_loss={cond_loss.item():.6f}  "
-                        f"mse_loss={mse_loss.item():.6f}"
+                        f"[CONTRAST] step={self.global_step}  "
+                        f"mse_correct={mse_correct.mean().item():.5f}  "
+                        f"mse_shuffled={mse_shuffled.mean().item():.5f}  "
+                        f"cond_loss={cond_loss.item():.5f}  "
+                        f"winning={frac_winning*100:.1f}%"
                     )
+                del mse_correct, mse_shuffled
+
             else:
                 cond_loss = torch.zeros(1, device=self.device)
 
@@ -478,8 +515,6 @@ class UNetTrainer:
                 "Global Step": self.global_step,
                 # Persist PCA objects so generation uses identical projection
                 "PCA": self.train_set.get_pca_state(),
-                # Persist baseline so resumed runs use the same normalised mean
-                "baseline_mean": self._baseline_mean.cpu() if self._baseline_mean is not None else None,
             }
 
             os.makedirs(self.save_dir, exist_ok=True)
@@ -501,8 +536,6 @@ class UNetTrainer:
                 "Global Step": self.global_step,
                 # Persist PCA objects so generation uses identical projection
                 "PCA": self.train_set.get_pca_state(),
-                # Persist baseline so resumed runs use the same normalised mean
-                "baseline_mean": self._baseline_mean.cpu() if self._baseline_mean is not None else None,
             }
 
             # If the directory doesn't exist already create it
@@ -623,17 +656,6 @@ class UNetTrainer:
         if "PCA" in checkpoint and checkpoint["PCA"] is not None:
             self.train_set.set_pca_state(checkpoint["PCA"])
             print("[INFO] Restored PCA state from checkpoint")
-
-        # Restore baseline mean so the anomaly cond_loss stays consistent
-        # with what was computed at the start of the original training run.
-        if "baseline_mean" in checkpoint and checkpoint["baseline_mean"] is not None:
-            self._baseline_mean = checkpoint["baseline_mean"].to(
-                device=self.accelerator.device, dtype=self.weight_dtype
-            )
-            print(f"[INFO] Restored baseline_mean from checkpoint  "
-                  f"shape={tuple(self._baseline_mean.shape)}")
-        else:
-            print("[INFO] No baseline_mean in checkpoint — keeping freshly computed one")
         print(self.global_step, self.accelerator.gradient_accumulation_steps)
         self.resume_global_step = (
                 self.global_step * self.accelerator.gradient_accumulation_steps
