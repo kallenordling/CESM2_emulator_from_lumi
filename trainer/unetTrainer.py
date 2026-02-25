@@ -229,7 +229,7 @@ class UNetTrainer:
                 ):
                     continue
                 # print("COND SHAPE in train",cond.shape)
-                loss = self.get_loss(batch, cond)
+                loss,mse_loss,cond_loss = self.get_loss(batch, cond)
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -249,7 +249,12 @@ class UNetTrainer:
 
                     # Metric calculation and logging
                     avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-                    log_dict = {"Training/Loss": avg_loss.detach().item()}
+                    avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
+                    avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
+
+                    log_dict = {"Training/Loss": avg_loss.detach().item(),
+                                "MSE LOSS": avg_mse_loss.detach().item(),
+                                "COND LOSS": avg_cond_loss.detach().item()}
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch}, )
@@ -382,7 +387,7 @@ class UNetTrainer:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss
+        return loss,mse_loss,cond_loss *self.cond_loss_scaling
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
