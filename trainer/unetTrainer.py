@@ -329,9 +329,10 @@ class UNetTrainer:
             if self.cond_loss_scaling > 0:
                 # --- decode model output to x0 space ---
                 if isinstance(self.scheduler, ContinuousDDPM):
-                    # ContinuousDDPM stores alphas_cumprod indexed by discretised step
-                    pred_original_sample = self.get_original_sample(
-                        noisy_samples, model_output, timesteps
+                    # ContinuousDDPM is continuous-time: no alphas_cumprod table exists.
+                    # timesteps here are already log_snr values, so use the analytic decoder.
+                    pred_original_sample = self.scheduler.predict_start_from_v(
+                        noisy_samples, timesteps, model_output
                     )
                 elif self.scheduler.config.prediction_type == "v_prediction":
                     # Standard DDPM v-prediction: x0 = sqrt(ā) * x_t - sqrt(1-ā) * v
