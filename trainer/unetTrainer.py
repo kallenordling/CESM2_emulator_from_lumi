@@ -106,7 +106,24 @@ class UNetTrainer:
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 1.5
+        # ── Adaptive conditioning loss scaling ───────────────────────────────
+        # Phase 1 (warmup): scaling held at 0.0 for `cond_warmup_steps` so the
+        #   model first learns a solid MSE baseline without interference.
+        # Phase 2 (ramp):   linearly ramps from 0 → cond_max_scaling over the
+        #   same number of steps.
+        # Phase 3 (adaptive): once fully ramped, the scale is nudged up/down
+        #   every `cond_adapt_every` steps based on a running EMA of
+        #   cond_sensitivity (how much the conditioning actually changes the
+        #   model output).  If the model is ignoring conditioning
+        #   (sensitivity < target) the scale grows; if it's already responding
+        #   well it shrinks back toward the floor.
+        self.cond_loss_scaling     = 0.0          # starts at zero
+        self.cond_warmup_steps     = getattr(self, "cond_warmup_steps",     2000)
+        self.cond_max_scaling      = getattr(self, "cond_max_scaling",       3.0)
+        self.cond_min_scaling      = getattr(self, "cond_min_scaling",       0.1)
+        self.cond_adapt_every      = getattr(self, "cond_adapt_every",       200)
+        self.cond_target_sensitivity = getattr(self, "cond_target_sensitivity", 0.01)
+        self._cond_sensitivity_ema = None   # lazily initialised on first update
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -240,6 +257,12 @@ class UNetTrainer:
                     self.global_step += 1
                     self.ema_model.update()
 
+                    # ── Adaptive conditioning loss scaling ────────────────────
+                    # Pass the raw (non-gathered) sensitivity so each rank
+                    # independently tracks its own EMA; the logged value below
+                    # is gathered for display only.
+                    self._update_cond_scaling(sens.detach().item())
+
                     if self.accelerator.is_main_process:
                         # Check to see if we need to sample from our model
                         # if self.global_step % self.sample_every == 0:
@@ -261,13 +284,78 @@ class UNetTrainer:
                                     "COND LOSS": avg_cond_loss.detach().item(),
                                     "ANOM ERROR": avg_anom_error.detach().item(),
                                     "ANOM SIGNAL": avg_anom_signal.detach().item(),
-                                    "SENS": avg_sens.detach().item()}
+                                    "SENS": avg_sens.detach().item(),
+                                    "COND SCALE": self.cond_loss_scaling}
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch}, )
                     # progress_bar.set_postfix(**log_dict)
 
             # progress_bar.close()
+
+    def _update_cond_scaling(self, sensitivity_value: float) -> None:
+        """Update cond_loss_scaling adaptively based on training progress.
+
+        Three phases:
+          1. Warmup  (step < cond_warmup_steps):
+               scaling = 0.0 — let MSE dominate, build a stable baseline.
+          2. Linear ramp  (cond_warmup_steps ≤ step < 2 * cond_warmup_steps):
+               scaling ramps linearly 0 → cond_max_scaling.
+          3. Adaptive  (step ≥ 2 * cond_warmup_steps):
+               Every `cond_adapt_every` steps the scale is nudged ±5 % based
+               on whether the EMA of cond_sensitivity is above or below the
+               target.  If sensitivity is low (model ignoring conditioning)
+               the scale grows; if sensitivity is healthy it can relax.
+        """
+        step = self.global_step
+
+        # ── Phase 1: warmup ───────────────────────────────────────────────────
+        if step < self.cond_warmup_steps:
+            self.cond_loss_scaling = 0.0
+            return
+
+        # ── Phase 2: linear ramp ──────────────────────────────────────────────
+        ramp_steps = step - self.cond_warmup_steps
+        if ramp_steps < self.cond_warmup_steps:
+            progress = ramp_steps / self.cond_warmup_steps          # 0 → 1
+            self.cond_loss_scaling = self.cond_max_scaling * progress
+            return
+
+        # ── Phase 3: adaptive nudge ───────────────────────────────────────────
+        # Update EMA of sensitivity (exponential moving average, α = 0.05)
+        alpha = 0.05
+        if self._cond_sensitivity_ema is None:
+            self._cond_sensitivity_ema = sensitivity_value
+        else:
+            self._cond_sensitivity_ema = (
+                (1.0 - alpha) * self._cond_sensitivity_ema + alpha * sensitivity_value
+            )
+
+        # Only nudge every `cond_adapt_every` steps to avoid noise
+        if step % self.cond_adapt_every != 0:
+            return
+
+        ratio = self._cond_sensitivity_ema / (self.cond_target_sensitivity + 1e-8)
+        if ratio < 1.0:
+            # Sensitivity below target → model is ignoring conditioning → push harder
+            self.cond_loss_scaling = min(
+                self.cond_max_scaling,
+                self.cond_loss_scaling * 1.05,
+            )
+        else:
+            # Sensitivity healthy → can relax a little
+            self.cond_loss_scaling = max(
+                self.cond_min_scaling,
+                self.cond_loss_scaling * 0.98,
+            )
+
+        if self.accelerator.is_main_process:
+            print(
+                f"[COND SCALE] step={step}  "
+                f"sensitivity_ema={self._cond_sensitivity_ema:.6f}  "
+                f"target={self.cond_target_sensitivity:.6f}  "
+                f"cond_loss_scaling={self.cond_loss_scaling:.4f}"
+            )
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
 
