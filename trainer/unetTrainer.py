@@ -555,10 +555,24 @@ class UNetTrainer:
                 self.global_step * self.accelerator.gradient_accumulation_steps
         )
 
-        self.resume_step = self.resume_global_step % (
-                self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
-        )
+        # Avoid ZeroDivisionError if dataloader not yet initialized
+        steps_per_epoch_accum = self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
+        if steps_per_epoch_accum > 0:
+            self.resume_step = self.resume_global_step % steps_per_epoch_accum
+        else:
+            self.resume_step = 0
 
-        self.first_epoch = self.global_step // self.num_steps_per_epoch
+        # Read first_epoch from the checkpoint filename (pattern: {base}_{epoch}.pt)
+        try:
+            epoch_from_filename = int(os.path.basename(path).split("_")[-1].split(".")[0])
+            self.first_epoch = epoch_from_filename + 1  # resume from the NEXT epoch
+            print(f"[INFO] Resuming from epoch {self.first_epoch} (parsed from filename)")
+        except (ValueError, IndexError):
+            # Fallback: derive from global_step if filename parsing fails
+            if self.num_steps_per_epoch > 0:
+                self.first_epoch = self.global_step // self.num_steps_per_epoch
+            else:
+                self.first_epoch = 0
+            print(f"[WARN] Could not parse epoch from filename, defaulting to epoch {self.first_epoch}")
 
         print(f"[INFO] Loaded checkpoint from {path} (step {self.global_step})")
