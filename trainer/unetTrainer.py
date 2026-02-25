@@ -466,19 +466,45 @@ class UNetTrainer:
                 clean_anomaly = clean_samples        - baseline  # (B, C, T, H, W)
                 pred_anomaly  = pred_original_sample - baseline
 
-                # --- lat-weighted MSE on anomaly fields ---
-                cond_loss = calc_mse_loss(pred_anomaly, clean_anomaly, self.train_set.lats)
+                # ── NEW: decode out_null → predicted x0 (model-predicted baseline) ──
+                if isinstance(self.scheduler, ContinuousDDPM):
+                    pred_baseline = self.scheduler.predict_start_from_v(
+                        noisy_samples, timesteps, out_null
+                    )
+                elif self.scheduler.config.prediction_type == "v_prediction":
+                    pred_baseline = (
+                            (alpha_prod_t ** 0.5) * noisy_samples
+                            - (beta_prod_t ** 0.5) * out_null
+                    )
+                else:  # epsilon
+                    pred_baseline = (
+                                            noisy_samples - (beta_prod_t ** 0.5) * out_null
+                                    ) / (alpha_prod_t ** 0.5)
 
-                # Diagnostics every 200 steps (main process only)
-                #if self.global_step % 5 == 0 and self.accelerator.is_main_process:
-                anom_signal = clean_anomaly.abs().mean()#.item()
-                anom_error  = (pred_anomaly - clean_anomaly).abs().mean()#.item()
-                #    print(
-                #        f"[ANOM DIAG] step={self.global_step} "
-                #        f"anomaly_signal={anom_signal:.6f}  "
-                #        f"anomaly_error={anom_error:.6f}  "
-                #        f"cond_loss={cond_loss.item():.6f}"
-                #    )
+                # ── Anomalies relative to model-predicted baseline ───────────────────
+                pred_anomaly = pred_original_sample - pred_baseline  # effect of conditioning
+
+                if self.climatology is not None:
+                    baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
+                    clean_anomaly = clean_samples - baseline
+                else:
+                    clean_anomaly = clean_samples - pred_baseline.detach()
+
+                # ── Contrastive cond_loss ─────────────────────────────────────────────
+                mse_null_anomaly = calc_mse_loss(
+                    torch.zeros_like(pred_anomaly),
+                    clean_anomaly,
+                    self.train_set.lats,
+                )
+                mse_correct_anomaly = calc_mse_loss(pred_anomaly, clean_anomaly, self.train_set.lats)
+                cond_loss = torch.relu(0.01 + mse_correct_anomaly - mse_null_anomaly)
+
+                # ── Anomaly diagnostics ───────────────────────────────────────────────
+                # anom_signal: how large is the true forced signal we're trying to learn
+                anom_signal = clean_anomaly.abs().mean()
+
+                # anom_error: how well does pred_anomaly match clean_anomaly
+                anom_error = (pred_anomaly - clean_anomaly).abs().mean()
             else:
                 cond_loss = torch.zeros(1, device=self.device)
                 anom_error =  torch.zeros(1, device=self.device)
