@@ -394,7 +394,7 @@ class UNetTrainer:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss,mse_loss,cond_loss *self.cond_loss_scaling,anomaly_signal.item(), anomaly_error.item()
+        return loss,mse_loss,cond_loss *self.cond_loss_scaling,anom_signal, anom_error
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
