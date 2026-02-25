@@ -1,7 +1,7 @@
 import os
 import random
 from typing import Any, Callable
-import numpy as np
+
 import torch
 from accelerate import Accelerator
 from diffusers import SchedulerMixin
@@ -67,57 +67,22 @@ def _list_ckpts_sorted(ckpt_dir, pattern="ckpt_epoch_*.pt"):
     return sorted(paths, key=_key, reverse=True)
 
 
-def lat_weighted_mse_loss(model_output, target, lats, lat_min=-80.0, lat_max=80.0, eps=1e-6):
-    # force fp32 for stability
-    diff2 = (model_output.float() - target.float()).pow(2)  # [..., Y, X]
-
-    lat = torch.as_tensor(lats.to_numpy().astype("float32"), device=diff2.device, dtype=torch.float32)  # [Y]
-    mask = (lat >= lat_min) & (lat <= lat_max)
-
-    w = torch.cos(torch.deg2rad(lat))
-    w = w * mask.to(w.dtype)  # [Y]
-
-    # reshape to broadcast over lon and leading dims
-    w = w.view(*([1] * (diff2.ndim - 2)), -1, 1)  # [..., Y, 1]
-
-    weighted = diff2 * w
-    denom = (w.sum() * diff2.shape[-1]).clamp(min=eps)  # sum over lat weights * lon count
-    return weighted.sum() / denom
-
-
 def calc_mse_loss(model_output, target, lats):
-    """Latitude-weighted MSE loss using only latitudes between -80 and 80 degrees"""
-
+    """Manually calculate mse loss"""
     spatial_loss = (model_output - target) ** 2
 
-    # Latitude tensor
-    latitude = torch.as_tensor(
-        lats.values,
-        dtype=spatial_loss.dtype,
-        device=spatial_loss.device,
-    )
+    # Weight the equator more heavily than the poles
+    latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
 
-    # Mask latitudes between -80 and 80
-    lat_mask = (latitude >= -80.0) & (latitude <= 80.0)
-
-    # Latitude weights (cosine weighting)
     latitude_rad = torch.deg2rad(latitude)
     latitude_weight = torch.cos(latitude_rad)
 
-    # Apply mask
-    latitude_weight = latitude_weight * lat_mask
+    # Weight the loss
+    # print(spatial_loss.shape,latitude_weight.shape)
+    lat_weighted_loss = torch.einsum('...yx,y->...yx', spatial_loss,
+                                     latitude_weight).mean()  # (spatial_loss * latitude_weight).mean()
 
-    # Weighted loss
-    weighted_loss = torch.einsum(
-        "...yx,y->...yx",
-        spatial_loss,
-        latitude_weight,
-    ).mean()
-
-    # Normalize properly (avoid bias from masked-out lats)
-    # loss = weighted_loss.sum() / latitude_weight.sum()
-
-    return weighted_loss
+    return lat_weighted_loss
 
 
 class UNetTrainer:
@@ -135,16 +100,15 @@ class UNetTrainer:
     ) -> None:
         # Assign the hyperparameters to class attributes
         self.save_hyperparameters(hyperparameters)
-        self.training_mode = hyperparameters.get("training_mode", "diffusion")
-        self.noise_channels = hyperparameters.get("noise_channels", 0)
+
         # Assign more class attributes
         self.accelerator = accelerator
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
         self.cond_loss_scaling = 0.2
-        if self.training_mode == "diffusion":
-            self.scheduler.set_timesteps(self.sample_steps)
+        self.scheduler.set_timesteps(self.sample_steps)
+
         # Keep track of our exponential moving average weights
         self.ema_model = EMA(
             self.model,
@@ -157,7 +121,9 @@ class UNetTrainer:
         self.device = self.accelerator.device
         self.weight_dtype = torch.float32
 
-        self.optimizer = optimizer(self.model.parameters(), lr=self.lr)
+        self.optimizer = optimizer(
+            self.model.parameters(), lr=self.lr * self.accelerator.num_processes
+        )
 
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
@@ -284,82 +250,6 @@ class UNetTrainer:
         return pred_original_sample
 
     def get_loss(self, batch, cond_map):
-        if self.training_mode == "fcn3":
-            return self.get_loss_fcn3(batch, cond_map)
-        else:
-            return self.get_loss_diffusion(batch, cond_map)
-
-    def get_loss_fcn3(self, batch, cond_map):
-        # target: [B,1,1,H,W]
-        y = batch.to(self.weight_dtype)
-
-        # cond: [B,2,H,W] -> [B,2,1,H,W]
-        c = cond_map.to(self.weight_dtype)
-        if self.accelerator.is_main_process and self.global_step % 100 == 0:
-            print(f"Batch shape: {y.shape}, Cond shape: {c.shape}")
-
-            # Check for high emissions
-            high_co2_mask = c[:, 0] > 0.8  # Threshold for "high" normalized CO2
-            high_sul_mask = c[:, 1] > 0.8  # Threshold for "high" normalized sulfate
-
-            if high_co2_mask.any() or high_sul_mask.any():
-                print(f"High emissions detected at step {self.global_step}:")
-                print(f"  Max CO2: {c[:, 0].max():.3f}")
-                print(f"  Max sul: {c[:, 1].max():.3f}")
-                print(f"  Corresponding temp stats:")
-                print(f"    Mean: {y.mean():.3f}")
-                print(f"    Std: {y.std():.3f}")
-                print(f"    Min/Max: {y.min():.3f}/{y.max():.3f}")
-        # quick-start normalization for emissions (replace later w/ fixed stats)
-        # c = torch.log1p(torch.clamp(c, min=0.0))
-        # mean = c.mean(dim=(0, 2, 3), keepdim=True)
-        # std = c.std(dim=(0, 2, 3), keepdim=True).clamp(min=1e-6)
-        # c = (c - mean) / std
-        # c = c.unsqueeze(2)
-
-        # latent noise: [B,K,1,H,W]
-        K = int(getattr(self, "noise_channels", 4))
-        noise_scale = float(getattr(self, "noise_scale", 0.0)) / (K ** 0.5)
-        x = noise_scale * torch.randn(y.shape[0], K, 1, y.shape[-2], y.shape[-1],
-                                      device=y.device, dtype=y.dtype)
-        # dummy timesteps (required by model signature)
-        t = torch.zeros(y.shape[0], device=y.device, dtype=torch.long)
-
-        # if self.accelerator.is_main_process:
-        #    print("x:", tuple(x.shape), "c:", tuple(c.shape))
-        c_enhanced = torch.cat([
-            c,  # Original: [B, 2, 1, H, W]
-            c.pow(2),  # Squared terms
-            (c[:, 1:2] > 0.8).float(),  # High sulfate indicator
-            (c[:, 0:1] * c[:, 1:2]),  # CO2 × sulfate interaction
-            c.mean(dim=(3, 4), keepdim=True).expand_as(c),  # Spatial mean
-        ], dim=1)  # Now [B, 7, 1, H, W]
-        with self.accelerator.accumulate(self.model):
-            y_hat = self.model(x, t, cond_map=c_enhanced)
-            if y_hat.ndim == 5 and y_hat.shape[2] == 1:
-                y_hat = y_hat.squeeze(2)
-            if y.ndim == 5 and y.shape[2] == 1:
-                y = y.squeeze(2)
-            # loss = calc_mse_loss(y_hat, y, self.train_set.lats)
-            if self.accelerator.is_main_process and self.global_step == 0:
-                l = self.train_set.lats
-                print("lats type:", type(l))
-                if hasattr(l, "dims"): print("lats dims:", l.dims)
-                if hasattr(l, "shape"): print("lats shape:", l.shape)
-                if hasattr(l, "values"): print("lats values shape:", np.asarray(l.values).shape)
-            loss = lat_weighted_mse_loss(y_hat, y, self.train_set.lats)
-
-            self.accelerator.backward(loss)
-            if self.accelerator.sync_gradients:
-                self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-        if self.accelerator.is_main_process and self.global_step % 100 == 0:
-            print(f"Pred range: {y_hat.min():.3f}, {y_hat.max():.3f}")
-            print(f"Loss: {loss.item():.6f}")
-        return loss
-
-    def get_loss_diffusion(self, batch, cond_map):
         clean_samples = batch.to(self.weight_dtype)
         # cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
         #    1, 1, clean_samples.shape[-3], 1, 1
@@ -400,8 +290,7 @@ class UNetTrainer:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
             # Calculate loss and update gradients
-            se_loss = calc_mse_loss(model_output, target, self.train_set.lats)
-            # mse_loss = lat_weighted_mse(model_output, target,self.train_set.lats)
+            mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
             # Calculate the avg conditional loss
             if hasattr(self.scheduler, "alphas_cumprod"):
                 pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
