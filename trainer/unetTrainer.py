@@ -258,7 +258,7 @@ class UNetTrainer:
 
                     log_dict = {"Training/Loss": avg_loss.detach().item(),
                                     "MSE LOSS": avg_mse_loss.detach().item(),
-                                    "COND LOSS": avg_cond_loss.detach().item()
+                                    "COND LOSS": avg_cond_loss.detach().item(),
                                     "ANOM ERROR": avg_anom_error.detach().item(),
                                     "ANOM SIGNAL": avg_anom_signal.detach().item()}
                     self.accelerator.log(log_dict, step=self.global_step)
