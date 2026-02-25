@@ -372,7 +372,6 @@ class UNetTrainer:
                         cond_map=torch.zeros_like(cond_map),
                     )
                 cond_sensitivity = (model_output - out_null).abs().mean()#.item()
-                if self.accelerator.is_main_process:)
 
 
                 clean_anomaly = clean_samples        - baseline  # (B, C, T, H, W)
