@@ -247,17 +247,17 @@ class UNetTrainer:
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
 
-                    # Metric calculation and logging
-                    avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-                    avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
-                    avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
+                        # Metric calculation and logging
+                        avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                        avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
+                        avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
 
-                    log_dict = {"Training/Loss": avg_loss.detach().item(),
-                                "MSE LOSS": avg_mse_loss.detach().item(),
-                                "COND LOSS": avg_cond_loss.detach().item()}
-                    self.accelerator.log(log_dict, step=self.global_step)
-                    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
-                    self.accelerator.print(log_dict, {"Epoch": epoch}, )
+                        log_dict = {"Training/Loss": avg_loss.detach().item(),
+                                    "MSE LOSS": avg_mse_loss.detach().item(),
+                                    "COND LOSS": avg_cond_loss.detach().item()}
+                        self.accelerator.log(log_dict, step=self.global_step)
+                        self.accelerator.log({"Epoch": epoch}, step=self.global_step)
+                        self.accelerator.print(log_dict, {"Epoch": epoch}, )
                     # progress_bar.set_postfix(**log_dict)
 
             # progress_bar.close()
