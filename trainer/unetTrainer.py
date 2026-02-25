@@ -373,8 +373,8 @@ class UNetTrainer:
 
                 # Diagnostics every 200 steps (main process only)
                 #if self.global_step % 5 == 0 and self.accelerator.is_main_process:
-                anom_signal = clean_anomaly.abs().mean().item()
-                anom_error  = (pred_anomaly - clean_anomaly).abs().mean().item()
+                anom_signal = clean_anomaly.abs().mean()#.item()
+                anom_error  = (pred_anomaly - clean_anomaly).abs().mean()#.item()
                 #    print(
                 #        f"[ANOM DIAG] step={self.global_step} "
                 #        f"anomaly_signal={anom_signal:.6f}  "
