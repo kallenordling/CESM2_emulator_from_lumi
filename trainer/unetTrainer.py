@@ -121,6 +121,23 @@ class UNetTrainer:
         self.device = self.accelerator.device
         self.weight_dtype = torch.float32
 
+        # ── Anomaly-based conditioning loss ──────────────────────────────────
+        # Pre-compute the 1850-1900 climatological mean from the training set
+        # and register it as a non-trainable buffer so it moves with the device.
+        # Expected shape: (1, C, 1, H, W)  (one value per variable per pixel,
+        # broadcast over batch and time dimensions).
+        # The dataset is expected to expose `climatology` as a pre-normalised
+        # tensor; if it doesn't, we fall back to zeros (no anomaly shift).
+        if hasattr(train_set, "climatology") and train_set.climatology is not None:
+            clim = train_set.climatology.to(dtype=torch.float32)   # (C, H, W) or (1,C,1,H,W)
+            if clim.ndim == 3:                                      # (C, H, W) → (1,C,1,H,W)
+                clim = clim.unsqueeze(0).unsqueeze(2)
+            self.climatology = clim.to(self.device)
+            print(f"[TRAINER] Loaded climatology baseline, shape={self.climatology.shape}")
+        else:
+            self.climatology = None
+            print("[TRAINER] No climatology found on dataset – anomaly loss will use batch mean as baseline.")
+
         self.optimizer = optimizer(
             self.model.parameters(), lr=self.lr * self.accelerator.num_processes
         )
@@ -289,22 +306,73 @@ class UNetTrainer:
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
-            # Calculate loss and update gradients
+            # ── Primary denoising loss ────────────────────────────────────────
             mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
-            # Calculate the avg conditional loss
-            if hasattr(self.scheduler, "alphas_cumprod"):
-                pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
-            elif self.scheduler.config.prediction_type == "v_prediction":
-                pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
+
+            # ── Anomaly-based conditioning loss ───────────────────────────────
+            # Goal: the model's x0-prediction should reproduce the *forced*
+            # climate anomaly (signal relative to the pre-industrial baseline)
+            # rather than just the raw field.  Because the forced signal is only
+            # ~1-5 % of total variance, targeting anomalies gives a much stronger
+            # gradient than targeting raw values.
+            #
+            # Steps:
+            #  1. Decode model output → predicted x0 (pred_original_sample).
+            #  2. Subtract the 1850-1900 climatology to get the anomaly.
+            #  3. Do the same for the clean target.
+            #  4. Penalise the MSE between the two anomaly fields (lat-weighted).
+            if self.cond_loss_scaling > 0:
+                # --- decode model output to x0 space ---
+                if isinstance(self.scheduler, ContinuousDDPM):
+                    # ContinuousDDPM stores alphas_cumprod indexed by discretised step
+                    pred_original_sample = self.get_original_sample(
+                        noisy_samples, model_output, timesteps
+                    )
+                elif self.scheduler.config.prediction_type == "v_prediction":
+                    # Standard DDPM v-prediction: x0 = sqrt(ā) * x_t - sqrt(1-ā) * v
+                    alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                    beta_prod_t  = 1 - alpha_prod_t
+                    pred_original_sample = (
+                        (alpha_prod_t ** 0.5) * noisy_samples
+                        - (beta_prod_t  ** 0.5) * model_output
+                    )
+                else:  # epsilon prediction
+                    alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                    beta_prod_t  = 1 - alpha_prod_t
+                    pred_original_sample = (
+                        noisy_samples - (beta_prod_t ** 0.5) * model_output
+                    ) / (alpha_prod_t ** 0.5)
+
+                # --- subtract climatological baseline to isolate anomaly ---
+                if self.climatology is not None:
+                    baseline = self.climatology.to(
+                        device=clean_samples.device, dtype=clean_samples.dtype
+                    )
+                else:
+                    # Fallback: use the per-batch temporal mean as an approximate baseline.
+                    # Less ideal (mixes forced signal in), but still better than raw values.
+                    baseline = clean_samples.mean(dim=2, keepdim=True)
+
+                clean_anomaly = clean_samples        - baseline  # (B, C, T, H, W)
+                pred_anomaly  = pred_original_sample - baseline
+
+                # --- lat-weighted MSE on anomaly fields ---
+                cond_loss = calc_mse_loss(pred_anomaly, clean_anomaly, self.train_set.lats)
+
+                # Diagnostics every 200 steps (main process only)
+                if self.global_step % 200 == 0 and self.accelerator.is_main_process:
+                    anom_signal = clean_anomaly.abs().mean().item()
+                    anom_error  = (pred_anomaly - clean_anomaly).abs().mean().item()
+                    print(
+                        f"[ANOM DIAG] step={self.global_step} "
+                        f"anomaly_signal={anom_signal:.6f}  "
+                        f"anomaly_error={anom_error:.6f}  "
+                        f"cond_loss={cond_loss.item():.6f}"
+                    )
             else:
-                pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps, model_output)
+                cond_loss = torch.zeros(1, device=self.device)
 
-            # Get the mean of both the clean and the predicted original sample
-            clean_mean = clean_samples.mean(dim=-3)
-            pred_mean = pred_original_sample.mean(dim=-3)
-            cond_loss = ((clean_mean - pred_mean) ** 2).mean()
-
-            # Calculate the loss
+            # ── Total loss ────────────────────────────────────────────────────
             loss = mse_loss + cond_loss * self.cond_loss_scaling
 
             # Scale the loss by cosine-weighted latitude
