@@ -258,22 +258,17 @@ class ResnetBlock(nn.Module):
             time_emb = rearrange(time_emb, "b c -> b c 1 1 1")
             scale_shift = time_emb.chunk(2, dim=1)
 
-        # Spatial FiLM is applied to BOTH block1 and block2 so every sub-layer
-        # has a direct gradient path back to the conditioning encoder.
-        # The film tensor has 2*dim_out channels; we split once and reuse.
+        # spatial_film: [B, dim_out*2, T, H, W] — split into scale and shift once,
+        # reuse for both sub-blocks so every layer has a direct gradient path.
         sp_scale, sp_shift = (None, None)
         if exists(spatial_film):
-            # spatial_film: [B, dim_out*2, T, H, W]
-            # block1 output is dim_out channels, so this split is always valid.
             sp_scale, sp_shift = spatial_film.chunk(2, dim=1)
 
         h = self.block1(x, scale_shift=scale_shift)
-        # Apply spatial FiLM after block1 (before block2)
         if sp_scale is not None:
             h = h * (sp_scale + 1) + sp_shift
 
         h = self.block2(h)
-        # Apply spatial FiLM again after block2 (before residual add)
         if sp_scale is not None:
             h = h * (sp_scale + 1) + sp_shift
 
@@ -545,85 +540,51 @@ class PseudoConv3D(nn.Module):
         return x
 
 
-
-
 class SpatialCondEncoder(nn.Module):
     """
     Multi-scale conditioning encoder that preserves spatial structure.
 
-    Takes the raw conditioning map [B, cond_channels, T, H, W] and produces
-    a list of feature maps at each UNet level resolution.  Unlike a global
-    average pool, every spatial cell in the emission map has a distinct
-    representation that can influence the corresponding cell in the UNet.
+    Takes [B, cond_channels, T, H, W] and produces a list of feature maps,
+    one per UNet resolution level.  Unlike global average pooling, every spatial
+    cell in the emission map retains a distinct representation that can modulate
+    the corresponding cell in the UNet via per-pixel FiLM.
 
-    The encoder mirrors the UNet's downsampling schedule exactly:
-      level 0  →  full resolution,   channels = dims[1]
-      level 1  →  H/2,  W/2,         channels = dims[2]
-      level 2  →  H/4,  W/4,         channels = dims[3]
-      ...
-      level N  →  H/2^N, W/2^N       channels = dims[N+1]
-
-    The last level does NOT downsample (matches the UNet's is_last level).
-
-    Each level uses two Conv3d layers (spatial-only, kernel (1,3,3)) so the
-    temporal axis is never pooled away.  GroupNorm + SiLU activations match
-    the UNet's ResnetBlock style.
-
-    Cross-level residual connections:
-      Each deeper level receives a 1×1×1 projection of the previous level's
-      features added before the output is saved.  This means features[2] (the
-      bottleneck-level feature) accumulates conditioning context from all three
-      resolution levels rather than only the coarsest view.  It also shortens
-      the gradient path from deep UNet layers back to the conditioning encoder,
-      making it much harder for the optimizer to ignore the emission signal.
+    Level i has shape [B, dims[i+1], T, H/2^i, W/2^i] (last level keeps size).
+    Cross-level residual projections (zero-init) accumulate multi-scale context
+    in deeper features and shorten the gradient path from deep UNet layers back
+    to the conditioning encoder.
     """
 
     def __init__(self, cond_channels: int, dims: list, resnet_groups: int = 8):
-        """
-        Args:
-            cond_channels: number of input conditioning channels (e.g. 2 for CO2+SO2)
-            dims: full UNet channel list, e.g. [64, 128, 256, 512]
-                  The encoder produces len(dims)-1 feature maps.
-            resnet_groups: number of groups for GroupNorm
-        """
         super().__init__()
-
-        # dims[1:] are the target channel widths at each level
-        level_dims = dims[1:]
-        n_levels   = len(level_dims)
-
-        self.levels          = nn.ModuleList()
-        self.downsamplers    = nn.ModuleList()
-        # residual_projs[i] projects features[i-1] into features[i]'s channel dim.
-        # residual_projs[0] is None (no previous level).
-        self.residual_projs  = nn.ModuleList()
+        level_dims        = dims[1:]
+        n_levels          = len(level_dims)
+        self.levels       = nn.ModuleList()
+        self.downsamplers = nn.ModuleList()
+        self.residual_projs = nn.ModuleList()
 
         in_ch = cond_channels
         for i, out_ch in enumerate(level_dims):
-            g = min(resnet_groups, out_ch)  # guard against small channels
+            g = min(resnet_groups, out_ch)
             self.levels.append(nn.Sequential(
-                nn.Conv3d(in_ch, out_ch, (1, 3, 3), padding=(0, 1, 1)),
+                nn.Conv3d(in_ch,   out_ch, (1, 3, 3), padding=(0, 1, 1)),
                 nn.GroupNorm(g, out_ch),
                 nn.SiLU(),
                 nn.Conv3d(out_ch, out_ch, (1, 3, 3), padding=(0, 1, 1)),
                 nn.GroupNorm(g, out_ch),
                 nn.SiLU(),
             ))
-            # Spatial downsample matches the UNet's Conv3d Downsample.
-            # Last level uses Identity (UNet's is_last level keeps resolution).
-            is_last_level = (i == n_levels - 1)
-            if not is_last_level:
+            # Match UNet Downsample; last level is identity (is_last)
+            if i < n_levels - 1:
                 self.downsamplers.append(
                     nn.Conv3d(out_ch, out_ch, (1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1))
                 )
             else:
                 self.downsamplers.append(nn.Identity())
 
-            # Cross-level residual: 1×1×1 conv from prev level channels → this level.
-            # Zero-initialised so it starts as identity (no residual contribution)
-            # and the model learns how much cross-level context to use.
+            # Zero-init cross-level residual: starts as no-op, model learns to use it
             if i == 0:
-                self.residual_projs.append(None)   # placeholder; skipped in forward
+                self.residual_projs.append(None)
             else:
                 prev_ch = level_dims[i - 1]
                 res_proj = nn.Conv3d(prev_ch, out_ch, 1)
@@ -634,29 +595,16 @@ class SpatialCondEncoder(nn.Module):
             in_ch = out_ch
 
     def forward(self, x: torch.Tensor) -> list:
-        """
-        Args:
-            x: [B, cond_channels, T, H, W]
-        Returns:
-            features: list of tensors, one per level, BEFORE downsampling.
-                      features[i] has shape [B, dims[i+1], T, H/2^i, W/2^i]
-                      (except level 0 which stays at full resolution).
-                      Each features[i] accumulates context from all levels 0..i
-                      via the cross-level residual projections.
-        """
+        """Returns list of feature maps BEFORE downsampling, one per level."""
         features     = []
-        prev_feat_ds = None   # previous level features AFTER downsampling
+        prev_feat_ds = None
         for level, ds, res_proj in zip(self.levels, self.downsamplers, self.residual_projs):
             feat = level(x)
-            # Cross-level residual: add a 1x1x1 projection of the previous
-            # level features to carry multi-scale context forward.
-            # We use prev_feat_ds (already downsampled to this level H x W)
-            # so spatial sizes always match for the addition.
             if res_proj is not None and prev_feat_ds is not None:
                 feat = feat + res_proj(prev_feat_ds)
-            features.append(feat)      # save BEFORE downsampling
-            prev_feat_ds = ds(feat)    # downsample; reuse as residual next iter
-            x = prev_feat_ds           # also feed into next level conv
+            features.append(feat)
+            prev_feat_ds = ds(feat)
+            x = prev_feat_ds
         return features
 
 
@@ -790,47 +738,29 @@ class UNetModel3D(nn.Module):
         )
 
         # ── Spatial conditioning encoder ──────────────────────────────────────
-        # Replaces the old global-pool encoder.  Instead of collapsing the
-        # entire emission map into a single vector and injecting it into `t`,
-        # we now produce a feature-pyramid with one map per UNet resolution
-        # and apply per-pixel FiLM inside each ResnetBlock.
-        #
-        # Architecture:
-        #   SpatialCondEncoder  →  list of feature maps [B, dim_i, T, H_i, W_i]
-        #                          with cross-level residuals so deeper features
-        #                          accumulate full multi-scale context.
-        #
-        #   Per level, two projection convs:
-        #     cond_down_projs[i]       →  FiLM for down block2  (dim_out ch in)
-        #     cond_down_block1_projs[i]→  FiLM for down block1  (dim_out ch in)
-        #     (same pattern for up and mid)
-        #
-        # All projection convs are zero-initialised so the model starts as the
-        # unconditioned baseline and learns to use conditioning gradually.
+        # Replaces the old global-avg-pool scalar encoder.
+        # Produces a feature pyramid [B, dims[i+1], T, H_i, W_i] per level.
+        # Per-pixel FiLM is injected into both ResnetBlocks at every UNet level
+        # via zero-initialised 1x1x1 projection convs so the model starts as the
+        # unconditioned baseline and learns conditioning gradually.
         if cond_channels > 0:
             self.spatial_cond_encoder = SpatialCondEncoder(
-                cond_channels = cond_channels,
-                dims          = dims,
-                resnet_groups = resnet_groups,
+                cond_channels=cond_channels,
+                dims=dims,
+                resnet_groups=resnet_groups,
             )
 
-            # ── Down projections ─────────────────────────────────────────────
-            # block2: input is dim_out (spatial feat channels at this level)
+            # Down projections (block1 and block2 at each level)
             self.cond_down_projs = nn.ModuleList([
                 nn.Conv3d(dim_out, dim_out * 2, 1)
                 for (_, dim_out) in in_out
             ])
-            # block1: input changes dim_in → dim_out, so we condition at dim_out
-            # (applied after the first conv inside ResnetBlock, same spatial feat)
             self.cond_down_block1_projs = nn.ModuleList([
                 nn.Conv3d(dim_out, dim_out * 2, 1)
                 for (_, dim_out) in in_out
             ])
 
-            # ── Up projections ───────────────────────────────────────────────
-            # The spatial feat at up_idx mirrors down level (num_levels-1-up_idx),
-            # which has dim_out channels. block2 outputs dim_in channels.
-            # Fixed: input must be dim_out (spatial feat), output dim_in*2 (FiLM).
+            # Up projections: spatial feat has dim_out channels, FiLM needs dim_in*2
             self.cond_up_projs = nn.ModuleList([
                 nn.Conv3d(dim_out, dim_in * 2, 1)
                 for (dim_in, dim_out) in reversed(in_out)
@@ -840,40 +770,35 @@ class UNetModel3D(nn.Module):
                 for (dim_in, dim_out) in reversed(in_out)
             ])
 
-            # ── Bottleneck projections ────────────────────────────────────────
+            # Bottleneck projections
             mid_dim_for_proj = dims[-1]
             self.cond_mid_proj        = nn.Conv3d(mid_dim_for_proj, mid_dim_for_proj * 2, 1)
             self.cond_mid_block1_proj = nn.Conv3d(mid_dim_for_proj, mid_dim_for_proj * 2, 1)
 
-            # Zero-init all projections → identity at start (sp_scale=0, sp_shift=0)
-            all_projs = [
-                *self.cond_down_projs,
-                *self.cond_down_block1_projs,
-                *self.cond_up_projs,
-                *self.cond_up_block1_projs,
-                self.cond_mid_proj,
-                self.cond_mid_block1_proj,
-            ]
-            for proj in all_projs:
+            # Zero-init all projections: identity at start, model learns gradually
+            for proj in [
+                *self.cond_down_projs, *self.cond_down_block1_projs,
+                *self.cond_up_projs,   *self.cond_up_block1_projs,
+                self.cond_mid_proj,    self.cond_mid_block1_proj,
+            ]:
                 nn.init.zeros_(proj.weight)
                 nn.init.zeros_(proj.bias)
 
-            # Keep these as None so old code paths that check them still work
+            # Keep old names as None so external code that checks them doesn't crash
             self.cond_encoder = None
             self.cond_scale   = None
             self.cond_shift   = None
         else:
-            self.spatial_cond_encoder     = None
-            self.cond_down_projs          = None
-            self.cond_down_block1_projs   = None
-            self.cond_up_projs            = None
-            self.cond_up_block1_projs     = None
-            self.cond_mid_proj            = None
-            self.cond_mid_block1_proj     = None
-            self.cond_encoder             = None
-            self.cond_scale               = None
-            self.cond_shift               = None
-
+            self.spatial_cond_encoder   = None
+            self.cond_down_projs        = None
+            self.cond_down_block1_projs = None
+            self.cond_up_projs          = None
+            self.cond_up_block1_projs   = None
+            self.cond_mid_proj          = None
+            self.cond_mid_block1_proj   = None
+            self.cond_encoder           = None
+            self.cond_scale             = None
+            self.cond_shift             = None
         # Create embeddings for day and year if applicable
         if day_cond:
             self.class_emb = nn.Embedding(366, time_dim)
@@ -1022,13 +947,13 @@ class UNetModel3D(nn.Module):
             time_rel_pos_bias = None
             focus_present_mask = None
 
+
         # ── Spatial conditioning encoder ──────────────────────────────────────
         # Produces a list of feature maps at each UNet resolution.
         # cond_spatial_feats[i] has shape [B, dims[i+1], T, H_i, W_i]
         cond_spatial_feats = None
         if self.spatial_cond_encoder is not None:
             if exists(cond_map):
-                # Classifier-free guidance dropout: zero-out whole samples
                 if self.training and self.cond_drop_prob > 0:
                     keep_mask = (
                         torch.rand(cond_map.shape[0], device=cond_map.device)
@@ -1038,14 +963,13 @@ class UNetModel3D(nn.Module):
                 else:
                     cond_map_input = cond_map
             else:
-                # No cond provided (null conditioning / CFG inference with null)
+                # Null conditioning (CFG inference with cond=None)
                 cond_map_input = torch.zeros(
                     x.shape[0], self.cond_channels,
                     x.shape[2], x.shape[3], x.shape[4],
                     device=x.device, dtype=x.dtype,
                 )
             cond_spatial_feats = self.spatial_cond_encoder(cond_map_input)
-            # cond_spatial_feats is a list: [feat_level0, feat_level1, ...]
 
         if exists(lowres_cond):
             x = torch.cat([x, lowres_cond], dim=1)
@@ -1057,10 +981,9 @@ class UNetModel3D(nn.Module):
         # Create a residual connection to add at the end of the model's forward process
         r = x.clone()
 
-        # Get timestep embeddings (carries diffusion noise level; no cond injection here)
+        # Get timestep embeddings (carries diffusion noise level only; no cond injection)
         t = self.time_mlp(timesteps)
 
-        # Day / year embeddings (unchanged)
         if self.day_cond:
             t += self.class_emb(days)
         if self.year_cond:
@@ -1070,23 +993,18 @@ class UNetModel3D(nn.Module):
         h = []
 
         # ── Down blocks ───────────────────────────────────────────────────────
-        # Spatial FiLM is now injected into BOTH block1 and block2 at every
-        # level so the conditioning encoder has a direct gradient path from
-        # every sub-layer, not just the last one at each level.
         for level_idx, (block1, block2, spatial_attn, temporal_attn, downsample) in enumerate(self.downs):
-            # Compute spatial FiLM maps for this level if cond is available.
-            # cond_spatial_feats[level_idx]: [B, dim_out, T, H_i, W_i]
-            sp_film_down_b1 = None
-            sp_film_down_b2 = None
+            sp_film_b1 = None
+            sp_film_b2 = None
             if cond_spatial_feats is not None:
                 feat = cond_spatial_feats[level_idx]
                 if self.cond_down_block1_projs is not None:
-                    sp_film_down_b1 = self.cond_down_block1_projs[level_idx](feat)
+                    sp_film_b1 = self.cond_down_block1_projs[level_idx](feat)
                 if self.cond_down_projs is not None:
-                    sp_film_down_b2 = self.cond_down_projs[level_idx](feat)
+                    sp_film_b2 = self.cond_down_projs[level_idx](feat)
 
-            x = block1(x, t, spatial_film=sp_film_down_b1)
-            x = block2(x, t, spatial_film=sp_film_down_b2)
+            x = block1(x, t, spatial_film=sp_film_b1)
+            x = block2(x, t, spatial_film=sp_film_b2)
             x = spatial_attn(x)
             x = temporal_attn(
                 x, pos_bias=time_rel_pos_bias, focus_present_mask=focus_present_mask
@@ -1112,26 +1030,23 @@ class UNetModel3D(nn.Module):
         x = self.mid_block2(x, t, spatial_film=sp_film_mid_b2)
 
         # ── Up blocks ─────────────────────────────────────────────────────────
-        # Mirror the down-block cond injection symmetrically.
-        # up level i corresponds to down level (num_levels - 1 - i), so we
-        # index cond_spatial_feats in reverse order.
         num_down_levels = len(self.downs)
         for up_idx, (block1, block2, spatial_attn, temporal_attn, upsample) in enumerate(self.ups):
             x = torch.cat((x, h.pop()), dim=1)
 
-            sp_film_up_b1 = None
-            sp_film_up_b2 = None
+            sp_film_b1 = None
+            sp_film_b2 = None
             if cond_spatial_feats is not None:
-                # Mirror: up_idx=0 → deepest down level = num_down_levels-1
+                # Mirror down path: up_idx=0 -> deepest down level
                 down_level_idx = num_down_levels - 1 - up_idx
                 feat = cond_spatial_feats[down_level_idx]
                 if self.cond_up_block1_projs is not None:
-                    sp_film_up_b1 = self.cond_up_block1_projs[up_idx](feat)
+                    sp_film_b1 = self.cond_up_block1_projs[up_idx](feat)
                 if self.cond_up_projs is not None:
-                    sp_film_up_b2 = self.cond_up_projs[up_idx](feat)
+                    sp_film_b2 = self.cond_up_projs[up_idx](feat)
 
-            x = block1(x, t, spatial_film=sp_film_up_b1)
-            x = block2(x, t, spatial_film=sp_film_up_b2)
+            x = block1(x, t, spatial_film=sp_film_b1)
+            x = block2(x, t, spatial_film=sp_film_b2)
             x = spatial_attn(x)
             x = temporal_attn(
                 x, pos_bias=time_rel_pos_bias, focus_present_mask=focus_present_mask
