@@ -231,7 +231,7 @@ class UNetTrainer:
                 ):
                     continue
                 # print("COND SHAPE in train",cond.shape)
-                loss,mse_loss,cond_loss,anom_signal,anom_error = self.get_loss(batch, cond)
+                loss,mse_loss,cond_loss,anom_signal,anom_error,sens = self.get_loss(batch, cond)
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -255,12 +255,13 @@ class UNetTrainer:
                     avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
                     avg_anom_error = self.accelerator.gather_for_metrics(anom_error).mean()
                     avg_anom_signal = self.accelerator.gather_for_metrics(anom_signal).mean()
-
+                    avg_sens = self.accelerator.gather_for_metrics(sens).mean()
                     log_dict = {"Training/Loss": avg_loss.detach().item(),
                                     "MSE LOSS": avg_mse_loss.detach().item(),
                                     "COND LOSS": avg_cond_loss.detach().item(),
                                     "ANOM ERROR": avg_anom_error.detach().item(),
-                                    "ANOM SIGNAL": avg_anom_signal.detach().item()}
+                                    "ANOM SIGNAL": avg_anom_signal.detach().item(),
+                                    "SENS": avg_sens.detach().item()}
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch}, )
@@ -364,6 +365,15 @@ class UNetTrainer:
                     # Fallback: use the per-batch temporal mean as an approximate baseline.
                     # Less ideal (mixes forced signal in), but still better than raw values.
                     baseline = clean_samples.mean(dim=2, keepdim=True)
+                with torch.no_grad():
+                    out_null = self.model(
+                        noisy_samples,
+                        timesteps,
+                        cond_map=torch.zeros_like(cond_map),
+                    )
+                cond_sensitivity = (model_output - out_null).abs().mean()#.item()
+                if self.accelerator.is_main_process:)
+
 
                 clean_anomaly = clean_samples        - baseline  # (B, C, T, H, W)
                 pred_anomaly  = pred_original_sample - baseline
@@ -394,7 +404,7 @@ class UNetTrainer:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss,mse_loss,cond_loss *self.cond_loss_scaling,anom_signal, anom_error
+        return loss,mse_loss,cond_loss *self.cond_loss_scaling,anom_signal, anom_error,cond_sensitivity
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
