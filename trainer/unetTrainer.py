@@ -483,6 +483,7 @@ class UNetTrainer:
                 cond_loss = torch.zeros(1, device=self.device)
                 anom_error =  torch.zeros(1, device=self.device)
                 anom_signal =  torch.zeros(1, device=self.device)
+                cond_sensitivity =  torch.zeros(1, device=self.device)
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = mse_loss + cond_loss * self.cond_loss_scaling
