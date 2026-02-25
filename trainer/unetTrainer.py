@@ -1,7 +1,7 @@
 import os
 import random
-from typing import Any, Callable, Optional
-
+from typing import Any, Callable
+import numpy as np
 import torch
 from accelerate import Accelerator
 from diffusers import SchedulerMixin
@@ -67,15 +67,57 @@ def _list_ckpts_sorted(ckpt_dir, pattern="ckpt_epoch_*.pt"):
     return sorted(paths, key=_key, reverse=True)
 
 
-def calc_mse_loss(model_output, target, lats, lat_weight: Optional[torch.Tensor] = None):
-    """Latitude-weighted MSE loss. Pass pre-computed lat_weight to avoid re-allocation."""
+def lat_weighted_mse_loss(model_output, target, lats, lat_min=-80.0, lat_max=80.0, eps=1e-6):
+    # force fp32 for stability
+    diff2 = (model_output.float() - target.float()).pow(2)  # [..., Y, X]
+
+    lat = torch.as_tensor(lats.to_numpy().astype("float32"), device=diff2.device, dtype=torch.float32)  # [Y]
+    mask = (lat >= lat_min) & (lat <= lat_max)
+
+    w = torch.cos(torch.deg2rad(lat))
+    w = w * mask.to(w.dtype)  # [Y]
+
+    # reshape to broadcast over lon and leading dims
+    w = w.view(*([1] * (diff2.ndim - 2)), -1, 1)  # [..., Y, 1]
+
+    weighted = diff2 * w
+    denom = (w.sum() * diff2.shape[-1]).clamp(min=eps)  # sum over lat weights * lon count
+    return weighted.sum() / denom
+
+
+def calc_mse_loss(model_output, target, lats):
+    """Latitude-weighted MSE loss using only latitudes between -80 and 80 degrees"""
+
     spatial_loss = (model_output - target) ** 2
 
-    if lat_weight is None:
-        latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
-        lat_weight = torch.cos(torch.deg2rad(latitude))
+    # Latitude tensor
+    latitude = torch.as_tensor(
+        lats.values,
+        dtype=spatial_loss.dtype,
+        device=spatial_loss.device,
+    )
 
-    return torch.einsum('...yx,y->...yx', spatial_loss, lat_weight).mean()
+    # Mask latitudes between -80 and 80
+    lat_mask = (latitude >= -80.0) & (latitude <= 80.0)
+
+    # Latitude weights (cosine weighting)
+    latitude_rad = torch.deg2rad(latitude)
+    latitude_weight = torch.cos(latitude_rad)
+
+    # Apply mask
+    latitude_weight = latitude_weight * lat_mask
+
+    # Weighted loss
+    weighted_loss = torch.einsum(
+        "...yx,y->...yx",
+        spatial_loss,
+        latitude_weight,
+    ).mean()
+
+    # Normalize properly (avoid bias from masked-out lats)
+    # loss = weighted_loss.sum() / latitude_weight.sum()
+
+    return weighted_loss
 
 
 class UNetTrainer:
@@ -93,15 +135,16 @@ class UNetTrainer:
     ) -> None:
         # Assign the hyperparameters to class attributes
         self.save_hyperparameters(hyperparameters)
-
+        self.training_mode = hyperparameters.get("training_mode", "diffusion")
+        self.noise_channels = hyperparameters.get("noise_channels", 0)
         # Assign more class attributes
         self.accelerator = accelerator
         self.train_set, self.val_set = train_set, 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
-        self.cond_loss_scaling = 0.5#1.2
-        self.scheduler.set_timesteps(self.sample_steps)
-
+        self.cond_loss_scaling = 0.2
+        if self.training_mode == "diffusion":
+            self.scheduler.set_timesteps(self.sample_steps)
         # Keep track of our exponential moving average weights
         self.ema_model = EMA(
             self.model,
@@ -114,58 +157,22 @@ class UNetTrainer:
         self.device = self.accelerator.device
         self.weight_dtype = torch.float32
 
-        # Separate parameter groups: 50x higher LR for conditioning encoder
-        # so it can't be ignored by the optimizer
-        cond_params = []
-        other_params = []
-        for name, param in self.model.named_parameters():
-            if 'cond_encoder' in name or 'cond_scale' in name or 'cond_shift' in name:
-                cond_params.append(param)
-            else:
-                other_params.append(param)
-
-        if cond_params:
-            print(f"[OPTIM] Conditioning params: {len(cond_params)} tensors, "
-                  f"LR={self.lr * 50:.6f}")
-            print(f"[OPTIM] Other params: {len(other_params)} tensors, "
-                  f"LR={self.lr:.6f}")
-            self.optimizer = optimizer([
-                {'params': other_params, 'lr': self.lr},
-                {'params': cond_params, 'lr': self.lr * 50},
-            ], lr=self.lr)
-        else:
-            self.optimizer = optimizer(
-                self.model.parameters(), lr=self.lr
-            )
+        self.optimizer = optimizer(self.model.parameters(), lr=self.lr)
 
         self.train_loader: ClimateDataLoader = dataloader(
             self.train_set,
             self.accelerator,
             self.batch_size,
-            num_workers=4,
-            prefetch_factor=2,
-            persistent_workers=True,
-            pin_memory=False,  # False for ROCm
+            # shuffle=True,
+            # drop_last=True,              # avoid short last batch on any rank
+            # pin_memory=True,
+            # persistent_workers=True,num_workers=4
         )
         # self.val_loader: ClimateDataLoader = dataloader(
         #    self.val_set,
         #    self.accelerator,
         #    self.batch_size,
         # )
-
-        # Pre-compute latitude weights once and cache on device
-        self._lat_weights: Optional[torch.Tensor] = None
-
-        # Pre-compute 1850-1900 climatological baseline mean in normalised space.
-        # MUST be initialised before load() so old checkpoints don't raise
-        # AttributeError in get_loss.
-        try:
-            self._baseline_mean: Optional[torch.Tensor] = train_set.get_baseline_mean(
-                baseline_start=1850, baseline_end=1900
-            )
-        except (RuntimeError, AttributeError) as e:
-            print(f"[WARN] Could not compute baseline mean — contrastive cond_loss disabled: {e}")
-            self._baseline_mean = None
 
         # Initialize counters
         self.global_step = 0
@@ -180,6 +187,7 @@ class UNetTrainer:
         self.num_steps_per_epoch = (
                 len(self.train_loader)
                 // self.accelerator.gradient_accumulation_steps
+                // self.accelerator.num_processes
         )
         self.max_train_steps = self.max_epochs * self.num_steps_per_epoch
 
@@ -222,18 +230,10 @@ class UNetTrainer:
             self.optimizer,
         ) = self.accelerator.prepare(self.model, self.optimizer)
 
-        if self._baseline_mean is not None:
-            self._baseline_mean = self._baseline_mean.to(
-                device=self.accelerator.device, dtype=self.weight_dtype
-            )
-
     def train(self):
         # Sanity check the validation loop and sampling before training
-        best_loss=999
         for epoch in range(self.first_epoch, self.max_epochs):
             # print(epoch)
-            loss = None  # Add this line
-
             for step, (batch, cond) in enumerate(self.train_loader.generate()):
                 # print(step)
                 # print(len(batch),batch[0].shape,batch[1].shape)
@@ -246,8 +246,7 @@ class UNetTrainer:
                 ):
                     continue
                 # print("COND SHAPE in train",cond.shape)
-                loss, mse_loss, cond_loss = self.get_loss(batch, cond)
-                # get_loss returns already-detached scalars
+                loss = self.get_loss(batch, cond)
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -266,29 +265,14 @@ class UNetTrainer:
                             self.save(epoch)
 
                     # Metric calculation and logging
-            #if self.accelerator.is_main_process:
-            if loss is not None:
+                    avg_loss = self.accelerator.gather_for_metrics(loss).mean()
+                    log_dict = {"Training/Loss": avg_loss.detach().item()}
+                    self.accelerator.log(log_dict, step=self.global_step)
+                    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
+                    self.accelerator.print(log_dict, {"Epoch": epoch}, )
+                    # progress_bar.set_postfix(**log_dict)
 
-                avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-                avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
-                avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
-                if self.accelerator.is_main_process:
-                    if avg_loss.detach().item() < best_loss:
-                        self.accelerator.print(avg_loss.detach().item(), {"Best LOSS Epoch": epoch})
-                        self.save_best(epoch)
-                        best_loss=avg_loss.detach().item()
-                log_dict = {"Training/Loss": avg_loss.detach().item(),
-                            'MSE_loss': avg_mse_loss.detach().item(),
-                            'cond_loss': avg_cond_loss.detach().item()}
-
-            #    self.accelerator.log(log_dict, step=self.global_step)
-            #    self.accelerator.log({"Epoch": epoch}, step=self.global_step)
-                self.accelerator.print(log_dict, {"Epoch": epoch}, )
-                        # progress_bar.set_postfix(**log_dict)
-
-            # Free any leftover GPU memory at epoch boundary (works for both CUDA and ROCm)
-            if self.device.type != 'cpu':
-                torch.cuda.empty_cache()
+            # progress_bar.close()
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
 
@@ -299,21 +283,92 @@ class UNetTrainer:
 
         return pred_original_sample
 
-    def _decode_x0(self, model_output, noisy_samples, timesteps):
-        """Reconstruct x0 from model output. Gradients flow through model_output."""
-        if isinstance(self.scheduler, ContinuousDDPM):
-            return self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
-        alpha_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-        beta_t = 1.0 - alpha_t
-        if self.scheduler.config.prediction_type == "epsilon":
-            return (noisy_samples - beta_t.sqrt() * model_output) / alpha_t.sqrt()
-        else:  # v_prediction
-            return alpha_t.sqrt() * noisy_samples - beta_t.sqrt() * model_output
-
     def get_loss(self, batch, cond_map):
+        if self.training_mode == "fcn3":
+            return self.get_loss_fcn3(batch, cond_map)
+        else:
+            return self.get_loss_diffusion(batch, cond_map)
+
+    def get_loss_fcn3(self, batch, cond_map):
+        # target: [B,1,1,H,W]
+        y = batch.to(self.weight_dtype)
+
+        # cond: [B,2,H,W] -> [B,2,1,H,W]
+        c = cond_map.to(self.weight_dtype)
+        if self.accelerator.is_main_process and self.global_step % 100 == 0:
+            print(f"Batch shape: {y.shape}, Cond shape: {c.shape}")
+
+            # Check for high emissions
+            high_co2_mask = c[:, 0] > 0.8  # Threshold for "high" normalized CO2
+            high_sul_mask = c[:, 1] > 0.8  # Threshold for "high" normalized sulfate
+
+            if high_co2_mask.any() or high_sul_mask.any():
+                print(f"High emissions detected at step {self.global_step}:")
+                print(f"  Max CO2: {c[:, 0].max():.3f}")
+                print(f"  Max sul: {c[:, 1].max():.3f}")
+                print(f"  Corresponding temp stats:")
+                print(f"    Mean: {y.mean():.3f}")
+                print(f"    Std: {y.std():.3f}")
+                print(f"    Min/Max: {y.min():.3f}/{y.max():.3f}")
+        # quick-start normalization for emissions (replace later w/ fixed stats)
+        # c = torch.log1p(torch.clamp(c, min=0.0))
+        # mean = c.mean(dim=(0, 2, 3), keepdim=True)
+        # std = c.std(dim=(0, 2, 3), keepdim=True).clamp(min=1e-6)
+        # c = (c - mean) / std
+        # c = c.unsqueeze(2)
+
+        # latent noise: [B,K,1,H,W]
+        K = int(getattr(self, "noise_channels", 4))
+        noise_scale = float(getattr(self, "noise_scale", 0.0)) / (K ** 0.5)
+        x = noise_scale * torch.randn(y.shape[0], K, 1, y.shape[-2], y.shape[-1],
+                                      device=y.device, dtype=y.dtype)
+        # dummy timesteps (required by model signature)
+        t = torch.zeros(y.shape[0], device=y.device, dtype=torch.long)
+
+        # if self.accelerator.is_main_process:
+        #    print("x:", tuple(x.shape), "c:", tuple(c.shape))
+        c_enhanced = torch.cat([
+            c,  # Original: [B, 2, 1, H, W]
+            c.pow(2),  # Squared terms
+            (c[:, 1:2] > 0.8).float(),  # High sulfate indicator
+            (c[:, 0:1] * c[:, 1:2]),  # CO2 × sulfate interaction
+            c.mean(dim=(3, 4), keepdim=True).expand_as(c),  # Spatial mean
+        ], dim=1)  # Now [B, 7, 1, H, W]
+        with self.accelerator.accumulate(self.model):
+            y_hat = self.model(x, t, cond_map=c_enhanced)
+            if y_hat.ndim == 5 and y_hat.shape[2] == 1:
+                y_hat = y_hat.squeeze(2)
+            if y.ndim == 5 and y.shape[2] == 1:
+                y = y.squeeze(2)
+            # loss = calc_mse_loss(y_hat, y, self.train_set.lats)
+            if self.accelerator.is_main_process and self.global_step == 0:
+                l = self.train_set.lats
+                print("lats type:", type(l))
+                if hasattr(l, "dims"): print("lats dims:", l.dims)
+                if hasattr(l, "shape"): print("lats shape:", l.shape)
+                if hasattr(l, "values"): print("lats values shape:", np.asarray(l.values).shape)
+            loss = lat_weighted_mse_loss(y_hat, y, self.train_set.lats)
+
+            self.accelerator.backward(loss)
+            if self.accelerator.sync_gradients:
+                self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+        if self.accelerator.is_main_process and self.global_step % 100 == 0:
+            print(f"Pred range: {y_hat.min():.3f}, {y_hat.max():.3f}")
+            print(f"Loss: {loss.item():.6f}")
+        return loss
+
+    def get_loss_diffusion(self, batch, cond_map):
         clean_samples = batch.to(self.weight_dtype)
+        # cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
+        #    1, 1, clean_samples.shape[-3], 1, 1
+        # )
+
+        # Sample noise that we'll add to the clean images
         noise = torch.randn_like(clean_samples)
 
+        # If we are doing continuous diffusion, timesteps need to be from 0 - 1
         if isinstance(self.scheduler, ContinuousDDPM):
             timesteps = torch.rand(clean_samples.shape[0], device=self.device)
             timesteps = self.scheduler.log_snr(timesteps)
@@ -325,117 +380,52 @@ class UNetTrainer:
                 device=self.device,
             ).long()
 
+        # Add noise to the clean images according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
-        # ── Latitude weights (cached) ─────────────────────────────────────────
-        if self._lat_weights is None or self._lat_weights.device != self.device:
-            lats = torch.as_tensor(
-                self.train_set.lats.values, dtype=self.weight_dtype, device=self.device
-            )
-            self._lat_weights = torch.cos(torch.deg2rad(lats))
-
-        if self.scheduler.config.prediction_type == "epsilon":
-            target = noise
-        elif self.scheduler.config.prediction_type == "v_prediction":
-            target = self.scheduler.get_velocity(clean_samples, noise, timesteps)
-        else:
-            raise NotImplementedError("Only epsilon and v_prediction supported")
-
-        do_contrast = (
-            self.cond_loss_scaling > 0
-            and getattr(self, '_baseline_mean', None) is not None
-        )
-
-        # ── Pre-compute shuffled reference BEFORE the main forward pass ───────
-        # This is the critical memory ordering fix:
-        #
-        #   Pass 1 (shuffled, no_grad):  activation cache created → x0_shuffled
-        #                                extracted → cache freed immediately
-        #   Pass 2 (correct, grad):      activation cache created → backward →
-        #                                cache freed
-        #
-        # At no point do two activation caches exist simultaneously.
-        # Previously Pass 2 ran first and kept its cache alive while Pass 1
-        # ran, causing 2× peak memory and OOM at step 0.
-        # ─────────────────────────────────────────────────────────────────────
-        mse_shuffled_scalar = None
-        if do_contrast:
-            anom_clean = clean_samples.detach() - self._baseline_mean
-
-            B = cond_map.shape[0]
-            min_shuffle = max(1, B // 3)
-            offset = random.randint(min_shuffle, max(min_shuffle, B - 1))
-            cond_shuffled = torch.roll(cond_map, shifts=offset, dims=0)
-
-            with torch.no_grad():
-                out_shuffled = self.model(noisy_samples, timesteps, cond_map=cond_shuffled)
-                x0_shuffled = self._decode_x0(out_shuffled, noisy_samples, timesteps)
-                del out_shuffled, cond_shuffled
-
-                anom_shuf = x0_shuffled - self._baseline_mean
-                del x0_shuffled
-                diff2 = (anom_shuf - anom_clean).pow(2)
-                del anom_shuf
-                n = diff2.shape[1] * diff2.shape[2] * diff2.shape[4]
-                mse_shuffled = torch.einsum(
-                    'bvtyx,y->b', diff2, self._lat_weights
-                ) / (self._lat_weights.sum() * n)
-                del diff2
-                # Detach to a plain scalar tensor — no graph, minimal memory
-                mse_shuffled_scalar = mse_shuffled.detach()
-                del mse_shuffled
-            # Shuffled activation cache is now completely freed
-
         with self.accelerator.accumulate(self.model):
-            # ── Main forward pass: correct conditioning (gradients ON) ────────
-            model_output = self.model(noisy_samples, timesteps, cond_map=cond_map)
+            model_output = self.model(
+                noisy_samples,
+                timesteps,
+                cond_map=cond_map,
+            )
 
-            # ── Primary MSE loss ──────────────────────────────────────────────
-            mse_loss = calc_mse_loss(model_output, target, self.train_set.lats, self._lat_weights)
-
-            # ── Contrastive anomaly loss ──────────────────────────────────────
-            if do_contrast:
-                # Decode x0 WITH gradients — path stays in autograd graph:
-                #   model_output → x0_correct → anom_correct → mse_correct → cond_loss
-                x0_correct = self._decode_x0(model_output, noisy_samples, timesteps)
-                anom_correct = x0_correct - self._baseline_mean
-                del x0_correct
-                diff2 = (anom_correct - anom_clean).pow(2)
-                del anom_correct, anom_clean
-                n = diff2.shape[1] * diff2.shape[2] * diff2.shape[4]
-                mse_correct = torch.einsum(
-                    'bvtyx,y->b', diff2, self._lat_weights
-                ) / (self._lat_weights.sum() * n)
-                del diff2
-
-                margin = getattr(self, 'contrastive_margin', 0.02)
-                cond_loss = torch.relu(margin + mse_correct - mse_shuffled_scalar).mean()
-
-                if self.global_step % 200 == 0 and self.accelerator.is_main_process:
-                    frac_winning = (mse_correct.detach() < mse_shuffled_scalar).float().mean().item()
-                    print(
-                        f"[CONTRAST] step={self.global_step}  "
-                        f"mse_correct={mse_correct.detach().mean().item():.5f}  "
-                        f"mse_shuffled={mse_shuffled_scalar.mean().item():.5f}  "
-                        f"cond_loss={cond_loss.item():.5f}  "
-                        f"winning={frac_winning*100:.1f}%"
-                    )
-                del mse_correct, mse_shuffled_scalar
+            # Make sure to get the right target for the loss
+            if self.scheduler.config.prediction_type == "epsilon":
+                target = noise
+            elif self.scheduler.config.prediction_type == "v_prediction":
+                target = self.scheduler.get_velocity(clean_samples, noise, timesteps)
             else:
-                cond_loss = torch.zeros(1, device=self.device)
+                raise NotImplementedError("Only epsilon and v_prediction supported")
 
-            del target, model_output, noisy_samples, noise, clean_samples
+            # Calculate loss and update gradients
+            se_loss = calc_mse_loss(model_output, target, self.train_set.lats)
+            # mse_loss = lat_weighted_mse(model_output, target,self.train_set.lats)
+            # Calculate the avg conditional loss
+            if hasattr(self.scheduler, "alphas_cumprod"):
+                pred_original_sample = self.get_original_sample(noisy_samples, model_output, timesteps)
+            elif self.scheduler.config.prediction_type == "v_prediction":
+                pred_original_sample = self.scheduler.predict_start_from_v(noisy_samples, timesteps, model_output)
+            else:
+                pred_original_sample = self.scheduler.predict_start_from_noise(noisy_samples, timesteps, model_output)
 
-            # ── Single backward on combined loss ──────────────────────────────
+            # Get the mean of both the clean and the predicted original sample
+            clean_mean = clean_samples.mean(dim=-3)
+            pred_mean = pred_original_sample.mean(dim=-3)
+            cond_loss = ((clean_mean - pred_mean) ** 2).mean()
+
+            # Calculate the loss
             loss = mse_loss + cond_loss * self.cond_loss_scaling
+
+            # Scale the loss by cosine-weighted latitude
             self.accelerator.backward(loss)
 
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
-
-        return loss.detach(), mse_loss.detach(), cond_loss.detach()
+            self.optimizer.zero_grad()
+        return loss
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
@@ -492,27 +482,6 @@ class UNetTrainer:
                 {f"Original {var}": wandb.Video(gif, fps=4)}, step=self.global_step
             )
 
-    def save_best(self, epoch: int):
-        """Saves the state of training to disk."""
-        if self.save_name is None:
-            return
-        else:
-            state_dict = {
-                "EMA": self.ema_model.ema_model.state_dict(),
-                "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
-                "Optimizer": self.optimizer.state_dict(),
-                "Global Step": self.global_step,
-                "PCA": self.train_set.get_pca_state(),
-                "baseline_mean": self._baseline_mean.cpu() if self._baseline_mean is not None else None,
-            }
-
-            os.makedirs(self.save_dir, exist_ok=True)
-            save_name = "best_epoch" + "" + f"_{epoch}.pt"
-            torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
-            # Confirm new architecture keys are present in the saved checkpoint
-            ema_sd = state_dict["EMA"]
-            new_arch_keys = [k for k in ema_sd if "residual_projs" in k or "block1_proj" in k]
-            print(f"[SAVE] best_epoch_{epoch}: {len(ema_sd)} EMA keys, {len(new_arch_keys)} new-arch keys present.")
     def save(self, epoch: int):
         """Saves the state of training to disk."""
         if self.save_name is None:
@@ -523,8 +492,6 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
-                "PCA": self.train_set.get_pca_state(),
-                "baseline_mean": self._baseline_mean.cpu() if self._baseline_mean is not None else None,
             }
 
             # If the directory doesn't exist already create it
@@ -535,10 +502,6 @@ class UNetTrainer:
 
             # Save the State dictionary to disk
             torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
-            # Confirm new architecture keys are present in the saved checkpoint
-            ema_sd = state_dict["EMA"]
-            new_arch_keys = [k for k in ema_sd if "residual_projs" in k or "block1_proj" in k]
-            print(f"[SAVE] epoch_{epoch}: {len(ema_sd)} EMA keys, {len(new_arch_keys)} new-arch keys present.")
 
             base = self.save_name.split(".pt")[0]
             save_name = f"{base}_{epoch}.pt"
@@ -567,66 +530,36 @@ class UNetTrainer:
                 except OSError:
                     pass
 
-    def _compat_load_state_dict(self, model, state_dict, label="model"):
-        """
-        Load state_dict with architecture-change tolerance.
-
-        Uses strict=False so weights that exist in both checkpoint and current
-        model are restored exactly.  Any keys present in the current model but
-        missing from the checkpoint (new architecture additions) are zero-inited
-        — identical to their initialisation at the start of training, so
-        training can resume safely and the new modules learn from scratch on top
-        of the restored backbone.
-
-        Unexpected keys (old architecture keys no longer in the model) are
-        logged but ignored.
-        """
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-
-        if missing:
-            print(f"[LOAD] {label}: {len(missing)} new keys not in checkpoint — zero-initing:")
-            current_sd = model.state_dict()
-            for key in missing:
-                if key in current_sd:
-                    current_sd[key].zero_()
-                    print(f"  zero-init: {key}  shape={tuple(current_sd[key].shape)}")
-                else:
-                    print(f"  [WARN] {key!r} not found in current model — skipping")
-        else:
-            print(f"[LOAD] {label}: clean load, all keys matched.")
-
-        if unexpected:
-            print(f"[LOAD] {label}: {len(unexpected)} old keys ignored (not in current model):")
-            for k in unexpected[:10]:
-                print(f"  {k}")
-
     def load(self, path):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
-        print(f"[LOAD] Checkpoint keys: {list(checkpoint.keys())}")
-        print(f"[LOAD] Global step in checkpoint: {checkpoint.get('Global Step', 'n/a')}")
+        # Restore model
+        self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["Unet"], strict=True)
 
-        # ── Restore online model (Unet) ───────────────────────────────────────
-        # strict=False via _compat_load_state_dict so resuming an old checkpoint
-        # into a new architecture doesn't crash — new params are zero-inited.
-        self._compat_load_state_dict(
-            self.accelerator.unwrap_model(self.model),
-            checkpoint["Unet"],
-            label="Unet (online)",
-        )
-
-        # ── Restore EMA model ─────────────────────────────────────────────────
-        # EMA weights (checkpoint["EMA"]) are a plain UNetModel3D state dict.
-        # Load them directly into self.ema_model.ema_model using the same
-        # compat loader so new keys are zero-inited consistently.
+        # Restore EMA (optional)
         if "EMA" in checkpoint and checkpoint["EMA"] is not None and hasattr(self, "ema_model"):
             try:
-                self._compat_load_state_dict(
-                    self.ema_model.ema_model,
-                    checkpoint["EMA"],
-                    label="EMA",
-                )
-                self.ema_model.eval()
+                # self.ema_model.load_state_dict(checkpoint["EMA"], strict=False)
+                # self.ema_model = checkpoint["EMA"].to(self.device)
+
+                ema_model_sd = checkpoint["EMA"]  # full EMA state dict (online_model + ema_model)
+
+                # Extract only EMA weights and strip "ema_model." prefix
+                # ema_model_sd = {
+                #     k.replace("ema_model.", ""): v
+                #     for k, v in ema_wrapped_sd.items()
+                #     if k.startswith("ema_model.")
+                # }
+
+                ema_model = EMA(
+                    self.model,
+                    beta=0.9999,  # exponential moving average factor
+                    update_after_step=100,  # only after this number of .update() calls will it start updating
+                    update_every=10,
+                ).to(self.device)
+                ema_model.ema_model.load_state_dict(ema_model_sd)
+                ema_model.eval()
+
             except Exception as e:
                 print(f"[WARN] Could not load EMA: {e}")
 
@@ -639,19 +572,6 @@ class UNetTrainer:
 
         # Restore global step
         self.global_step = checkpoint.get("Global Step", 0)
-
-        # Restore PCA projection (must happen before any load_data call that
-        # would otherwise refit from scratch on a different realization)
-        if "PCA" in checkpoint and checkpoint["PCA"] is not None:
-            self.train_set.set_pca_state(checkpoint["PCA"])
-            print("[INFO] Restored PCA state from checkpoint")
-
-        if "baseline_mean" in checkpoint and checkpoint["baseline_mean"] is not None:
-            self._baseline_mean = checkpoint["baseline_mean"]
-            print(f"[INFO] Restored baseline_mean from checkpoint  "
-                  f"shape={tuple(self._baseline_mean.shape)}")
-        else:
-            print("[INFO] No baseline_mean in checkpoint — using freshly computed one")
         print(self.global_step, self.accelerator.gradient_accumulation_steps)
         self.resume_global_step = (
                 self.global_step * self.accelerator.gradient_accumulation_steps
@@ -661,12 +581,6 @@ class UNetTrainer:
                 self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
         )
 
-        # Extract epoch from checkpoint filename (pattern: {base}_{epoch}.pt)
-        try:
-            self.first_epoch = int(os.path.basename(path).split("_")[-1].split(".")[0])
-        except (ValueError, IndexError):
-            self.first_epoch = 0
+        self.first_epoch = self.global_step // self.num_steps_per_epoch
 
-        # Resume from the start of the next epoch (no mid-epoch resume)
-        self.resume_step = 0
         print(f"[INFO] Loaded checkpoint from {path} (step {self.global_step})")
