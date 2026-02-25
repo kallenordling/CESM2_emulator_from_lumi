@@ -214,6 +214,8 @@ class UNetTrainer:
         ) = self.accelerator.prepare(self.model, self.optimizer)
 
     def train(self):
+        epoch_anom_signals = []
+        epoch_anom_errors = []
         # Sanity check the validation loop and sampling before training
         for epoch in range(self.first_epoch, self.max_epochs):
             # print(epoch)
@@ -229,7 +231,7 @@ class UNetTrainer:
                 ):
                     continue
                 # print("COND SHAPE in train",cond.shape)
-                loss,mse_loss,cond_loss = self.get_loss(batch, cond)
+                loss,mse_loss,cond_loss,anom_signal,anom_error = self.get_loss(batch, cond)
 
                 # Check if the accelerator has performed an optimization step
                 if self.accelerator.sync_gradients:
@@ -251,10 +253,14 @@ class UNetTrainer:
                     avg_loss = self.accelerator.gather_for_metrics(loss).mean()
                     avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
                     avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
+                    avg_anom_error = self.accelerator.gather_for_metrics(anom_error).mean()
+                    avg_anom_signal = self.accelerator.gather_for_metrics(anom_signal).mean()
 
                     log_dict = {"Training/Loss": avg_loss.detach().item(),
                                     "MSE LOSS": avg_mse_loss.detach().item(),
-                                    "COND LOSS": avg_cond_loss.detach().item()}
+                                    "COND LOSS": avg_cond_loss.detach().item()
+                                    "ANOM ERROR": avg_anom_error.detach().item(),
+                                    "ANOM SIGNAL": avg_anom_signal.detach().item()}
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch}, )
@@ -366,15 +372,15 @@ class UNetTrainer:
                 cond_loss = calc_mse_loss(pred_anomaly, clean_anomaly, self.train_set.lats)
 
                 # Diagnostics every 200 steps (main process only)
-                if self.global_step % 5 == 0 and self.accelerator.is_main_process:
-                    anom_signal = clean_anomaly.abs().mean().item()
-                    anom_error  = (pred_anomaly - clean_anomaly).abs().mean().item()
-                    print(
-                        f"[ANOM DIAG] step={self.global_step} "
-                        f"anomaly_signal={anom_signal:.6f}  "
-                        f"anomaly_error={anom_error:.6f}  "
-                        f"cond_loss={cond_loss.item():.6f}"
-                    )
+                #if self.global_step % 5 == 0 and self.accelerator.is_main_process:
+                anom_signal = clean_anomaly.abs().mean().item()
+                anom_error  = (pred_anomaly - clean_anomaly).abs().mean().item()
+                #    print(
+                #        f"[ANOM DIAG] step={self.global_step} "
+                #        f"anomaly_signal={anom_signal:.6f}  "
+                #        f"anomaly_error={anom_error:.6f}  "
+                #        f"cond_loss={cond_loss.item():.6f}"
+                #    )
             else:
                 cond_loss = torch.zeros(1, device=self.device)
 
@@ -388,7 +394,7 @@ class UNetTrainer:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss,mse_loss,cond_loss *self.cond_loss_scaling
+        return loss,mse_loss,cond_loss *self.cond_loss_scaling,anomaly_signal.item(), anomaly_error.item()
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
