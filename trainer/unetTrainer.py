@@ -117,7 +117,7 @@ class UNetTrainer:
         #   model output).  If the model is ignoring conditioning
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
-        self.cond_loss_scaling     = 0.0          # starts at zero
+        self.cond_loss_scaling     = 0.000          # starts at zero
         self.cond_warmup_steps     = getattr(self, "cond_warmup_steps",     2000)
         self.cond_max_scaling      = getattr(self, "cond_max_scaling",       3.0)
         self.cond_min_scaling      = getattr(self, "cond_min_scaling",       0.1)
@@ -421,6 +421,7 @@ class UNetTrainer:
             #  2. Subtract the 1850-1900 climatology to get the anomaly.
             #  3. Do the same for the clean target.
             #  4. Penalise the MSE between the two anomaly fields (lat-weighted).
+
             if self.cond_loss_scaling > 0:
                 # --- decode model output to x0 space ---
                 if isinstance(self.scheduler, ContinuousDDPM):
@@ -480,6 +481,8 @@ class UNetTrainer:
                 #    )
             else:
                 cond_loss = torch.zeros(1, device=self.device)
+                anom_error =  torch.zeros(1, device=self.device)
+                anom_signal =  torch.zeros(1, device=self.device)
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = mse_loss + cond_loss * self.cond_loss_scaling
