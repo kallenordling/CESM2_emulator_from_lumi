@@ -366,7 +366,7 @@ class UNetTrainer:
                 cond_loss = calc_mse_loss(pred_anomaly, clean_anomaly, self.train_set.lats)
 
                 # Diagnostics every 200 steps (main process only)
-                if self.global_step % 200 == 0 and self.accelerator.is_main_process:
+                if self.global_step % 5 == 0 and self.accelerator.is_main_process:
                     anom_signal = clean_anomaly.abs().mean().item()
                     anom_error  = (pred_anomaly - clean_anomaly).abs().mean().item()
                     print(
