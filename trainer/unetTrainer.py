@@ -139,7 +139,7 @@ class UNetTrainer:
             print("[TRAINER] No climatology found on dataset – anomaly loss will use batch mean as baseline.")
 
         self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr * self.accelerator.num_processes
+            self.model.parameters(), lr=self.lr
         )
 
         self.train_loader: ClimateDataLoader = dataloader(

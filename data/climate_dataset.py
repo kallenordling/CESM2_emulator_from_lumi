@@ -405,6 +405,13 @@ class ClimateDataset(Dataset):
         self.tensor_data: Optional[torch.Tensor] = None
         self.lats = None
         self.cond_file = cond_file
+
+        # Pre-industrial climatological baseline (1850–1900 mean) in normalised
+        # model space.  Shape: (1, n_vars, 1, H, W) — broadcast-ready.
+        # Populated on the first load_data() call; reused for all subsequent
+        # realizations so the baseline is always consistent across training.
+        self.climatology: Optional[torch.Tensor] = None
+
         # Load an example realization right off the bat
         self.load_data(self.realizations[0])
 
@@ -479,6 +486,21 @@ class ClimateDataset(Dataset):
                     var_names=self.vars,
                     pca_objects=self._pca_target,
                 )
+
+            # ── Climatological baseline (computed once, reused for all realizations)
+            # We only compute it on the first load_data() call (self.climatology is
+            # None) so every realization uses the same baseline.  If the dataset
+            # does not cover 1850-1900 a warning is printed and we fall back to
+            # None (the trainer will then use per-batch mean as before).
+            if self.climatology is None:
+                try:
+                    self.climatology = self.get_baseline_mean(
+                        baseline_start=1850, baseline_end=1900
+                    )
+                except RuntimeError as exc:
+                    print(f"[DATASET] Could not compute climatology: {exc}")
+                    print("[DATASET] Anomaly loss will fall back to per-batch mean.")
+                    self.climatology = None
 
         # ── Conditioning data (always loaded) ────────────────────────────────
         if getattr(self, "dataset_cond", None) is not None:
