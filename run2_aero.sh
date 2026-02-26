@@ -46,6 +46,7 @@ export MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen_${SLURM_JOB_ID}
 export HIP_CACHE_PATH=/tmp/hip_${SLURM_JOB_ID}
 # MIOPEN_FIND_ENFORCE=2: use cached kernels when present; don't crash on miss.
 export MIOPEN_FIND_ENFORCE=2
+export TORCHINDUCTOR_COMPILE_THREADS=1
 
 # Create cache dirs on every node's local /tmp before any GPU process starts.
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
