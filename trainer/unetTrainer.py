@@ -16,6 +16,7 @@ from ema_pytorch import EMA
 
 # from utils.viz_utils import create_gif
 from data.climate_dataset import ClimateDataset, ClimateDataLoader
+from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
 # from utils.gen_utils import generate_samples
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
@@ -90,22 +91,40 @@ class UNetTrainer:
 
     def __init__(
             self,
-            train_set: ClimateDataset,
+            train_set: "MultiExperimentDataLoader | ClimateDataset",
             model: UNetModel3D,
             scheduler: SchedulerMixin,
             accelerator: Accelerator,
             hyperparameters: DictConfig,
-            dataloader: Callable[[Any], DataLoader],
             optimizer: Callable[[Any], Optimizer],
+            dataloader: Callable[[Any], DataLoader] = None,  # unused in multi-experiment mode
     ) -> None:
         # Assign the hyperparameters to class attributes
         self.save_hyperparameters(hyperparameters)
 
-        # Assign more class attributes
         self.accelerator = accelerator
-        self.train_set, self.val_set = train_set, 0
+        self.val_set = 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
+
+        # ── Detect multi-experiment vs legacy single-experiment mode ──────────
+        # Multi-experiment: train_set is a MultiExperimentDataLoader, already
+        #   fully built in main_aero.py. The `dataloader` config arg is ignored.
+        # Legacy: train_set is a ClimateDataset, dataloader callable is used.
+        if isinstance(train_set, MultiExperimentDataLoader):
+            self.train_loader = train_set
+            self.train_set    = train_set.dataset          # MultiExperimentDataset
+            self._ref_ds      = train_set.dataset.datasets[0]  # first ClimateDataset for lats/climatology
+            self._multi       = True
+            print(
+                f"[TRAINER] Multi-experiment mode  "
+                f"scenarios={self.train_set.scenario_names}"
+            )
+        else:
+            # Legacy single-experiment path — build loader from config callable
+            self.train_set = train_set
+            self._ref_ds   = train_set
+            self._multi    = False
         # ── Adaptive conditioning loss scaling ───────────────────────────────
         # Phase 1 (warmup): scaling held at 0.0 for `cond_warmup_steps` so the
         #   model first learns a solid MSE baseline without interference.
@@ -145,9 +164,9 @@ class UNetTrainer:
         # broadcast over batch and time dimensions).
         # The dataset is expected to expose `climatology` as a pre-normalised
         # tensor; if it doesn't, we fall back to zeros (no anomaly shift).
-        if hasattr(train_set, "climatology") and train_set.climatology is not None:
-            clim = train_set.climatology.to(dtype=torch.float32)   # (C, H, W) or (1,C,1,H,W)
-            if clim.ndim == 3:                                      # (C, H, W) → (1,C,1,H,W)
+        if hasattr(self._ref_ds, "climatology") and self._ref_ds.climatology is not None:
+            clim = self._ref_ds.climatology.to(dtype=torch.float32)
+            if clim.ndim == 3:
                 clim = clim.unsqueeze(0).unsqueeze(2)
             self.climatology = clim.to(self.device)
             print(f"[TRAINER] Loaded climatology baseline, shape={self.climatology.shape}")
@@ -159,16 +178,17 @@ class UNetTrainer:
             self.model.parameters(), lr=self.lr
         )
 
-        self.train_loader: ClimateDataLoader = dataloader(
-            self.train_set,
-            self.accelerator,
-            self.batch_size,
-            stratified=True,
-            # shuffle=True,
-            # drop_last=True,              # avoid short last batch on any rank
-            # pin_memory=True,
-            # persistent_workers=True,num_workers=4
-        )
+        if self._multi:
+            # Loader already built in main_aero.py — nothing to do here
+            pass
+        else:
+            # Legacy single-experiment: build ClimateDataLoader from config callable
+            self.train_loader: ClimateDataLoader = dataloader(
+                self.train_set,
+                self.accelerator,
+                self.batch_size,
+                stratified=True,
+            )
         # self.val_loader: ClimateDataLoader = dataloader(
         #    self.val_set,
         #    self.accelerator,
@@ -213,8 +233,11 @@ class UNetTrainer:
         # run = self.accelerator.get_tracker("wandb").tracker
 
         hparam_dict = {
-            "Number Training Examples": len(self.train_set)
-                                        * len(self.train_set.realizations),
+            "Number Training Examples": (
+                sum(len(ds) * len(ds.realizations) for ds in self.train_set.datasets)
+                if self._multi
+                else len(self.train_set) * len(self.train_set.realizations)
+            ),
             "Number Epochs": self.max_epochs,
             "Batch Size per Device": self.batch_size,
             "Total Train Batch Size (w. distributed & accumulation)": self.total_batch_size,
@@ -234,13 +257,18 @@ class UNetTrainer:
     def train(self):
         epoch_anom_signals = []
         epoch_anom_errors = []
-        # Sanity check the validation loop and sampling before training
         for epoch in range(self.first_epoch, self.max_epochs):
-            # print(epoch)
-            for step, (batch, cond) in enumerate(self.train_loader.generate()):
-                # print(step)
-                # print(len(batch),batch[0].shape,batch[1].shape)
+            for step, batch_tuple in enumerate(self.train_loader.generate()):
                 self.model.train()
+
+                # Multi-experiment yields (batch, cond, scenario_ids)
+                # Legacy single-experiment yields (batch, cond)
+                if len(batch_tuple) == 3:
+                    batch, cond, scenario_ids = batch_tuple
+                else:
+                    batch, cond = batch_tuple
+                    scenario_ids = None
+
                 # Skip steps until we reach the resumed step
                 if (
                         self.load_path
@@ -248,52 +276,44 @@ class UNetTrainer:
                         and step < self.resume_step
                 ):
                     continue
-                # print("COND SHAPE in train",cond.shape)
-                loss,mse_loss,cond_loss,anom_signal,anom_error,sens = self.get_loss(batch, cond)
 
-                # Check if the accelerator has performed an optimization step
+                loss, mse_loss, cond_loss, anom_signal, anom_error, sens = self.get_loss(batch, cond)
+
                 if self.accelerator.sync_gradients:
-                    # Update counts
-                    # progress_bar.update(1)
                     self.global_step += 1
                     self.ema_model.update()
-
-                    # ── Adaptive conditioning loss scaling ────────────────────
-                    # Pass the raw (non-gathered) sensitivity so each rank
-                    # independently tracks its own EMA; the logged value below
-                    # is gathered for display only.
                     self._update_cond_scaling(sens.detach().item())
 
                     if self.accelerator.is_main_process:
-                        # Check to see if we need to sample from our model
-                        # if self.global_step % self.sample_every == 0:
-                        #    self.sample()
-
-                        # Check to see if we need to save our model
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
 
-                        # Metric calculation and logging
-                    avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-                    avg_mse_loss = self.accelerator.gather_for_metrics(mse_loss).mean()
-                    avg_cond_loss = self.accelerator.gather_for_metrics(cond_loss).mean()
-                    avg_anom_error = self.accelerator.gather_for_metrics(anom_error).mean()
+                    avg_loss        = self.accelerator.gather_for_metrics(loss).mean()
+                    avg_mse_loss    = self.accelerator.gather_for_metrics(mse_loss).mean()
+                    avg_cond_loss   = self.accelerator.gather_for_metrics(cond_loss).mean()
+                    avg_anom_error  = self.accelerator.gather_for_metrics(anom_error).mean()
                     avg_anom_signal = self.accelerator.gather_for_metrics(anom_signal).mean()
-                    avg_sens = self.accelerator.gather_for_metrics(sens).mean()
-                    log_dict = {"Training/Loss": avg_loss.detach().item(),
-                                    "MSE LOSS": avg_mse_loss.detach().item(),
-                                    "COND LOSS": avg_cond_loss.detach().item(),
-                                    "ANOM ERROR": avg_anom_error.detach().item(),
-                                    "ANOM SIGNAL": avg_anom_signal.detach().item(),
-                                    "SENS": avg_sens.detach().item(),
-                                    "ANOM SKILL": (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),  # ← add this
-                                    "COND SCALE": self.cond_loss_scaling}
+                    avg_sens        = self.accelerator.gather_for_metrics(sens).mean()
+
+                    log_dict = {
+                        "Training/Loss": avg_loss.detach().item(),
+                        "MSE LOSS":      avg_mse_loss.detach().item(),
+                        "COND LOSS":     avg_cond_loss.detach().item(),
+                        "ANOM ERROR":    avg_anom_error.detach().item(),
+                        "ANOM SIGNAL":   avg_anom_signal.detach().item(),
+                        "SENS":          avg_sens.detach().item(),
+                        "ANOM SKILL":    (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),
+                        "COND SCALE":    self.cond_loss_scaling,
+                    }
+
+                    # Per-scenario sample counts — useful for verifying mix is working
+                    if scenario_ids is not None and self.accelerator.is_main_process:
+                        for i, name in enumerate(self.train_set.scenario_names):
+                            log_dict[f"batch/{name}"] = (scenario_ids == i).sum().item()
+
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
-                    self.accelerator.print(log_dict, {"Epoch": epoch}, )
-                    # progress_bar.set_postfix(**log_dict)
-
-            # progress_bar.close()
+                    self.accelerator.print(log_dict, {"Epoch": epoch})
 
     def _update_cond_scaling(self, sensitivity_value: float) -> None:
         """Update cond_loss_scaling adaptively based on training progress.
@@ -409,7 +429,7 @@ class UNetTrainer:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
             # ── Primary denoising loss ────────────────────────────────────────
-            mse_loss = calc_mse_loss(model_output, target, self.train_set.lats)
+            mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
 
             # ── Anomaly-based conditioning loss ───────────────────────────────
             # Goal: the model's x0-prediction should reproduce the *forced*
@@ -496,9 +516,9 @@ class UNetTrainer:
                 mse_null_anomaly = calc_mse_loss(
                     torch.zeros_like(pred_anomaly),
                     clean_anomaly,
-                    self.train_set.lats,
+                    self._ref_ds.lats,
                 )
-                mse_correct_anomaly = calc_mse_loss(pred_anomaly, clean_anomaly, self.train_set.lats)
+                mse_correct_anomaly = calc_mse_loss(pred_anomaly, clean_anomaly, self._ref_ds.lats)
                 cond_loss = torch.relu(0.01 + mse_correct_anomaly - mse_null_anomaly)
 
                 # ── Anomaly diagnostics ───────────────────────────────────────────────

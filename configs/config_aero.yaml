@@ -1,4 +1,8 @@
 # Where to put checkpoints, logs, and a copy of this config
+defaults:
+  - _self_
+  - conf_data   # pulls in configs/conf_data.yaml, merges under `data:`
+
 output_dir: runs/test_run
 seed: 1337
 
@@ -10,42 +14,21 @@ accelerator:
     device_placement: True
     sync_batchnorm: True
 
-# Datasets
-#["r10i1181p1f1","r10i1231p1f1","r10i1251p1f1","r10i1281p1f1","r10i1301p1f1","r1i1001p1f1","r1i1231p1f1","r1i1251p1f1","r1i1281p1f1","r1i1301p1f1","r2i1021p1f1","r2i1231p1f1","r2i1251p1f1","r2i1281p1f1","r2i1301p1f1","r3i1041p1f1","r3i1231p1f1","r3i1251p1f1","r3i1281p1f1","r3i1301p1f1","r4i1061p1f1","r4i1231p1f1","r4i1251p1f1","r4i1281p1f1","r4i1301p1f1","r5i1081p1f1","r5i1231p1f1","r5i1251p1f1","r5i1281p1f1","r5i1301p1f1","r6i1101p1f1","r6i1231p1f1","r6i1251p1f1","r6i1281p1f1","r6i1301p1f1","r7i1121p1f1","r7i1231p1f1","r7i1251p1f1","r7i1281p1f1","r7i1301p1f1","r8i1141p1f1","r8i1231p1f1","r8i1251p1f1","r8i1281p1f1","r8i1301p1f1","r9i1161p1f1","r9i1231p1f1","r9i1251p1f1","r9i1281p1f1","r9i1301p1f1"]#
-data:
-  train:
-    seq_len: 1
-    _target_: data.climate_dataset.ClimateDataset
-    data_dir: /scratch/project_462001112/emulator_data/       # e.g. tas, pr
-    realizations: ['r10i1181p1f1','r10i1231p1f1','r10i1251p1f1','r10i1281p1f1','r10i1301p1f1','r1i1001p1f1','r1i1231p1f1',"r2i1021p1f1","r2i1231p1f1",'r1i1251p1f1']
-    cond_file: emissions_co2_so2_regridded.nc  # e.g. ghg, aerosol, sst, etc.
-    target_vars: ["TREFHT"]
-    cond_vars: ["CO2",'SUL']
-    n_components_target: 10
-    n_components_cond: [3, 5]
+# data: block is now fully defined in conf_data.yaml
 
-# Model (your diffusion / UNet wrapper that exposes loss_components or loss)
-
-  
 model:
     _target_: models.video_net.UNetModel3D
     in_channels: 1
     out_channels: 1
     cond_channels: 2
     cond_drop_prob: 0.1
-    dim_mults: [0.75, 2, 3,4, 8]
-#   time_dim: 264
+    dim_mults: [0.75, 2, 3, 4, 8]
     resnet_groups: 8
-#   dropout: 0.0
     attn_dim_head: 32
     attn_heads: 8
     init_kernel_size: 7
     model_dim: 64
-#    use_checkpoint: true
 
-
-# Optional noise scheduler for sampling (if your model uses one externally)
-# Remove this block if not needed by your code.
 scheduler:
     _target_: custom_diffusers.continuous_ddpm.ContinuousDDPM
     beta_schedule: linear
@@ -55,44 +38,22 @@ scheduler:
       - 4.5
       - 3.5
 
-
-# (Optional) Define optimizer here if you want to pass a prebuilt optimizer to the trainer.
-# If omitted, the trainer will build AdamW from its internal cfg.
-# optimizer:
-#   _target_: torch.optim:AdamW
-#   lr: 0.0002
-#   betas: [0.9, 0.999]
-#   weight_decay: 0.0001
-
-# Trainer block mirrors trainers/unet_trainer.TrainerConfig
 trainer:
   _target_: trainer.unetTrainer.UNetTrainer
-
 
   hyperparameters:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
-    batch_size: 9
+    batch_size: 8        # must match data.batch_size — 4 scenarios × 2
     save_dir: runs/
-    save_name: run_test_aero_condenc2.pt
-    load_path: 0 #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc2_89.pt #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc_658.pt # RESET - architecture changed, old checkpoints incompatible
-    lr: 0.00002 #0.0001
+    save_name: run_multi_experiment.pt
+    load_path: 0
+    lr: 0.00002
     sample_steps: 250
 
-  dataloader:
-    _target_: data.climate_dataset.ClimateDataLoader
-    _partial_: True
-    shuffle: True
-    num_workers: 0
-    pin_memory: false
-    drop_last: false
 
   optimizer:
     _target_: torch.optim.Adam
     _partial_: True
     betas: [0.9, 0.99]
-
-
-
-    #dynamo_backend: none
