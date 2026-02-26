@@ -4,7 +4,7 @@ seed: 1337
 
 # Path to the data config file (relative to configs/ directory)
 # Switch to conf_data_val.yaml for validation runs
-data_config: conf_data.yaml
+data_config: config_data.yaml
 
 # Accelerate initialization kwargs
 accelerator:
