@@ -440,13 +440,21 @@ def build_multi_experiment_loader(
             cond_vars=["CO2", "SUL"],
         )
     """
+    # Strip DataLoader-only kwargs so they don't leak into ClimateDataset.__init__().
+    _DATALOADER_KEYS = {"num_workers", "pin_memory", "persistent_workers",
+                        "prefetch_factor", "drop_last", "timeout"}
+    # Note: shared_dataset_kwargs is a plain dict (unpacked from **kwargs) so
+    # mutating it here is safe and does not affect the caller.
+    for k in _DATALOADER_KEYS:
+        shared_dataset_kwargs.pop(k, None)
+
     datasets: list[ClimateDataset] = []
     scenario_names: list[str] = []
 
     for cfg in experiment_configs:
         cfg = dict(cfg)  # shallow copy so we don't mutate caller's dict
         name = cfg.pop("scenario_name", None)
-        # Merge shared kwargs (cfg takes priority)
+        # Merge shared kwargs (cfg takes priority); DataLoader keys already stripped
         merged = {**shared_dataset_kwargs, **cfg}
         datasets.append(ClimateDataset(**merged))
         scenario_names.append(name or f"exp_{len(datasets) - 1}")
