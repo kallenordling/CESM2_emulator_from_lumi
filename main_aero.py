@@ -54,7 +54,6 @@ def main(cfg: DictConfig) -> None:
         cond_vars=OmegaConf.to_container(data_cfg.cond_vars, resolve=True),
         n_components_target=data_cfg.get("n_components_target", None),
         n_components_cond=data_cfg.get("n_components_cond", None),
-        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
     )
