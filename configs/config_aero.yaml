@@ -43,7 +43,7 @@ trainer:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
-    batch_size: 32       # must match batch_size in conf_data.yaml
+    batch_size: 16       # must match batch_size in conf_data.yaml
     save_dir: runs/
     save_name: run_multi_experiment.pt
     load_path: 0
