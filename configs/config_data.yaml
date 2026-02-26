@@ -27,6 +27,7 @@ steps_per_realization: null  # use all available windows per realization
 experiment_configs:
 
   - scenario_name: hist
+    time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/hist
     cond_file: /scratch/project_462001112/emulator_data/emissions_hist.nc
     realizations:
@@ -53,6 +54,7 @@ experiment_configs:
       - LE2-1231.001
 
   - scenario_name: ssp370
+    time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/ssp370
     cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370.nc
     realizations:
@@ -79,6 +81,7 @@ experiment_configs:
       - LE2-1231.001
 
   - scenario_name: aaer
+    time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/AAER
     cond_file: /scratch/project_462001112/emulator_data/emissions_aero_only.nc
     realizations:
@@ -94,6 +97,7 @@ experiment_configs:
       - "010"
 
   - scenario_name: ghg
+    time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/GHG
     cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only.nc
     realizations:
