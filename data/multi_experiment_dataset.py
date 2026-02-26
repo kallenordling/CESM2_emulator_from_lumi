@@ -443,21 +443,63 @@ def build_multi_experiment_loader(
     # Strip DataLoader-only kwargs so they don't leak into ClimateDataset.__init__().
     _DATALOADER_KEYS = {"num_workers", "pin_memory", "persistent_workers",
                         "prefetch_factor", "drop_last", "timeout"}
-    # Note: shared_dataset_kwargs is a plain dict (unpacked from **kwargs) so
-    # mutating it here is safe and does not affect the caller.
     for k in _DATALOADER_KEYS:
         shared_dataset_kwargs.pop(k, None)
 
-    datasets: list[ClimateDataset] = []
-    scenario_names: list[str] = []
+    # Two-pass construction so that SSP370 (2015-2100) can inherit the
+    # historical 1850-1900 climatology baseline for anomaly computation.
+    #
+    # Pass 1: build all datasets except those that borrow a climatology.
+    # Pass 2: wire the historical climatology into SSP370 via
+    #         external_climatology, then build those datasets.
+    #
+    # A scenario "borrows" the hist climatology when:
+    #   - its name contains "ssp" (case-insensitive), AND
+    #   - it does not set external_climatology itself in its config.
+    SSP_BORROWERS = {"ssp370", "ssp245", "ssp585", "ssp126"}
 
+    raw_configs: list[tuple[str, dict]] = []
     for cfg in experiment_configs:
-        cfg = dict(cfg)  # shallow copy so we don't mutate caller's dict
-        name = cfg.pop("scenario_name", None)
-        # Merge shared kwargs (cfg takes priority); DataLoader keys already stripped
+        cfg = dict(cfg)
+        name = cfg.pop("scenario_name", None) or f"exp_{len(raw_configs)}"
+        raw_configs.append((name, cfg))
+
+    # Pass 1: build non-SSP datasets first to get the hist climatology
+    datasets: list[ClimateDataset] = [None] * len(raw_configs)
+    scenario_names: list[str]      = [None] * len(raw_configs)
+    hist_climatology = None
+
+    for i, (name, cfg) in enumerate(raw_configs):
+        is_ssp = any(s in name.lower() for s in SSP_BORROWERS)
+        has_own_clim = "external_climatology" in cfg
+        if is_ssp and not has_own_clim:
+            continue  # defer to pass 2
         merged = {**shared_dataset_kwargs, **cfg}
-        datasets.append(ClimateDataset(**merged))
-        scenario_names.append(name or f"exp_{len(datasets) - 1}")
+        ds = ClimateDataset(**merged)
+        datasets[i] = ds
+        scenario_names[i] = name
+        # Capture historical climatology (first dataset whose name has "hist")
+        if hist_climatology is None and "hist" in name.lower():
+            hist_climatology = ds.climatology
+            if hist_climatology is not None:
+                print(f"[BUILD] Historical climatology captured from '{name}' "
+                      f"shape={tuple(hist_climatology.shape)}")
+            else:
+                print(f"[BUILD] WARNING: '{name}' has no climatology — "
+                      f"SSP scenarios will fall back to per-batch mean.")
+
+    # Pass 2: build SSP datasets, injecting the hist climatology
+    for i, (name, cfg) in enumerate(raw_configs):
+        if datasets[i] is not None:
+            continue  # already built in pass 1
+        merged = {**shared_dataset_kwargs, **cfg}
+        if hist_climatology is not None:
+            merged["external_climatology"] = hist_climatology
+            print(f"[BUILD] Scenario '{name}': injecting historical climatology "
+                  f"as external_climatology.")
+        ds = ClimateDataset(**merged)
+        datasets[i] = ds
+        scenario_names[i] = name
 
     multi_ds = MultiExperimentDataset(datasets, scenario_names=scenario_names)
     return MultiExperimentDataLoader(
