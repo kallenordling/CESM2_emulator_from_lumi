@@ -379,6 +379,12 @@ class ClimateDataset(Dataset):
         # ── Name of the time dimension in the NetCDF files ───────────────────
         # "year" for older CESM2-LE files, "time" for AAER/GHG/ssp files
         time_dim: str = "year",
+        # ── Pre-computed baseline for experiments without historical coverage ──
+        # Pass the .climatology tensor from a historical ClimateDataset here
+        # so that SSP370 (2015-2100) uses the same 1850-1900 baseline as hist.
+        # Shape must be (1, n_vars, 1, H, W).  If None, baseline is computed
+        # from the loaded data (requires data to cover 1850-1900).
+        external_climatology: Optional[torch.Tensor] = None,
     ):
         self.seq_len = seq_len
         self.realizations = realizations
@@ -414,7 +420,9 @@ class ClimateDataset(Dataset):
         # model space.  Shape: (1, n_vars, 1, H, W) — broadcast-ready.
         # Populated on the first load_data() call; reused for all subsequent
         # realizations so the baseline is always consistent across training.
-        self.climatology: Optional[torch.Tensor] = None
+        # For experiments that don't cover 1850-1900 (e.g. SSP370), pass a
+        # pre-computed baseline tensor via external_climatology instead.
+        self.climatology: Optional[torch.Tensor] = external_climatology
 
         # Load an example realization right off the bat
         #print(self.realizations[0])
@@ -506,6 +514,12 @@ class ClimateDataset(Dataset):
                     print(f"[DATASET] Could not compute climatology: {exc}")
                     print("[DATASET] Anomaly loss will fall back to per-batch mean.")
                     self.climatology = None
+            else:
+                print(
+                    f"[DATASET] Using pre-supplied climatology  "
+                    f"shape={tuple(self.climatology.shape)}  "
+                    f"mean={self.climatology.mean().item():.4f}"
+                )
 
         # ── Conditioning data (always loaded) ────────────────────────────────
         if getattr(self, "dataset_cond", None) is not None:
