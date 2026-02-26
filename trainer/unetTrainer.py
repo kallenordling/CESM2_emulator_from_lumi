@@ -118,10 +118,10 @@ class UNetTrainer:
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
         self.cond_loss_scaling     = 0.000          # starts at zero
-        self.cond_warmup_steps     = getattr(self, "cond_warmup_steps",     100)
+        self.cond_warmup_steps     = getattr(self, "cond_warmup_steps",     50)
         self.cond_max_scaling      = getattr(self, "cond_max_scaling",       3.0)
         self.cond_min_scaling      = getattr(self, "cond_min_scaling",       0.1)
-        self.cond_adapt_every      = getattr(self, "cond_adapt_every",       20)
+        self.cond_adapt_every      = getattr(self, "cond_adapt_every",       10)
         self.cond_target_sensitivity = getattr(self, "cond_target_sensitivity", 0.01)
         self._cond_sensitivity_ema = None   # lazily initialised on first update
         self.scheduler.set_timesteps(self.sample_steps)
