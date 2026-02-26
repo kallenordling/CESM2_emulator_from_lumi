@@ -263,7 +263,7 @@ class UNetTrainer:
         import os
         if os.environ.get("TORCH_COMPILE", "1") != "0":
             try:
-                self.model = torch.compile(self.model, mode="reduce-overhead")
+                self.model = torch.compile(self.model, mode="default")
                 print("[TRAINER] torch.compile enabled (mode=reduce-overhead)")
             except Exception as e:
                 print(f"[TRAINER] torch.compile skipped: {e}")
