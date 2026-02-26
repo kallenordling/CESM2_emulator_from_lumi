@@ -1,7 +1,7 @@
 # Where to put checkpoints, logs, and a copy of this config
 defaults:
   - _self_
-  - conf_data   # pulls in configs/conf_data.yaml, merges under `data:`
+  - config_data   # pulls in configs/conf_data.yaml, merges under `data:`
 
 output_dir: runs/test_run
 seed: 1337
