@@ -371,13 +371,13 @@ class UNetTrainer:
                 self.cond_loss_scaling * 0.98,
             )
 
-        if self.accelerator.is_main_process:
-            print(
-                f"[COND SCALE] step={step}  "
-                f"sensitivity_ema={self._cond_sensitivity_ema:.6f}  "
-                f"target={self.cond_target_sensitivity:.6f}  "
-                f"cond_loss_scaling={self.cond_loss_scaling:.4f}"
-            )
+        #if self.accelerator.is_main_process:
+        #    print(
+        #        f"[COND SCALE] step={step}  "
+        #        f"sensitivity_ema={self._cond_sensitivity_ema:.6f}  "
+        #        f"target={self.cond_target_sensitivity:.6f}  "
+        #        f"cond_loss_scaling={self.cond_loss_scaling:.4f}"
+        #    )
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
 

@@ -417,7 +417,7 @@ class ClimateDataset(Dataset):
         self.climatology: Optional[torch.Tensor] = None
 
         # Load an example realization right off the bat
-        print(self.realizations[0])
+        #print(self.realizations[0])
         self.load_data(self.realizations[0])
 
     @staticmethod
@@ -523,7 +523,7 @@ class ClimateDataset(Dataset):
         raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: 50})
         raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
         # Materialise into a float32 tensor and immediately close the dataset
-        print(raw_cond)
+        #print(raw_cond)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
         # Keep a lightweight (no-data) reference for coordinate lookups
         self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars]#.sel({self.time_dim: selected_years})

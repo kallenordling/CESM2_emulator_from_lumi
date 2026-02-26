@@ -151,13 +151,13 @@ class MultiExperimentDataset(Dataset):
         )
         self._index = _ExperimentIndex(datasets)
 
-        print(
-            f"[MULTI] Initialised with {len(datasets)} experiments: "
-            + ", ".join(
-                f"{name}({len(ds)} windows)"
-                for name, ds in zip(self.scenario_names, datasets)
-            )
-        )
+        #print(
+        #    f"[MULTI] Initialised with {len(datasets)} experiments: "
+        #    + ", ".join(
+        #        f"{name}({len(ds)} windows)"
+        #        for name, ds in zip(self.scenario_names, datasets)
+        #    )
+        #)
 
     # ------------------------------------------------------------------
     # Dataset protocol
@@ -180,11 +180,11 @@ class MultiExperimentDataset(Dataset):
         """Load a new realization for experiment ``exp_idx`` and rebuild index."""
         self.datasets[exp_idx].load_data(realization)
         self._index._rebuild()
-        print(
-            f"[MULTI] Loaded realization '{realization}' for "
-            f"experiment '{self.scenario_names[exp_idx]}'  "
-            f"total_windows={len(self._index)}"
-        )
+        #print(
+        #    f"[MULTI] Loaded realization '{realization}' for "
+        #    f"experiment '{self.scenario_names[exp_idx]}'  "
+        #    f"total_windows={len(self._index)}"
+        #)
 
     def estimate_num_batches(self, batch_size: int) -> int:
         """Rough estimate across all experiments and realizations."""
@@ -275,13 +275,13 @@ class MultiExperimentDataLoader:
         self.batch_size = batch_size
         self.per_exp = batch_size // self.n_exp if mix_scenarios else batch_size
 
-        print(
-            f"[MULTI] DataLoader ready  "
-            f"batch_size={batch_size}  "
-            f"mix_scenarios={mix_scenarios}  "
-            f"per_exp={self.per_exp}  "
-            f"n_exp={self.n_exp}"
-        )
+        #print(
+        #    f"[MULTI] DataLoader ready  "
+        #    f"batch_size={batch_size}  "
+        #    f"mix_scenarios={mix_scenarios}  "
+        #    f"per_exp={self.per_exp}  "
+        #    f"n_exp={self.n_exp}"
+        #)
 
     # ------------------------------------------------------------------
 
