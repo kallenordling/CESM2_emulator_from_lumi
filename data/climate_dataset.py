@@ -417,6 +417,7 @@ class ClimateDataset(Dataset):
         self.climatology: Optional[torch.Tensor] = None
 
         # Load an example realization right off the bat
+        print(self.realizations[0])
         self.load_data(self.realizations[0])
 
     @staticmethod
