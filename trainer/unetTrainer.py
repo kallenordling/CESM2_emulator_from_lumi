@@ -163,6 +163,7 @@ class UNetTrainer:
             self.train_set,
             self.accelerator,
             self.batch_size,
+            stratified=True,
             # shuffle=True,
             # drop_last=True,              # avoid short last batch on any rank
             # pin_memory=True,
@@ -285,6 +286,7 @@ class UNetTrainer:
                                     "ANOM ERROR": avg_anom_error.detach().item(),
                                     "ANOM SIGNAL": avg_anom_signal.detach().item(),
                                     "SENS": avg_sens.detach().item(),
+                                    "ANOM SKILL": (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),  # ← add this
                                     "COND SCALE": self.cond_loss_scaling}
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
