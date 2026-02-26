@@ -47,7 +47,7 @@ import torch
 from torch.utils.data import Dataset
 from accelerate import Accelerator
 
-from climate_dataset import ClimateDataset
+from data.climate_dataset import ClimateDataset
 
 
 # ---------------------------------------------------------------------------
