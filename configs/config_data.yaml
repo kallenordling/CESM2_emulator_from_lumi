@@ -28,7 +28,7 @@ experiment_configs:
 
   - scenario_name: hist
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/hist
-    cond_file: /scratch/project_462001112/emulator_data/emissions_hist.nc  # TODO: confirm filename
+    cond_file: /scratch/project_462001112/emulator_data/emissions_hist.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -54,7 +54,7 @@ experiment_configs:
 
   - scenario_name: ssp370
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/ssp370
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370.nc  # TODO: confirm filename
+    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -95,7 +95,7 @@ experiment_configs:
 
   - scenario_name: ghg
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/GHG
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only.nc  # TODO: confirm filename
+    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only.nc
     realizations:
       - "001"
       - "002"
