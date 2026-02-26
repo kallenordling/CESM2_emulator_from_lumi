@@ -125,7 +125,7 @@ def scale_cumulative_linear(da: xr.DataArray):
     Preserves temporal signal perfectly; every grid cell gets the same
     value per year (the global mean emission level for that year).
     Best for well-mixed gases like CO2."""
-    spatial_dims = [d for d in da.dims if d != "year"]
+    spatial_dims = [d for d in da.dims if d not in ("year", "time")]
     ts = da.mean(dim=spatial_dims)  # [year]
     lo = float(ts.min(skipna=True))
     hi = float(ts.max(skipna=True))
@@ -376,11 +376,15 @@ class ClimateDataset(Dataset):
         n_components_cond:   Optional[Union[int, list[int]]] = None,
         # ── Set True to skip loading target climate files (diagnostics only) ─
         cond_only: bool = False,
+        # ── Name of the time dimension in the NetCDF files ───────────────────
+        # "year" for older CESM2-LE files, "time" for AAER/GHG/ssp files
+        time_dim: str = "year",
     ):
         self.seq_len = seq_len
         self.realizations = realizations
         self.data_dir = data_dir
         self.cond_only = cond_only
+        self.time_dim = time_dim
 
         # Necessary to convert vars into a Python list
         self.vars = OmegaConf.to_object(target_vars) if not isinstance(target_vars, list) else target_vars
@@ -470,11 +474,11 @@ class ClimateDataset(Dataset):
             realization_dir = os.path.join(self.data_dir, realization, "*.nc")
             # Open lazily; only materialise when we call convert_xarray_to_tensor
             dataset = xr.open_mfdataset(
-                realization_dir, combine="by_coords", chunks={"year": 50}
-            ).sortby("year")
+                realization_dir, combine="by_coords", chunks={self.time_dim: 50}
+            ).sortby(self.time_dim)
             self.lats = dataset.lat
             dataset = dataset[self.vars]
-            self.xr_data = dataset.map(preprocess).map(normalize).sel(year=selected_years)
+            self.xr_data = dataset.map(preprocess).map(normalize).sel({self.time_dim: selected_years})
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
@@ -509,14 +513,18 @@ class ClimateDataset(Dataset):
             del self.tensor_data_cond
         self.tensor_data_cond = None
 
-        cond_file = os.path.join(self.data_dir, self.cond_file)
+        cond_file = (
+            self.cond_file
+            if os.path.isabs(self.cond_file)
+            else os.path.join(self.data_dir, self.cond_file)
+        )
         # Open conditioning file lazily too
-        raw_cond = xr.open_dataset(cond_file, chunks={"year": 50})
-        raw_cond = raw_cond[self.cond_vars].map(normalize).sel(year=selected_years)
+        raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: 50})
+        raw_cond = raw_cond[self.cond_vars].map(normalize).sel({self.time_dim: selected_years})
         # Materialise into a float32 tensor and immediately close the dataset
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
         # Keep a lightweight (no-data) reference for coordinate lookups
-        self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars].sel(year=selected_years)
+        self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars].sel({self.time_dim: selected_years})
         raw_cond.close()
         del raw_cond
 
@@ -543,7 +551,7 @@ class ClimateDataset(Dataset):
         fall back to the raw-normalised xarray values — the two are identical
         in that case, so the plots are always consistent with model input.
         """
-        all_years = self.dataset_cond.year.values
+        all_years = self.dataset_cond[self.time_dim].values
         candidate_years = [all_years[0], 2015, 2050, all_years[-1]]
         years_to_show   = [y for y in candidate_years if y in all_years]
         year_indices    = [int(np.where(all_years == y)[0][0]) for y in years_to_show]
@@ -718,17 +726,18 @@ class ClimateDataset(Dataset):
         """Generate a tensor of data from an xarray dataset"""
         #print(ds)
         # Stacks the data variables ('pr', 'tas', ...) into a single dimension
+        time_dim = getattr(self, "time_dim", "year")
         stacked_ds = ds.to_stacked_array(
-            new_dim="var", sample_dims=["year", "lon", "lat"]
-        ).transpose("var", "year", "lat", "lon")
+            new_dim="var", sample_dims=[time_dim, "lon", "lat"]
+        ).transpose("var", time_dim, "lat", "lon")
         #print(stacked_ds.to_numpy())
         # Convert the numpy array to a torch tensor
         tensor_data = torch.tensor(stacked_ds.to_numpy(), dtype=torch.float32)
 
         return tensor_data
     def get_cond_from_coords(self, coord_dict):
-        years = coord_dict["year"]
-        ds = self.dataset_cond.sel(year=years)
+        years = coord_dict[self.time_dim]
+        ds = self.dataset_cond.sel({self.time_dim: years})
         tensor = self.convert_xarray_to_tensor(ds)
         # Apply the already-fitted conditioning PCA if available
         if self._pca_cond is not None:
@@ -794,7 +803,7 @@ class ClimateDataset(Dataset):
                 "Call load_data() first and make sure cond_only=False."
             )
 
-        all_years = self.xr_data.year.values.astype(int)
+        all_years = self.xr_data[self.time_dim].values.astype(int)
         mask = (all_years >= baseline_start) & (all_years <= baseline_end)
 
         if not mask.any():
@@ -853,8 +862,8 @@ class ClimateDataset(Dataset):
 
     def __len__(self):
         if self.cond_only:
-            return len(self.dataset_cond.year) - self.seq_len + 1
-        return len(self.xr_data.year) - self.seq_len + 1
+            return len(self.dataset_cond[self.time_dim]) - self.seq_len + 1
+        return len(self.xr_data[self.time_dim]) - self.seq_len + 1
 
     def __getitem__(self, idx: int):
         """Defines how to get a specific index from the dataset"""
@@ -866,36 +875,207 @@ class ClimateDataset(Dataset):
         return self.tensor_data[:, idx : idx + self.seq_len], self.tensor_data_cond[:, idx : idx + self.seq_len]
 
 
+class StratifiedPeriodSampler:
+    """Batch sampler that guarantees every batch contains samples from all
+    three climate periods: historical, present-day, and future.
+
+    This forces the model to see large emission contrasts within every
+    batch, providing a strong contrastive gradient signal for the
+    conditioning encoder — even when training on a single scenario (e.g.
+    SSP370) where the overall CO2 trend is monotonic.
+
+    Period boundaries (default):
+        historical  : year <  1950   (low CO2, near-zero anomaly)
+        present     : 1950 ≤ year < 2020   (moderate CO2)
+        future      : year ≥ 2020   (high CO2, large anomaly)
+
+    Args:
+        dataset:            A loaded ClimateDataset instance.
+        batch_size:         Must be divisible by 3 (one third per period).
+                            If not, it is rounded down to the nearest
+                            multiple of 3 with a warning.
+        period_boundaries:  Tuple (y1, y2) splitting the timeline into
+                            historical / present / future.
+        shuffle:            Whether to shuffle within each period every
+                            epoch (default True).
+    """
+
+    def __init__(
+        self,
+        dataset: "ClimateDataset",
+        batch_size: int,
+        period_boundaries: tuple[int, int] = (1950, 2020),
+        shuffle: bool = True,
+    ):
+        self.dataset = dataset
+        self.shuffle = shuffle
+
+        # Ensure batch_size is divisible by 3
+        if batch_size % 3 != 0:
+            batch_size = (batch_size // 3) * 3
+            print(
+                f"[STRATIFIED] batch_size rounded down to {batch_size} "
+                f"(must be divisible by 3)"
+            )
+        self.batch_size = batch_size
+        self.per_period = batch_size // 3
+
+        self.y1, self.y2 = period_boundaries
+        # Index arrays are built lazily when the dataset loads a realization
+        self._hist_idx: Optional[np.ndarray] = None
+        self._pres_idx: Optional[np.ndarray] = None
+        self._fut_idx:  Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------
+    def _build_indices(self):
+        """Rebuild period index arrays from the currently loaded dataset.
+
+        Called automatically by generate() after each load_data() call.
+        Uses self.dataset.xr_data.year to assign each window index to a
+        period based on the *first* year of that window.
+        """
+        years = self.dataset.xr_data.year.values.astype(int)
+        n_windows = len(self.dataset)   # = len(years) - seq_len + 1
+
+        # Year of the first time-step in each window
+        window_years = years[:n_windows]
+
+        self._hist_idx = np.where(window_years <  self.y1)[0]
+        self._pres_idx = np.where((window_years >= self.y1) & (window_years < self.y2))[0]
+        self._fut_idx  = np.where(window_years >= self.y2)[0]
+
+        counts = (len(self._hist_idx), len(self._pres_idx), len(self._fut_idx))
+        print(
+            f"[STRATIFIED] historical={counts[0]}  "
+            f"present={counts[1]}  future={counts[2]}  "
+            f"per_period={self.per_period}  batch_size={self.batch_size}"
+        )
+
+        if any(c == 0 for c in counts):
+            missing = ["historical", "present", "future"][
+                [len(self._hist_idx), len(self._pres_idx), len(self._fut_idx)].index(0)
+            ]
+            print(
+                f"[STRATIFIED] WARNING: no samples in '{missing}' period — "
+                f"falling back to uniform random sampling for this realization."
+            )
+            self._hist_idx = self._pres_idx = self._fut_idx = None
+
+    # ------------------------------------------------------------------
+    def _iter_batches(self) -> list[list[int]]:
+        """Return a list of stratified batch index lists for one epoch."""
+        if self._hist_idx is None:
+            # Fallback: plain random batches
+            n = len(self.dataset)
+            idx = np.random.permutation(n) if self.shuffle else np.arange(n)
+            return [
+                idx[i : i + self.batch_size].tolist()
+                for i in range(0, n - self.batch_size + 1, self.batch_size)
+            ]
+
+        def _sample_period(arr: np.ndarray, n: int) -> np.ndarray:
+            """Draw n indices from arr, tiling if arr is smaller than n."""
+            if self.shuffle:
+                arr = np.random.permutation(arr)
+            if len(arr) < n:
+                arr = np.tile(arr, (n // len(arr) + 1))
+            return arr[:n]
+
+        n_batches = min(
+            len(self._hist_idx), len(self._pres_idx), len(self._fut_idx)
+        ) // self.per_period
+
+        h = _sample_period(self._hist_idx, n_batches * self.per_period)
+        p = _sample_period(self._pres_idx, n_batches * self.per_period)
+        f = _sample_period(self._fut_idx,  n_batches * self.per_period)
+
+        batches = []
+        for i in range(n_batches):
+            s, e = i * self.per_period, (i + 1) * self.per_period
+            batch = np.concatenate([h[s:e], p[s:e], f[s:e]])
+            if self.shuffle:
+                np.random.shuffle(batch)
+            batches.append(batch.tolist())
+        return batches
+
+
 class ClimateDataLoader:
+    """DataLoader wrapper that iterates over all realizations.
+
+    Args:
+        dataset:            ClimateDataset instance.
+        accelerator:        HuggingFace Accelerator.
+        batch_size:         Samples per batch.
+        stratified:         If True, use StratifiedPeriodSampler so every
+                            batch contains historical / present / future
+                            samples.  Recommended when training on a single
+                            emission scenario.  Default: False.
+        period_boundaries:  Passed to StratifiedPeriodSampler when
+                            stratified=True.  Default: (1950, 2020).
+        **dataloader_kwargs: Forwarded to torch.utils.data.DataLoader.
+    """
+
     def __init__(
         self,
         dataset: ClimateDataset,
         accelerator: Accelerator,
         batch_size: int,
+        stratified: bool = False,
+        period_boundaries: tuple[int, int] = (1950, 2020),
         **dataloader_kwargs: dict[str, Any],
     ):
         self.dataset = dataset
         self.accelerator = accelerator
         self.batch_size = batch_size
+        self.stratified = stratified
         self.dataloader_kwargs = dataloader_kwargs
+
+        self.sampler = (
+            StratifiedPeriodSampler(
+                dataset,
+                batch_size=batch_size,
+                period_boundaries=period_boundaries,
+            )
+            if stratified
+            else None
+        )
+
+        if stratified:
+            print(
+                f"[DATALOADER] Stratified period sampling enabled  "
+                f"boundaries={period_boundaries}  batch_size={batch_size}"
+            )
 
     def __len__(self):
         return self.dataset.estimate_num_batches(self.batch_size)
 
     def generate(self) -> torch.Tensor:
-        # Iterate through each realization in our dataset
+        """Iterate over all realizations, yielding stratified batches."""
         random.shuffle(self.dataset.realizations)
 
         for realization in self.dataset.realizations:
-            # Load a realization of data into memory
+            # Load this realization into memory
             self.dataset.load_data(realization)
 
-            # Wrap a dataloader around it and generate the data
-            dl = self.accelerator.prepare(
-                DataLoader(
-                    self.dataset, batch_size=self.batch_size, **self.dataloader_kwargs
-                )
-            )
+            if self.stratified and self.sampler is not None:
+                # Rebuild period index arrays for the newly loaded realization
+                self.sampler._build_indices()
+                batches = self.sampler._iter_batches()
 
-            for sample in dl:
-                yield sample
+                for batch_indices in batches:
+                    # Manually collate the indexed samples and move to device
+                    samples = [self.dataset[i] for i in batch_indices]
+                    batch_data = torch.stack([s[0] for s in samples]).to(self.accelerator.device)
+                    batch_cond = torch.stack([s[1] for s in samples]).to(self.accelerator.device)
+                    yield batch_data, batch_cond
+            else:
+                # Original behaviour: plain DataLoader
+                dl = self.accelerator.prepare(
+                    DataLoader(
+                        self.dataset,
+                        batch_size=self.batch_size,
+                        **self.dataloader_kwargs,
+                    )
+                )
+                for sample in dl:
+                    yield sample
