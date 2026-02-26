@@ -1,20 +1,18 @@
 # Where to put checkpoints, logs, and a copy of this config
-defaults:
-  - _self_
-  - config_data   # pulls in configs/conf_data.yaml, merges under `data:`
-
 output_dir: runs/test_run
 seed: 1337
 
-# Accelerate initialization kwargs (see HuggingFace Accelerate)
+# Path to the data config file (relative to configs/ directory)
+# Switch to conf_data_val.yaml for validation runs
+data_config: conf_data.yaml
+
+# Accelerate initialization kwargs
 accelerator:
     mixed_precision: bf16
     split_batches: False
     gradient_accumulation_steps: 9
     device_placement: True
     sync_batchnorm: True
-
-# data: block is now fully defined in conf_data.yaml
 
 model:
     _target_: models.video_net.UNetModel3D
@@ -45,13 +43,12 @@ trainer:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
-    batch_size: 8        # must match data.batch_size — 4 scenarios × 2
+    batch_size: 8        # must match batch_size in conf_data.yaml
     save_dir: runs/
     save_name: run_multi_experiment.pt
     load_path: 0
     lr: 0.00002
     sample_steps: 250
-
 
   optimizer:
     _target_: torch.optim.Adam
