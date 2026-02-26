@@ -728,7 +728,7 @@ class ClimateDataset(Dataset):
         """Generate a tensor of data from an xarray dataset"""
         #print(ds)
         # Stacks the data variables ('pr', 'tas', ...) into a single dimension
-        time_dim = getattr(self, "time_dim", "year")
+        time_dim = getattr(self, "time_dim", "time")
         stacked_ds = ds.to_stacked_array(
             new_dim="var", sample_dims=[time_dim, "lon", "lat"]
         ).transpose("var", time_dim, "lat", "lon")
