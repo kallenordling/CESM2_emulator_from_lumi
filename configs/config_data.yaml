@@ -29,7 +29,7 @@ experiment_configs:
   - scenario_name: hist
     time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/hist
-    cond_file: /scratch/project_462001112/emulator_data/emissions_hist.nc
+    cond_file: /scratch/project_462001112/emulator_data/emissions_hist_timefixed.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -56,7 +56,7 @@ experiment_configs:
   - scenario_name: ssp370
     time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/ssp370
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370.nc
+    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370_timefixed.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -83,7 +83,7 @@ experiment_configs:
   - scenario_name: aaer
     time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/AAER
-    cond_file: /scratch/project_462001112/emulator_data/emissions_aero_only.nc
+    cond_file: /scratch/project_462001112/emulator_data/emissions_aero_only_timefixed.nc
     realizations:
       - "001"
       - "002"
@@ -99,7 +99,7 @@ experiment_configs:
   - scenario_name: ghg
     time_dim: time
     data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/GHG
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only.nc
+    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only_timefixed.nc
     realizations:
       - "001"
       - "002"
