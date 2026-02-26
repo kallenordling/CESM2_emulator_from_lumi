@@ -19,7 +19,7 @@ n_components_target: null
 n_components_cond: null
 
 # ── Loader settings ──────────────────────────────────────────
-batch_size: 32          # 4 scenarios × 2 windows — increase to 16 if VRAM allows
+batch_size: 16          # 4 scenarios × 2 windows — increase to 16 if VRAM allows
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
 steps_per_realization: null  # use all available windows per realization
 
