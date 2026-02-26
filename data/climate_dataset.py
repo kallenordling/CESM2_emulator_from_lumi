@@ -1054,13 +1054,10 @@ class ClimateDataLoader:
                 batches = self.sampler._iter_batches()
 
                 for batch_indices in batches:
-                    # Manually collate the indexed samples
+                    # Manually collate the indexed samples and move to device
                     samples = [self.dataset[i] for i in batch_indices]
-                    batch_data = torch.stack([s[0] for s in samples])
-                    batch_cond = torch.stack([s[1] for s in samples])
-                    batch_data, batch_cond = self.accelerator.prepare(
-                        batch_data, batch_cond
-                    )
+                    batch_data = torch.stack([s[0] for s in samples]).to(self.accelerator.device)
+                    batch_cond = torch.stack([s[1] for s in samples]).to(self.accelerator.device)
                     yield batch_data, batch_cond
             else:
                 # Original behaviour: plain DataLoader
