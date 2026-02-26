@@ -520,7 +520,7 @@ class ClimateDataset(Dataset):
             else os.path.join(self.data_dir, self.cond_file)
         )
         # Open conditioning file lazily too
-        raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: 50})
+        raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: -1})
         raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
         # Materialise into a float32 tensor and immediately close the dataset
         #print(raw_cond)
