@@ -6,7 +6,7 @@ seed: 1337
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 10
+    gradient_accumulation_steps: 9
     device_placement: True
     sync_batchnorm: True
 
@@ -73,7 +73,7 @@ trainer:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
-    batch_size: 6
+    batch_size: 9
     save_dir: runs/
     save_name: run_test_aero_condenc2.pt
     load_path: #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc2_89.pt #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc_658.pt # RESET - architecture changed, old checkpoints incompatible
