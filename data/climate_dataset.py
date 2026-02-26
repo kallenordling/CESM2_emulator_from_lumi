@@ -526,7 +526,7 @@ class ClimateDataset(Dataset):
         print(raw_cond)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
         # Keep a lightweight (no-data) reference for coordinate lookups
-        self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars].sel({self.time_dim: selected_years})
+        self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars]#.sel({self.time_dim: selected_years})
         raw_cond.close()
         del raw_cond
 
