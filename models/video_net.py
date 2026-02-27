@@ -13,7 +13,18 @@ from models.rotary_embedding import RotaryEmbedding
 
 def checkpoint(fn, *args, enabled=False):
     if enabled:
-        return torch_checkpoint.checkpoint(fn, *args, use_reentrant=False)
+        # torch.compiler.disable prevents dynamo from tracing *into* the
+        # checkpointed block.  Without this, torch.compile + gradient
+        # checkpointing on ROCm (MI250X) produces a signal-11 segfault because
+        # dynamo tries to inline through the remat boundary and trips over
+        # autograd profiler hooks that checkpoint registers internally.
+        # The checkpointed blocks still run correctly (eagerly inside the
+        # compiled graph); only the recomputation during backward is affected,
+        # which is the desired behaviour anyway.
+        @torch.compiler.disable
+        def _run_checkpointed():
+            return torch_checkpoint.checkpoint(fn, *args, use_reentrant=False)
+        return _run_checkpointed()
     else:
         return fn(*args)
 
