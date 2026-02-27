@@ -35,7 +35,7 @@ export CUDA_LAUNCH_BLOCKING=0
 export HSA_ENABLE_SDMA=0
 export MIOPEN_DEBUG_CONV_IMPLICIT_GEMM=0
 export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
-
+export TORCH_COMPILE=0
 # ── Per-job private MIOpen/HIP kernel cache ───────────────────────────────────
 # Prevents "filesystem error: cannot remove: Operation not permitted" crashes.
 # A previous job leaves /tmp/gfx90a6e.HIP.*.ufdb.txt behind; MIOpen tries to
