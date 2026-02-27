@@ -136,12 +136,12 @@ class UNetTrainer:
         #   model output).  If the model is ignoring conditioning
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
-        self.cond_loss_scaling     = 0.000          # starts at zero
-        self.cond_warmup_steps     = getattr(self, "cond_warmup_steps",     50)
-        self.cond_max_scaling      = getattr(self, "cond_max_scaling",       3.0)
-        self.cond_min_scaling      = getattr(self, "cond_min_scaling",       0.1)
-        self.cond_adapt_every      = getattr(self, "cond_adapt_every",       10)
-        self.cond_target_sensitivity = getattr(self, "cond_target_sensitivity", 0.01)
+        self.cond_loss_scaling = 0.0  # always start silent
+        self.cond_warmup_steps = 500  # ~5-10 epochs depending on dataset size
+        self.cond_max_scaling = 1.0  # was 3.0 — too aggressive, can destabilize MSE
+        self.cond_min_scaling = 0.01  # was 0.1 — allow near-silence when signal weak
+        self.cond_adapt_every = 50  # was 10 — less jitter in adaptation
+        self.cond_target_sensitivity = 0.005  # was 0.01 — tighter target, forces more careful tuning
         self._cond_sensitivity_ema = None   # lazily initialised on first update
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
         # Eliminates the expensive second out_null forward pass.
