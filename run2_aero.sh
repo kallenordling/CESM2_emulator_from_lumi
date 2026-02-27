@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_aero
 #SBATCH --account=project_462001112
-#SBATCH --partition=dev-g
+#SBATCH --partition=standard-g
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=128G
-#SBATCH --time=0:30:00
+#SBATCH --time=20:00:00
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail
@@ -46,8 +46,7 @@ export MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen_${SLURM_JOB_ID}
 export HIP_CACHE_PATH=/tmp/hip_${SLURM_JOB_ID}
 # MIOPEN_FIND_ENFORCE=2: use cached kernels when present; don't crash on miss.
 export MIOPEN_FIND_ENFORCE=2
-export TORCHINDUCTOR_COMPILE_THREADS=1
-export TORCH_COMPILE=0
+
 # Create cache dirs on every node's local /tmp before any GPU process starts.
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     bash -c "mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}"
