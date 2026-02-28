@@ -396,13 +396,11 @@ class UNetTrainer:
         #    )
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
-
+        if isinstance(self.scheduler, ContinuousDDPM):
+            return self.scheduler.predict_start_from_v(noisy_sample, timesteps, model_output)
         alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
         beta_prod_t = 1 - alpha_prod_t
-
-        pred_original_sample = (alpha_prod_t ** 0.5) * noisy_sample - (beta_prod_t ** 0.5) * model_output
-
-        return pred_original_sample
+        return (alpha_prod_t ** 0.5) * noisy_sample - (beta_prod_t ** 0.5) * model_output
 
     def get_loss(self, batch, cond_map, scenario_ids=None):
         clean_samples = batch.to(self.weight_dtype)
@@ -522,12 +520,18 @@ class UNetTrainer:
                     with torch.no_grad():
                         null_cond_map = torch.full_like(cond_map, NULL_COND_VALUE)
                         null_output = self.model(noisy_samples, timesteps, cond_map=null_cond_map)
-                        if self.scheduler.config.prediction_type == "v_prediction":
+                        if isinstance(self.scheduler, ContinuousDDPM):
+                            pred_baseline = self.scheduler.predict_start_from_v(
+                                noisy_samples, timesteps, null_output
+                            )
+                        elif self.scheduler.config.prediction_type == "v_prediction":
                             alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
                             beta_prod_t  = 1 - alpha_prod_t
                             pred_baseline = (alpha_prod_t ** 0.5) * noisy_samples - (beta_prod_t ** 0.5) * null_output
-                        else:
-                            pred_baseline = noisy_samples - (beta_prod_t ** 0.5) * null_output
+                        else:  # epsilon
+                            alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
+                            beta_prod_t  = 1 - alpha_prod_t
+                            pred_baseline = (noisy_samples - (beta_prod_t ** 0.5) * null_output) / (alpha_prod_t ** 0.5)
                         pred_baseline = pred_baseline.mean(dim=0, keepdim=True).expand_as(pred_original_sample)
 
                 # ── Climatological baseline for clean anomaly ─────────────────────────
