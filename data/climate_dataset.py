@@ -218,10 +218,10 @@ def fit_pca_denoise(
     del scores
 
     var_explained = pca.explained_variance_ratio_.sum() * 100
-    print(
-        f"[PCA] {var_name}: kept {n_components} components → "
-        f"{var_explained:.2f}% variance explained"
-    )
+    #print(
+    #    f"[PCA] {var_name}: kept {n_components} components → "
+    #    f"{var_explained:.2f}% variance explained"
+    #)
 
     result = recon.reshape(T, H, W).astype(np.float32)
     del recon
@@ -514,12 +514,12 @@ class ClimateDataset(Dataset):
                     print(f"[DATASET] Could not compute climatology: {exc}")
                     print("[DATASET] Anomaly loss will fall back to per-batch mean.")
                     self.climatology = None
-            else:
-                print(
-                    f"[DATASET] Using pre-supplied climatology  "
-                    f"shape={tuple(self.climatology.shape)}  "
-                    f"mean={self.climatology.mean().item():.4f}"
-                )
+            #else:
+                #print(
+                #    f"[DATASET] Using pre-supplied climatology  "
+                #    f"shape={tuple(self.climatology.shape)}  "
+                #    f"mean={self.climatology.mean().item():.4f}"
+                #)
 
         # ── Conditioning data (always loaded) ────────────────────────────────
         if getattr(self, "dataset_cond", None) is not None:
