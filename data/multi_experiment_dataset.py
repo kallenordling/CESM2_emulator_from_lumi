@@ -268,10 +268,10 @@ class MultiExperimentDataLoader:
 
         if mix_scenarios and batch_size % self.n_exp != 0:
             batch_size = (batch_size // self.n_exp) * self.n_exp
-            print(
-                f"[MULTI] batch_size rounded down to {batch_size} "
-                f"(must be divisible by n_experiments={self.n_exp})"
-            )
+            #print(
+            #    f"[MULTI] batch_size rounded down to {batch_size} "
+            #    f"(must be divisible by n_experiments={self.n_exp})"
+            #)
         self.batch_size = batch_size
         self.per_exp = batch_size // self.n_exp if mix_scenarios else batch_size
 
@@ -342,10 +342,10 @@ class MultiExperimentDataLoader:
             n_batches = min(n_batches, self.steps_per_realization)
 
         if n_batches == 0:
-            print(
-                f"[MULTI] WARNING: not enough windows for a full mixed batch "
-                f"(per_exp={self.per_exp}).  Skipping realization step."
-            )
+            #print(
+            #    f"[MULTI] WARNING: not enough windows for a full mixed batch "
+            #    f"(per_exp={self.per_exp}).  Skipping realization step."
+            #)
             return
 
         device = self.accelerator.device
@@ -481,12 +481,12 @@ def build_multi_experiment_loader(
         # Capture historical climatology (first dataset whose name has "hist")
         if hist_climatology is None and "hist" in name.lower():
             hist_climatology = ds.climatology
-            if hist_climatology is not None:
-                print(f"[BUILD] Historical climatology captured from '{name}' "
-                      f"shape={tuple(hist_climatology.shape)}")
-            else:
-                print(f"[BUILD] WARNING: '{name}' has no climatology — "
-                      f"SSP scenarios will fall back to per-batch mean.")
+            #if hist_climatology is not None:
+            #    print(f"[BUILD] Historical climatology captured from '{name}' "
+            #          f"shape={tuple(hist_climatology.shape)}")
+            #else:
+            #    print(f"[BUILD] WARNING: '{name}' has no climatology — "
+            #          f"SSP scenarios will fall back to per-batch mean.")
 
     # Pass 2: build SSP datasets, injecting the hist climatology
     for i, (name, cfg) in enumerate(raw_configs):
@@ -495,8 +495,8 @@ def build_multi_experiment_loader(
         merged = {**shared_dataset_kwargs, **cfg}
         if hist_climatology is not None:
             merged["external_climatology"] = hist_climatology
-            print(f"[BUILD] Scenario '{name}': injecting historical climatology "
-                  f"as external_climatology.")
+            #print(f"[BUILD] Scenario '{name}': injecting historical climatology "
+            #      f"as external_climatology.")
         ds = ClimateDataset(**merged)
         datasets[i] = ds
         scenario_names[i] = name
