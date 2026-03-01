@@ -47,7 +47,7 @@ trainer:
     save_dir: runs/
     save_name: run_multi_experiment.pt
     load_path: 0
-    lr: 0.00002
+    lr: 0.00001
     sample_steps: 250
     cfg_drop_prob: 0.1
 
