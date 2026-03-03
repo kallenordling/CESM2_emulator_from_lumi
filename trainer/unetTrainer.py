@@ -86,6 +86,14 @@ def calc_mse_loss(model_output, target, lats):
     return lat_weighted_loss
 
 
+def calc_mse_loss_precomputed_sq(sq_tensor, lats):
+    """Lat-weighted mean of an already-squared tensor.
+    Avoids allocating a zeros_like tensor for the null-anomaly baseline loss."""
+    latitude = torch.as_tensor(lats.values, dtype=sq_tensor.dtype, device=sq_tensor.device)
+    latitude_weight = torch.cos(torch.deg2rad(latitude))
+    return torch.einsum('...yx,y->...yx', sq_tensor, latitude_weight).mean()
+
+
 class UNetTrainer:
     """Trainer class for 2D diffusion models."""
 
@@ -357,9 +365,6 @@ class UNetTrainer:
 
     def get_loss(self, batch, cond_map, scenario_ids=None):
         clean_samples = batch.to(self.weight_dtype)
-        # cond_map = reduce(clean_samples, "b v t h w -> b v 1 h w", "mean").repeat(
-        #    1, 1, clean_samples.shape[-3], 1, 1
-        # )
 
         # Sample noise that we'll add to the clean images
         noise = torch.randn_like(clean_samples)
@@ -381,6 +386,25 @@ class UNetTrainer:
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
 
         with self.accelerator.accumulate(self.model):
+
+            # ── CFG dropout: applied ONCE before the single forward pass ──────
+            # When cond_loss_scaling > 0, randomly replace some cond_maps with
+            # the null value (-1) in-place so we only ever do one forward pass.
+            NULL_COND_VALUE = -1.0
+            if self.cond_loss_scaling > 0:
+                drop_mask = (
+                    torch.rand(cond_map.shape[0], device=self.device) < self.cfg_drop_prob
+                )
+                # In-place on a fresh clone — avoids mutating the caller's tensor
+                # but cheaper than a full clone when drop_mask is sparse
+                if drop_mask.any():
+                    cond_map = cond_map.clone()
+                    cond_map[drop_mask] = NULL_COND_VALUE
+                else:
+                    drop_mask = torch.zeros(cond_map.shape[0], dtype=torch.bool, device=self.device)
+            else:
+                drop_mask = None
+
             model_output = self.model(
                 noisy_samples,
                 timesteps,
@@ -400,35 +424,11 @@ class UNetTrainer:
 
             # ── Anomaly-based conditioning loss ───────────────────────────────
             # Goal: the model's x0-prediction should reproduce the *forced*
-            # climate anomaly (signal relative to the pre-industrial baseline)
-            # rather than just the raw field.  Because the forced signal is only
-            # ~1-5 % of total variance, targeting anomalies gives a much stronger
-            # gradient than targeting raw values.
-            #
-            # Steps:
-            #  1. Decode model output → predicted x0 (pred_original_sample).
-            #  2. Subtract the 1850-1900 climatology to get the anomaly.
-            #  3. Do the same for the clean target.
-            #  4. Penalise the MSE between the two anomaly fields (lat-weighted).
+            # climate anomaly (signal relative to the pre-industrial baseline).
+            # Because the forced signal is only ~1-5 % of total variance,
+            # targeting anomalies gives a much stronger gradient.
 
             if self.cond_loss_scaling > 0:
-                # ── CFG dropout: replace cond_map with pre-industrial null (-1) for a
-                #   random subset of the batch.  Normalization maps zero emissions →  -1,
-                #   so -1 is the correct "no forcing" value, NOT 0.0 which sits in the
-                #   middle of the emission distribution.
-                NULL_COND_VALUE = -1.0
-                drop_mask = (
-                    torch.rand(cond_map.shape[0], device=self.device) < self.cfg_drop_prob
-                )
-                cond_map_cfg = cond_map.clone()
-                cond_map_cfg[drop_mask] = NULL_COND_VALUE
-
-                # Re-run forward pass with CFG dropout applied so grad flows correctly.
-                model_output = self.model(noisy_samples, timesteps, cond_map=cond_map_cfg)
-                # Recompute MSE loss against the CFG-aware output
-                mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
-
-                # ── cond_sensitivity from in-batch contrast (conditioned vs null-cond) ──
                 has_cond   = (~drop_mask).any()
                 has_uncond = drop_mask.any()
                 if has_cond and has_uncond:
@@ -488,8 +488,6 @@ class UNetTrainer:
                         pred_baseline = pred_baseline.mean(dim=0, keepdim=True).expand_as(pred_original_sample)
 
                 # ── Climatological baseline for clean anomaly ─────────────────────────
-                # 1850-1900 pre-industrial mean: the clean signal is measured relative
-                # to this, exactly matching the -1 null-cond reference.
                 if self.climatology is not None:
                     baseline = self.climatology.to(
                         device=clean_samples.device, dtype=clean_samples.dtype
@@ -499,27 +497,25 @@ class UNetTrainer:
 
                 # ── Anomalies ──────────────────────────────────────────────────────────
                 clean_anomaly = clean_samples - baseline
+                del baseline
                 pred_anomaly  = pred_original_sample - pred_baseline
+                del pred_baseline
 
                 # ── Contrastive cond_loss ──────────────────────────────────────────────
-                mse_null_anomaly    = calc_mse_loss(
-                    torch.zeros_like(pred_anomaly), clean_anomaly, self._ref_ds.lats
-                )
+                # mse_null = E[(0 - clean_anomaly)^2] = E[clean_anomaly^2] — no allocation needed
+                mse_null_anomaly    = calc_mse_loss_precomputed_sq(clean_anomaly ** 2, self._ref_ds.lats)
                 mse_correct_anomaly = calc_mse_loss(pred_anomaly, clean_anomaly, self._ref_ds.lats)
                 cond_loss = torch.relu(0.01 + mse_correct_anomaly - mse_null_anomaly)
 
                 # ── Anomaly diagnostics ────────────────────────────────────────────────
-                anom_signal = clean_anomaly.abs().mean()
-                anom_error  = (pred_anomaly - clean_anomaly).abs().mean()
+                anom_signal = clean_anomaly.abs().mean().detach()
+                anom_error  = (pred_anomaly - clean_anomaly).abs().mean().detach()
+                del clean_anomaly, pred_anomaly
 
                 # ── Scenario discrimination metric ────────────────────────────────────
                 # Mean pairwise L1 distance between per-scenario mean x0 predictions.
-                # If the model truly responds to conditioning, SSP370/hist/aaer/ghg
-                # should produce different mean fields → SCEN_DISC > 0.
-                # A value near 0 means all scenarios produce identical outputs.
-                # Only computed for conditioned samples (not drop_mask).
-                if scenario_ids is not None:
-                    conditioned_preds = pred_original_sample[~drop_mask]   # (n_cond, C, T, H, W)
+                if scenario_ids is not None and has_cond:
+                    conditioned_preds = pred_original_sample[~drop_mask]
                     conditioned_ids   = scenario_ids[~drop_mask]
                     unique_scenarios  = conditioned_ids.unique()
                     if len(unique_scenarios) >= 2:
@@ -529,12 +525,11 @@ class UNetTrainer:
                             if mask_s.sum() > 0:
                                 scenario_means.append(conditioned_preds[mask_s].mean(dim=0))
                         if len(scenario_means) >= 2:
-                            # Mean of all pairwise L1 distances between scenario means
                             n = len(scenario_means)
-                            pair_dists = []
-                            for i in range(n):
-                                for j in range(i + 1, n):
-                                    pair_dists.append((scenario_means[i] - scenario_means[j]).abs().mean())
+                            pair_dists = [
+                                (scenario_means[i] - scenario_means[j]).abs().mean()
+                                for i in range(n) for j in range(i + 1, n)
+                            ]
                             scen_disc = torch.stack(pair_dists).mean()
                         else:
                             scen_disc = torch.zeros(1, device=self.device)
@@ -542,6 +537,7 @@ class UNetTrainer:
                         scen_disc = torch.zeros(1, device=self.device)
                 else:
                     scen_disc = torch.zeros(1, device=self.device)
+                del pred_original_sample
             else:
                 cond_loss = torch.zeros(1, device=self.device)
                 anom_error =  torch.zeros(1, device=self.device)

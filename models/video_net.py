@@ -665,7 +665,6 @@ class UNetModel3D(nn.Module):
             year_cond=False,
             cond_map=True,
             cond_channels=0,
-            cond_drop_prob=0.1,
     ):
         super().__init__()
 
@@ -673,7 +672,6 @@ class UNetModel3D(nn.Module):
         self.year_cond = year_cond
         self.day_cond = day_cond
         self.cond_channels = cond_channels
-        self.cond_drop_prob = cond_drop_prob
 
         # Input and output size to the model will be how many variables we are predicting
         # in_channels = n_vars
@@ -975,22 +973,25 @@ class UNetModel3D(nn.Module):
         # ── Spatial conditioning encoder ──────────────────────────────────────
         # Produces a list of feature maps at each UNet resolution.
         # cond_spatial_feats[i] has shape [B, dims[i+1], T, H_i, W_i]
+        #
+        # CFG dropout is handled entirely by the trainer BEFORE calling forward().
+        # The trainer sets dropped rows to -1.0 (the correct null/pre-industrial
+        # value under the normalisation scheme: zero emissions -> -1).
+        # We must NOT apply a second dropout here: doing so would compound the
+        # drop rate and, critically, would zero rows to 0.0 instead of -1.0,
+        # teaching the model a wrong null conditioning value.
+        NULL_COND_VALUE = -1.0
         cond_spatial_feats = None
         if self.spatial_cond_encoder is not None:
             if exists(cond_map):
-                if self.training and self.cond_drop_prob > 0:
-                    keep_mask = (
-                        torch.rand(cond_map.shape[0], device=cond_map.device)
-                        >= self.cond_drop_prob
-                    )
-                    cond_map_input = cond_map * keep_mask.view(-1, 1, 1, 1, 1)
-                else:
-                    cond_map_input = cond_map
+                cond_map_input = cond_map
             else:
-                # Null conditioning (CFG inference with cond=None)
-                cond_map_input = torch.zeros(
-                    x.shape[0], self.cond_channels,
-                    x.shape[2], x.shape[3], x.shape[4],
+                # Null conditioning: CFG inference called with cond_map=None.
+                # Fill with -1.0 (pre-industrial baseline), NOT 0.0.
+                cond_map_input = torch.full(
+                    (x.shape[0], self.cond_channels,
+                     x.shape[2], x.shape[3], x.shape[4]),
+                    NULL_COND_VALUE,
                     device=x.device, dtype=x.dtype,
                 )
             cond_spatial_feats = self.spatial_cond_encoder(cond_map_input)
@@ -1002,7 +1003,6 @@ class UNetModel3D(nn.Module):
         # Projects cond_map into input space and adds it to x before input_conv.
         # This gives an immediate, zero-lag gradient path from loss → cond_map,
         # active from step 1 regardless of the FiLM projection warm-up.
-        # cond_drop_prob dropout is reused via cond_map_input (already masked).
         if self.cond_input_proj is not None and self.spatial_cond_encoder is not None:
             x = x + self.cond_input_proj(cond_map_input)
 
