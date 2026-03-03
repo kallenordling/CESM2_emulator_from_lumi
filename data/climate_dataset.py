@@ -468,7 +468,7 @@ class ClimateDataset(Dataset):
         """
         hist_years = list(range(1850, 2015, 5))  # every 5th year
         future_years = list(range(2015, 2101, 2))  # every other year
-        selected_years = hist_years + future_years
+        selected_years = set(hist_years + future_years)
 
         # ── Target climate data (skipped in cond_only mode) ──────────────────
         if not self.cond_only:
@@ -489,7 +489,20 @@ class ClimateDataset(Dataset):
             dataset = dataset[self.vars]
             self.xr_data = dataset.map(preprocess).map(normalize)
             print(self.xr_data)
-            self.xr_data = self.xr_data.sel({self.time_dim: selected_years})
+            # Select target years robustly: handles both integer-year coords
+            # (CESM2-LE "year" dim) and datetime/cftime coords (AAER/GHG/SSP files).
+            # Also safe when a scenario doesn't cover the full 1850-2100 range.
+            coord_vals = self.xr_data[self.time_dim].values
+            if hasattr(coord_vals[0], 'year'):
+                # cftime or datetime64 objects: extract integer year and isel by mask
+                year_ints = [int(str(v)[:4]) for v in coord_vals]
+                mask = [y in selected_years for y in year_ints]
+                self.xr_data = self.xr_data.isel({self.time_dim: mask})
+            else:
+                # Integer year coordinate — intersect with what's in the file
+                available = set(int(v) for v in coord_vals)
+                valid = sorted(selected_years & available)
+                self.xr_data = self.xr_data.sel({self.time_dim: valid})
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
