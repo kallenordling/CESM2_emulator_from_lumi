@@ -136,8 +136,8 @@ class UNetTrainer:
         #   model output).  If the model is ignoring conditioning
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
-        self.cond_loss_scaling = 0.0  # always start silent
-        self.cond_warmup_steps = 500  # ~5-10 epochs depending on dataset size
+        self.cond_loss_scaling = 0.01  # always start silent
+        self.cond_warmup_steps = 0  # ~5-10 epochs depending on dataset size
         self.cond_max_scaling = 0.3  # was 1.0 — peaked at 1.0 in epoch 6, crashed ANOM_SKILL; cap at 0.3
         self.cond_min_scaling = 0.01  # was 0.1 — allow near-silence when signal weak
         self.cond_adapt_every = 50  # was 10 — less jitter in adaptation
