@@ -487,7 +487,9 @@ class ClimateDataset(Dataset):
             ).sortby(self.time_dim)
             self.lats = dataset.lat
             dataset = dataset[self.vars]
-            self.xr_data = dataset.map(preprocess).map(normalize).sel({self.time_dim: selected_years})
+            self.xr_data = dataset.map(preprocess).map(normalize)
+            print(self.xr_data)
+            #.sel({self.time_dim: selected_years}))
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
@@ -535,7 +537,9 @@ class ClimateDataset(Dataset):
         )
         # Open conditioning file lazily too
         raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: -1})
-        raw_cond = raw_cond[self.cond_vars].map(normalize).sel({self.time_dim: selected_years})
+        raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
+        print("WAR CONG")
+        print(raw_cond)
         # Materialise into a float32 tensor and immediately close the dataset
         #print(raw_cond)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
