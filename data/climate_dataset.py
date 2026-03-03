@@ -488,7 +488,7 @@ class ClimateDataset(Dataset):
             self.lats = dataset.lat
             dataset = dataset[self.vars]
             self.xr_data = dataset.map(preprocess).map(normalize)
-            print(self.xr_data)
+           # print(self.xr_data)
             # Select target years robustly: handles both integer-year coords
             # (CESM2-LE "year" dim) and datetime/cftime coords (AAER/GHG/SSP files).
             # Also safe when a scenario doesn't cover the full 1850-2100 range.
@@ -551,8 +551,21 @@ class ClimateDataset(Dataset):
         # Open conditioning file lazily too
         raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: -1})
         raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
-        print("WAR CONG")
-        print(raw_cond)
+
+        coord_vals = self.raw_cond[self.time_dim].values
+        if hasattr(coord_vals[0], 'year'):
+            # cftime or datetime64 objects: extract integer year and isel by mask
+            year_ints = [int(str(v)[:4]) for v in coord_vals]
+            mask = [y in selected_years for y in year_ints]
+            self.raw_cond = self.raw_cond.isel({self.time_dim: mask})
+        else:
+            # Integer year coordinate — intersect with what's in the file
+            available = set(int(v) for v in coord_vals)
+            valid = sorted(selected_years & available)
+            self.raw_cond = self.raw_cond.sel({self.time_dim: valid})
+
+        #print("WAR CONG")
+        #print(raw_cond)
         # Materialise into a float32 tensor and immediately close the dataset
         #print(raw_cond)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
