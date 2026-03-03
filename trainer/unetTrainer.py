@@ -145,7 +145,7 @@ class UNetTrainer:
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
         self.cond_loss_scaling = 0.0  # always start silent
-        self.cond_warmup_epochs = 0   # Phase 1: hold at 0.0 for this many epochs
+        self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
         self.cond_ramp_epochs   = 10  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
         self.cond_max_scaling   = 0.1 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
@@ -423,41 +423,34 @@ class UNetTrainer:
                 cond_sensitivity = (pred_x0_cond - pred_x0_null).abs().mean().detach()
                 self._cached_sensitivity = cond_sensitivity.item()
 
-                # ── Climatological baseline for anomaly computation ───────────
-                if self.climatology is not None:
-                    baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
-                else:
-                    baseline = clean_samples.mean(dim=2, keepdim=True)
-
-                clean_anomaly = clean_samples - baseline
+                # ── True anomaly: target - climatology ────────────────────
+                # The forced climate signal is what the training target looks
+                # like relative to the fixed 1850-1900 pre-industrial baseline.
+                assert self.climatology is not None, (
+                    "climatology must be set on the dataset — "
+                    "anomaly loss requires a fixed 1850-1900 baseline"
+                )
+                baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
+                true_anomaly = (clean_samples - baseline).detach()
                 del baseline
 
-                # ── Anomaly predictions ───────────────────────────────────────
-                pred_anomaly_cond = pred_x0_cond - pred_x0_null   # cond effect relative to null
-                del pred_x0_cond
+                # ── Predicted anomaly: cond output - null output ──────────────
+                # The difference between the conditioned and null model x0
+                # predictions is exactly what the emission forcing added.
+                # Gradients flow only through pred_x0_cond (null is no_grad).
+                pred_anomaly = pred_x0_cond - pred_x0_null.detach()
+                del pred_x0_cond, pred_x0_null
 
-                # Clean anomaly relative to null prediction as reference
-                # (null model's x0 is our estimate of the unforced climate state)
-                clean_anomaly_rel = clean_anomaly - pred_x0_null.detach()
-                del pred_x0_null
-
-                # ── Conditioning improvement loss ─────────────────────────────
-                # How much better does the conditioned model predict the anomaly
-                # compared to the null model (which by definition predicts zero
-                # anomaly relative to itself)?
-                # mse_null = E[clean_anomaly_rel^2]  (null predicts 0 improvement)
-                # mse_cond = E[(pred_anomaly_cond - clean_anomaly_rel)^2]
-                # cond_loss = relu(margin + mse_cond - mse_null)
-                # Minimising cond_loss pushes mse_cond < mse_null, i.e. conditioning
-                # must actively improve over the null prediction.
-                mse_null = calc_mse_loss_precomputed_sq(clean_anomaly_rel ** 2, self._ref_ds.lats)
-                mse_cond = calc_mse_loss(pred_anomaly_cond, clean_anomaly_rel, self._ref_ds.lats)
-                cond_loss = torch.relu(0.01 + mse_cond - mse_null)
+                # ── Conditioning loss ─────────────────────────────────────────
+                # Directly penalise the gap between predicted and true anomaly.
+                # No contrastive margin needed — this is a direct regression
+                # target: (cond_output - null_output) should equal the forced signal.
+                cond_loss = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
 
                 # ── Diagnostics ───────────────────────────────────────────────
-                anom_signal = clean_anomaly.abs().mean().detach()
-                anom_error  = (pred_anomaly_cond - clean_anomaly_rel).abs().mean().detach()
-                del clean_anomaly, pred_anomaly_cond, clean_anomaly_rel
+                anom_signal = true_anomaly.abs().mean().detach()
+                anom_error  = (pred_anomaly - true_anomaly).abs().mean().detach()
+                del true_anomaly, pred_anomaly
 
                 # ── Scenario discrimination metric ────────────────────────────
                 # Mean pairwise L1 distance between per-scenario mean x0 predictions.
