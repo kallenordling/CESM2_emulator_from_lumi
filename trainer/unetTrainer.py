@@ -277,7 +277,7 @@ class UNetTrainer:
 
                 # Multi-experiment yields (batch, cond, scenario_ids)
                 # Legacy single-experiment yields (batch, cond)
-                print("batch len", en(batch_tuple)
+                print("batch len", en(batch_tuple))
                 if len(batch_tuple) == 3:
                     batch, cond, scenario_ids = batch_tuple
                 else:
