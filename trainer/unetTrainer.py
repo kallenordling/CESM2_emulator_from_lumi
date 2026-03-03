@@ -136,13 +136,10 @@ class UNetTrainer:
         #   model output).  If the model is ignoring conditioning
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
-        self.cond_loss_scaling = 0.01  # always start silent
-        self.cond_warmup_steps = 0  # ~5-10 epochs depending on dataset size
-        self.cond_max_scaling = 0.3  # was 1.0 — peaked at 1.0 in epoch 6, crashed ANOM_SKILL; cap at 0.3
-        self.cond_min_scaling = 0.01  # was 0.1 — allow near-silence when signal weak
-        self.cond_adapt_every = 50  # was 10 — less jitter in adaptation
-        self.cond_target_sensitivity = 0.005  # was 0.01 — tighter target, forces more careful tuning
-        self._cond_sensitivity_ema = None   # lazily initialised on first update
+        self.cond_loss_scaling = 0.0  # always start silent
+        self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
+        self.cond_ramp_epochs   = 10  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
+        self.cond_max_scaling   = 0.1 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
         # Eliminates the expensive second out_null forward pass.
         self.cfg_drop_prob = getattr(self, "cfg_drop_prob", 0.1)
@@ -277,13 +274,12 @@ class UNetTrainer:
 
                 # Multi-experiment yields (batch, cond, scenario_ids)
                 # Legacy single-experiment yields (batch, cond)
-                print("batch len", len(batch_tuple))
                 if len(batch_tuple) == 3:
                     batch, cond, scenario_ids = batch_tuple
                 else:
                     batch, cond = batch_tuple
                     scenario_ids = None
-                print(scenario_ids, "scenario ids")
+
                 # Skip steps until we reach the resumed step
                 if (
                         self.load_path
@@ -297,7 +293,7 @@ class UNetTrainer:
                 if self.accelerator.sync_gradients:
                     self.global_step += 1
                     self.ema_model.update()
-                    self._update_cond_scaling(sens.detach().item())
+                    self._update_cond_scaling(sens.detach().item(), epoch)
 
                     if self.accelerator.is_main_process:
                         if self.global_step % self.save_every == 0:
@@ -332,69 +328,25 @@ class UNetTrainer:
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch})
 
-    def _update_cond_scaling(self, sensitivity_value: float) -> None:
-        """Update cond_loss_scaling adaptively based on training progress.
+    def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
+        """Update cond_loss_scaling on a fixed epoch-based schedule.
 
-        Three phases:
-          1. Warmup  (step < cond_warmup_steps):
+        Two phases:
+          1. Warmup  (epoch < cond_warmup_epochs):
                scaling = 0.0 — let MSE dominate, build a stable baseline.
-          2. Linear ramp  (cond_warmup_steps ≤ step < 2 * cond_warmup_steps):
-               scaling ramps linearly 0 → cond_max_scaling.
-          3. Adaptive  (step ≥ 2 * cond_warmup_steps):
-               Every `cond_adapt_every` steps the scale is nudged ±5 % based
-               on whether the EMA of cond_sensitivity is above or below the
-               target.  If sensitivity is low (model ignoring conditioning)
-               the scale grows; if sensitivity is healthy it can relax.
+          2. Linear ramp then hold  (epoch >= cond_warmup_epochs):
+               scaling ramps linearly 0 → cond_max_scaling over cond_ramp_epochs,
+               then holds at cond_max_scaling.
         """
-        step = self.global_step
-
         # ── Phase 1: warmup ───────────────────────────────────────────────────
-        if step < self.cond_warmup_steps:
+        if epoch < self.cond_warmup_epochs:
             self.cond_loss_scaling = 0.0
             return
 
-        # ── Phase 2: linear ramp ──────────────────────────────────────────────
-        ramp_steps = step - self.cond_warmup_steps
-        if ramp_steps < self.cond_warmup_steps:
-            progress = ramp_steps / self.cond_warmup_steps          # 0 → 1
-            self.cond_loss_scaling = self.cond_max_scaling * progress
-            return
-
-        # ── Phase 3: adaptive nudge ───────────────────────────────────────────
-        # Update EMA of sensitivity (exponential moving average, α = 0.05)
-        alpha = 0.05
-        if self._cond_sensitivity_ema is None:
-            self._cond_sensitivity_ema = sensitivity_value
-        else:
-            self._cond_sensitivity_ema = (
-                (1.0 - alpha) * self._cond_sensitivity_ema + alpha * sensitivity_value
-            )
-
-        # Only nudge every `cond_adapt_every` steps to avoid noise
-        if step % self.cond_adapt_every != 0:
-            return
-
-        ratio = self._cond_sensitivity_ema / (self.cond_target_sensitivity + 1e-8)
-        if ratio < 1.0:
-            # Sensitivity below target → model is ignoring conditioning → push harder
-            self.cond_loss_scaling = min(
-                self.cond_max_scaling,
-                self.cond_loss_scaling * 1.05,
-            )
-        else:
-            # Sensitivity healthy → can relax a little
-            self.cond_loss_scaling = max(
-                self.cond_min_scaling,
-                self.cond_loss_scaling * 0.98,
-            )
-
-        #if self.accelerator.is_main_process:
-        #    print(
-        #        f"[COND SCALE] step={step}  "
-        #        f"sensitivity_ema={self._cond_sensitivity_ema:.6f}  "
-        #        f"target={self.cond_target_sensitivity:.6f}  "
-        #        f"cond_loss_scaling={self.cond_loss_scaling:.4f}"
-        #    )
+        # ── Phase 2: linear ramp then hold ────────────────────────────────────
+        ramp_epoch = epoch - self.cond_warmup_epochs
+        progress = min(ramp_epoch / self.cond_ramp_epochs, 1.0)  # clamp at 1.0 after ramp
+        self.cond_loss_scaling = self.cond_max_scaling * progress
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         if isinstance(self.scheduler, ContinuousDDPM):
@@ -682,6 +634,7 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
+                "cond_loss_scaling": self.cond_loss_scaling,
             }
 
             # If the directory doesn't exist already create it
@@ -766,6 +719,10 @@ class UNetTrainer:
         self.resume_global_step = (
                 self.global_step * self.accelerator.gradient_accumulation_steps
         )
+
+        # Restore conditioning scale so resume doesn't restart warmup from 0
+        self.cond_loss_scaling = checkpoint.get("cond_loss_scaling", 0.0)
+        print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}")
 
         # Avoid ZeroDivisionError if dataloader not yet initialized
         steps_per_epoch_accum = self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
