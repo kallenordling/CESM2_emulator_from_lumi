@@ -489,7 +489,7 @@ class ClimateDataset(Dataset):
             dataset = dataset[self.vars]
             self.xr_data = dataset.map(preprocess).map(normalize)
             print(self.xr_data)
-            #.sel({self.time_dim: selected_years}))
+            self.xr_data = self.xr_data.sel({self.time_dim: selected_years})
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
