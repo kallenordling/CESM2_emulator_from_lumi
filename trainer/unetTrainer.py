@@ -145,7 +145,7 @@ class UNetTrainer:
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
         self.cond_loss_scaling = 0.0  # always start silent
-        self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
+        self.cond_warmup_epochs = 0   # Phase 1: hold at 0.0 for this many epochs
         self.cond_ramp_epochs   = 10  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
         self.cond_max_scaling   = 0.1 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
@@ -387,29 +387,10 @@ class UNetTrainer:
 
         with self.accelerator.accumulate(self.model):
 
-            # ── CFG dropout: applied ONCE before the single forward pass ──────
-            # When cond_loss_scaling > 0, randomly replace some cond_maps with
-            # the null value (-1) in-place so we only ever do one forward pass.
             NULL_COND_VALUE = -1.0
-            if self.cond_loss_scaling > 0:
-                drop_mask = (
-                    torch.rand(cond_map.shape[0], device=self.device) < self.cfg_drop_prob
-                )
-                # In-place on a fresh clone — avoids mutating the caller's tensor
-                # but cheaper than a full clone when drop_mask is sparse
-                if drop_mask.any():
-                    cond_map = cond_map.clone()
-                    cond_map[drop_mask] = NULL_COND_VALUE
-                else:
-                    drop_mask = torch.zeros(cond_map.shape[0], dtype=torch.bool, device=self.device)
-            else:
-                drop_mask = None
 
-            model_output = self.model(
-                noisy_samples,
-                timesteps,
-                cond_map=cond_map,
-            )
+            # ── Conditioned forward pass (with gradients) ─────────────────────
+            model_output = self.model(noisy_samples, timesteps, cond_map=cond_map)
 
             # Make sure to get the right target for the loss
             if self.scheduler.config.prediction_type == "epsilon":
@@ -422,108 +403,79 @@ class UNetTrainer:
             # ── Primary denoising loss ────────────────────────────────────────
             mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
 
-            # ── Anomaly-based conditioning loss ───────────────────────────────
-            # Goal: the model's x0-prediction should reproduce the *forced*
-            # climate anomaly (signal relative to the pre-industrial baseline).
-            # Because the forced signal is only ~1-5 % of total variance,
-            # targeting anomalies gives a much stronger gradient.
-
             if self.cond_loss_scaling > 0:
-                has_cond   = (~drop_mask).any()
-                has_uncond = drop_mask.any()
-                if has_cond and has_uncond:
-                    cond_sensitivity = (
-                        model_output[~drop_mask].mean() - model_output[drop_mask].mean()
-                    ).abs()
-                    self._cached_sensitivity = cond_sensitivity.detach().item()
-                else:
-                    cond_sensitivity = torch.tensor(self._cached_sensitivity, device=self.device)
+                # ── Null forward pass (no gradients — metric + baseline only) ─
+                # Run the same noisy batch through the model with all-null
+                # conditioning (-1.0 = pre-industrial baseline under normalisation).
+                # No grad needed: this pass is reference-only; gradients flow only
+                # through the conditioned pass above.
+                with torch.no_grad():
+                    null_cond = torch.full_like(cond_map, NULL_COND_VALUE)
+                    null_output = self.model(noisy_samples, timesteps, cond_map=null_cond)
 
-                # ── Decode model output to x0 space ──────────────────────────────────
-                if isinstance(self.scheduler, ContinuousDDPM):
-                    pred_original_sample = self.scheduler.predict_start_from_v(
-                        noisy_samples, timesteps, model_output
-                    )
-                elif self.scheduler.config.prediction_type == "v_prediction":
-                    alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-                    beta_prod_t  = 1 - alpha_prod_t
-                    pred_original_sample = (
-                        (alpha_prod_t ** 0.5) * noisy_samples
-                        - (beta_prod_t  ** 0.5) * model_output
-                    )
-                else:  # epsilon prediction
-                    alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-                    beta_prod_t  = 1 - alpha_prod_t
-                    pred_original_sample = (
-                        noisy_samples - (beta_prod_t ** 0.5) * model_output
-                    ) / (alpha_prod_t ** 0.5)
+                # ── Decode both outputs to x0 space ──────────────────────────
+                pred_x0_cond = self.get_original_sample(noisy_samples, model_output, timesteps)
+                with torch.no_grad():
+                    pred_x0_null = self.get_original_sample(noisy_samples, null_output, timesteps)
 
-                # ── Unconditioned (pre-industrial) baseline ───────────────────────────
-                # Use x0-predictions from the null-cond (drop_mask) samples as the
-                # model's estimate of the pre-industrial climate — this is what the
-                # model sees when forced with -1 emissions.
-                # Note: we use the *pre-industrial climatology* (1850-1900 mean) for
-                #   the clean-sample baseline, which is consistent: both are anchored
-                #   to the same zero-forcing reference period.
-                if has_uncond:
-                    pred_baseline = pred_original_sample[drop_mask].mean(dim=0, keepdim=True)
-                    pred_baseline = pred_baseline.expand_as(pred_original_sample)
-                else:
-                    # Fallback: run a dedicated null-cond pass (no grad, cheap)
-                    with torch.no_grad():
-                        null_cond_map = torch.full_like(cond_map, NULL_COND_VALUE)
-                        null_output = self.model(noisy_samples, timesteps, cond_map=null_cond_map)
-                        if isinstance(self.scheduler, ContinuousDDPM):
-                            pred_baseline = self.scheduler.predict_start_from_v(
-                                noisy_samples, timesteps, null_output
-                            )
-                        elif self.scheduler.config.prediction_type == "v_prediction":
-                            alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-                            beta_prod_t  = 1 - alpha_prod_t
-                            pred_baseline = (alpha_prod_t ** 0.5) * noisy_samples - (beta_prod_t ** 0.5) * null_output
-                        else:  # epsilon
-                            alpha_prod_t = self.scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1, 1)
-                            beta_prod_t  = 1 - alpha_prod_t
-                            pred_baseline = (noisy_samples - (beta_prod_t ** 0.5) * null_output) / (alpha_prod_t ** 0.5)
-                        pred_baseline = pred_baseline.mean(dim=0, keepdim=True).expand_as(pred_original_sample)
+                # ── Sensitivity metric: how much does conditioning move output ─
+                # Measured in x0 space so it's in physical units (not noise space).
+                cond_sensitivity = (pred_x0_cond - pred_x0_null).abs().mean().detach()
+                self._cached_sensitivity = cond_sensitivity.item()
 
-                # ── Climatological baseline for clean anomaly ─────────────────────────
+                # ── Climatological baseline for anomaly computation ───────────
                 if self.climatology is not None:
-                    baseline = self.climatology.to(
-                        device=clean_samples.device, dtype=clean_samples.dtype
-                    )
+                    baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
                 else:
                     baseline = clean_samples.mean(dim=2, keepdim=True)
 
-                # ── Anomalies ──────────────────────────────────────────────────────────
                 clean_anomaly = clean_samples - baseline
                 del baseline
-                pred_anomaly  = pred_original_sample - pred_baseline
-                del pred_baseline
 
-                # ── Contrastive cond_loss ──────────────────────────────────────────────
-                # mse_null = E[(0 - clean_anomaly)^2] = E[clean_anomaly^2] — no allocation needed
-                mse_null_anomaly    = calc_mse_loss_precomputed_sq(clean_anomaly ** 2, self._ref_ds.lats)
-                mse_correct_anomaly = calc_mse_loss(pred_anomaly, clean_anomaly, self._ref_ds.lats)
-                cond_loss = torch.relu(0.01 + mse_correct_anomaly - mse_null_anomaly)
+                # ── Anomaly predictions ───────────────────────────────────────
+                pred_anomaly_cond = pred_x0_cond - pred_x0_null   # cond effect relative to null
+                del pred_x0_cond
 
-                # ── Anomaly diagnostics ────────────────────────────────────────────────
+                # Clean anomaly relative to null prediction as reference
+                # (null model's x0 is our estimate of the unforced climate state)
+                clean_anomaly_rel = clean_anomaly - pred_x0_null.detach()
+                del pred_x0_null
+
+                # ── Conditioning improvement loss ─────────────────────────────
+                # How much better does the conditioned model predict the anomaly
+                # compared to the null model (which by definition predicts zero
+                # anomaly relative to itself)?
+                # mse_null = E[clean_anomaly_rel^2]  (null predicts 0 improvement)
+                # mse_cond = E[(pred_anomaly_cond - clean_anomaly_rel)^2]
+                # cond_loss = relu(margin + mse_cond - mse_null)
+                # Minimising cond_loss pushes mse_cond < mse_null, i.e. conditioning
+                # must actively improve over the null prediction.
+                mse_null = calc_mse_loss_precomputed_sq(clean_anomaly_rel ** 2, self._ref_ds.lats)
+                mse_cond = calc_mse_loss(pred_anomaly_cond, clean_anomaly_rel, self._ref_ds.lats)
+                cond_loss = torch.relu(0.01 + mse_cond - mse_null)
+
+                # ── Diagnostics ───────────────────────────────────────────────
                 anom_signal = clean_anomaly.abs().mean().detach()
-                anom_error  = (pred_anomaly - clean_anomaly).abs().mean().detach()
-                del clean_anomaly, pred_anomaly
+                anom_error  = (pred_anomaly_cond - clean_anomaly_rel).abs().mean().detach()
+                del clean_anomaly, pred_anomaly_cond, clean_anomaly_rel
 
-                # ── Scenario discrimination metric ────────────────────────────────────
+                # ── Scenario discrimination metric ────────────────────────────
                 # Mean pairwise L1 distance between per-scenario mean x0 predictions.
-                if scenario_ids is not None and has_cond:
-                    conditioned_preds = pred_original_sample[~drop_mask]
-                    conditioned_ids   = scenario_ids[~drop_mask]
-                    unique_scenarios  = conditioned_ids.unique()
+                # Positive only if conditioning produces scenario-specific outputs.
+                if scenario_ids is not None:
+                    unique_scenarios = scenario_ids.unique()
                     if len(unique_scenarios) >= 2:
+                        # Recompute pred_x0_cond for scen_disc (already freed above)
+                        # Use model_output which still has grad — detach for metric only
+                        pred_x0_scen = self.get_original_sample(
+                            noisy_samples, model_output.detach(), timesteps
+                        )
                         scenario_means = []
                         for sid in unique_scenarios:
-                            mask_s = conditioned_ids == sid
+                            mask_s = scenario_ids == sid
                             if mask_s.sum() > 0:
-                                scenario_means.append(conditioned_preds[mask_s].mean(dim=0))
+                                scenario_means.append(pred_x0_scen[mask_s].mean(dim=0))
+                        del pred_x0_scen
                         if len(scenario_means) >= 2:
                             n = len(scenario_means)
                             pair_dists = [
@@ -537,21 +489,13 @@ class UNetTrainer:
                         scen_disc = torch.zeros(1, device=self.device)
                 else:
                     scen_disc = torch.zeros(1, device=self.device)
-                del pred_original_sample
-            else:
-                cond_loss = torch.zeros(1, device=self.device)
-                anom_error =  torch.zeros(1, device=self.device)
-                anom_signal =  torch.zeros(1, device=self.device)
-                cond_sensitivity =  torch.zeros(1, device=self.device)
-                scen_disc = torch.zeros(1, device=self.device)
 
-            # ── Scenario discrimination metric ────────────────────────────────
-            # Measures whether the model's x0 predictions differ systematically
-            # between emission scenarios.  If the model ignores conditioning, all
-            # scenario means will be identical → SCEN_DISC ≈ 0.
-            # Computed only when scenario_ids are provided AND conditioning is on.
-            # Uses pred_original_sample from the conditioned (non-dropped) samples.
-            # (Computed inline above when cond_loss_scaling > 0; else stays 0.0)
+            else:
+                cond_loss      = torch.zeros(1, device=self.device)
+                anom_error     = torch.zeros(1, device=self.device)
+                anom_signal    = torch.zeros(1, device=self.device)
+                cond_sensitivity = torch.zeros(1, device=self.device)
+                scen_disc      = torch.zeros(1, device=self.device)
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = mse_loss + cond_loss * self.cond_loss_scaling
