@@ -552,17 +552,17 @@ class ClimateDataset(Dataset):
         raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: -1})
         raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
 
-        coord_vals = self.raw_cond[self.time_dim].values
+        coord_vals = raw_cond[self.time_dim].values
         if hasattr(coord_vals[0], 'year'):
             # cftime or datetime64 objects: extract integer year and isel by mask
             year_ints = [int(str(v)[:4]) for v in coord_vals]
             mask = [y in selected_years for y in year_ints]
-            self.raw_cond = self.raw_cond.isel({self.time_dim: mask})
+            raw_cond = raw_cond.isel({self.time_dim: mask})
         else:
             # Integer year coordinate — intersect with what's in the file
             available = set(int(v) for v in coord_vals)
             valid = sorted(selected_years & available)
-            self.raw_cond = self.raw_cond.sel({self.time_dim: valid})
+            raw_cond = raw_cond.sel({self.time_dim: valid})
 
         #print("WAR CONG")
         #print(raw_cond)
