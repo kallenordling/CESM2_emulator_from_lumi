@@ -385,6 +385,7 @@ def main():
     # ── load model ─────────────────────────────────────────────────────────
     ckpt_path = find_latest_checkpoint(args.runs_dir)
     model, pca_state = load_model(ckpt_path, CONFIG_PATH, device)
+    model = model.to(dtype)   # match input dtype to avoid bf16/float32 mismatch
     print(f"[PCA] {'Found in checkpoint' if pca_state else 'None — no PCA projection'}")
 
     pca_cond   = pca_state.get("cond")   if pca_state else None
