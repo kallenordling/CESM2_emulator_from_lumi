@@ -379,7 +379,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype  = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    dtype  = torch.float32  # float32 avoids dtype conflicts in SinusoidalPosEmb
     print(f"[DEVICE] {device}  dtype={dtype}")
 
     # ── load model ─────────────────────────────────────────────────────────
