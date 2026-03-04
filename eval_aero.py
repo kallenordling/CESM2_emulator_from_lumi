@@ -208,7 +208,7 @@ def generate_timeseries(
 
         with torch.no_grad():
             for step_idx, t_idx in enumerate(scheduler.timesteps):
-                t = scheduler.log_snr(steps[t_idx]).expand(B)
+                t = scheduler.log_snr(steps[t_idx]).expand(B).to(dtype)
                 pred = model(gen, t, cond_map=cond_b)
                 gen  = scheduler.step(pred, timestep=t_idx, sample=gen).prev_sample
 
