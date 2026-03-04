@@ -268,24 +268,47 @@ def compute_baseline(gmean: np.ndarray, years: np.ndarray,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_timeseries(results: dict, out_path: str):
-    """results[name] = dict(gen_anom, cesm_anom, gen_years, cesm_years, color)"""
-    fig, ax = plt.subplots(figsize=(12, 5))
+    """results[name] = dict(gen_anom, cesm_anom, gen_years, cesm_years, color)
+
+    Top panel : anomaly time series — model (solid) vs CESM2 member (dashed)
+    Bottom panel : bias = model − CESM2 on common years
+    """
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(12, 8), sharex=True,
+        gridspec_kw={"height_ratios": [2, 1]},
+    )
 
     for name, d in results.items():
         c = d["color"]
-        ax.plot(d["gen_years"],  d["gen_anom"],
-                color=c, lw=1.8, label=f"{name} (model)")
+        ax_top.plot(d["gen_years"], d["gen_anom"],
+                    color=c, lw=1.8, label=f"{name} (model)")
         if d.get("cesm_anom") is not None:
-            ax.plot(d["cesm_years"], d["cesm_anom"],
-                    color=c, lw=1.0, ls="--", alpha=0.6, label=f"{name} (CESM2)")
+            ax_top.plot(d["cesm_years"], d["cesm_anom"],
+                        color=c, lw=1.0, ls="--", alpha=0.6, label=f"{name} (CESM2 member)")
 
-    ax.axhline(0, color="k", lw=0.6, ls=":")
-    ax.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline")
-    ax.set_xlabel("Year")
-    ax.set_ylabel("TREFHT anomaly (°C)")
-    ax.set_title("Global-mean temperature anomaly vs 1850–1900\n(model solid, CESM2 dashed)")
-    ax.legend(fontsize=8, ncol=2)
-    ax.grid(True, alpha=0.25)
+            # difference on common years
+            common, idx_gen, idx_cs = np.intersect1d(
+                d["gen_years"], d["cesm_years"], return_indices=True
+            )
+            diff = d["gen_anom"][idx_gen] - d["cesm_anom"][idx_cs]
+            ax_bot.plot(common, diff, color=c, lw=1.5, label=name)
+            ax_bot.fill_between(common, diff, alpha=0.12, color=c)
+
+    ax_top.axhline(0, color="k", lw=0.6, ls=":")
+    ax_top.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline period")
+    ax_top.set_ylabel("TREFHT anomaly (°C)")
+    ax_top.set_title("Global-mean temperature anomaly vs 1850–1900\n(model solid, CESM2 single member dashed)")
+    ax_top.legend(fontsize=8, ncol=2)
+    ax_top.grid(True, alpha=0.25)
+
+    ax_bot.axhline(0, color="k", lw=0.9)
+    ax_bot.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12)
+    ax_bot.set_xlabel("Year")
+    ax_bot.set_ylabel("Bias: model − CESM2 (°C)")
+    ax_bot.set_title("Model bias relative to CESM2 single member")
+    ax_bot.legend(fontsize=8, ncol=2)
+    ax_bot.grid(True, alpha=0.25)
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -306,6 +329,11 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
 
     gen_data    : (T, H, W) generated temperature [°C]
     baseline_map: (H, W)    time-mean over 1850-1900 from hist
+
+    Rows:
+      0 — Model anomaly  (re 1850-1900)
+      1 — CESM2 anomaly  (re 1850-1900)   [only if cesm_data provided]
+      2 — Difference: Model − CESM2        [only if cesm_data provided]
     """
     try:
         import cartopy.crs as ccrs
@@ -314,9 +342,12 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     except ImportError:
         USE_CARTOPY = False
 
+    has_cesm = (cesm_data is not None) and (cesm_years is not None)
     n_cols = len(map_years)
-    n_rows = 2 if (cesm_data is not None) else 1
-    row_labels = ["Model"] + (["CESM2"] if n_rows == 2 else [])
+    n_rows = 3 if has_cesm else 1
+    row_labels = ["Model"]
+    if has_cesm:
+        row_labels += ["CESM2", "Model − CESM2"]
 
     fig, axes = plt.subplots(
         n_rows, n_cols,
@@ -325,34 +356,41 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
         squeeze=False,
     )
 
-    vmax = 4.0
+    vmax_anom = 4.0
+    vmax_diff = 2.0
     cmap = plt.cm.RdBu_r
-    norm = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax, vmax=vmax)
+    norm_anom = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_anom, vmax=vmax_anom)
+    norm_diff = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_diff, vmax=vmax_diff)
+
+    def _plot_panel(ax, data, norm, title):
+        if USE_CARTOPY:
+            im = ax.pcolormesh(LON, LAT, data, cmap=cmap, norm=norm,
+                               transform=ccrs.PlateCarree())
+            ax.add_feature(cfeature.COASTLINE, lw=0.5)
+        else:
+            im = ax.imshow(data, origin="lower", aspect="auto",
+                           cmap=cmap, norm=norm,
+                           extent=[0, 360, -90, 90])
+        ax.set_title(title, fontsize=9)
+        plt.colorbar(im, ax=ax, shrink=0.75, label="°C")
 
     for col, yr_target in enumerate(map_years):
         yr_gen  = _nearest_year(gen_years, yr_target)
         idx_gen = int(np.where(gen_years == yr_gen)[0][0])
         anom_gen = gen_data[idx_gen] - baseline_map           # (H, W)
 
-        datasets = [(0, anom_gen, f"{name} model  ({yr_gen})")]
-        if cesm_data is not None and cesm_years is not None:
+        _plot_panel(axes[0, col], anom_gen, norm_anom,
+                    f"{name} model  ({yr_gen})")
+
+        if has_cesm:
             yr_cs  = _nearest_year(cesm_years, yr_target)
             idx_cs = int(np.where(cesm_years == yr_cs)[0][0])
             anom_cs = cesm_data[idx_cs] - baseline_map
-            datasets.append((1, anom_cs, f"{name} CESM2  ({yr_cs})"))
 
-        for row, anom, title in datasets:
-            ax = axes[row, col]
-            if USE_CARTOPY:
-                im = ax.pcolormesh(LON, LAT, anom, cmap=cmap, norm=norm,
-                                   transform=ccrs.PlateCarree())
-                ax.add_feature(cfeature.COASTLINE, lw=0.5)
-            else:
-                im = ax.imshow(anom, origin="lower", aspect="auto",
-                               cmap=cmap, norm=norm,
-                               extent=[0, 360, -90, 90])
-            ax.set_title(title, fontsize=9)
-            plt.colorbar(im, ax=ax, shrink=0.75, label="°C")
+            _plot_panel(axes[1, col], anom_cs, norm_anom,
+                        f"{name} CESM2  ({yr_cs})")
+            _plot_panel(axes[2, col], anom_gen - anom_cs, norm_diff,
+                        f"Model − CESM2  ({yr_gen})")
 
     for row, label in enumerate(row_labels):
         axes[row, 0].set_ylabel(label, fontsize=10)
