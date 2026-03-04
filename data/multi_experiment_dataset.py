@@ -47,7 +47,7 @@ import torch
 from torch.utils.data import Dataset
 from accelerate import Accelerator
 
-from data.climate_dataset import ClimateDataset
+from data.climate_dataset import ClimateDataset, StratifiedPeriodSampler
 
 
 # ---------------------------------------------------------------------------
@@ -256,32 +256,30 @@ class MultiExperimentDataLoader:
         accelerator: Accelerator,
         batch_size: int,
         mix_scenarios: bool = True,
+        stratified: bool = False,
+        period_boundaries: tuple = (1950, 2020),
         steps_per_realization: Optional[int] = None,
         **dataloader_kwargs: Any,
     ):
         self.dataset = dataset
         self.accelerator = accelerator
         self.mix_scenarios = mix_scenarios
+        self.stratified = stratified
+        self.period_boundaries = period_boundaries
         self.steps_per_realization = steps_per_realization
         self.dataloader_kwargs = dataloader_kwargs
         self.n_exp = dataset.n_experiments
 
         if mix_scenarios and batch_size % self.n_exp != 0:
             batch_size = (batch_size // self.n_exp) * self.n_exp
-            #print(
-            #    f"[MULTI] batch_size rounded down to {batch_size} "
-            #    f"(must be divisible by n_experiments={self.n_exp})"
-            #)
         self.batch_size = batch_size
         self.per_exp = batch_size // self.n_exp if mix_scenarios else batch_size
 
-        #print(
-        #    f"[MULTI] DataLoader ready  "
-        #    f"batch_size={batch_size}  "
-        #    f"mix_scenarios={mix_scenarios}  "
-        #    f"per_exp={self.per_exp}  "
-        #    f"n_exp={self.n_exp}"
-        #)
+        if stratified:
+            print(
+                f"[MULTI] Stratified period sampling enabled  "
+                f"boundaries={period_boundaries}"
+            )
 
     # ------------------------------------------------------------------
 
@@ -328,42 +326,140 @@ class MultiExperimentDataLoader:
     # ------------------------------------------------------------------
 
     def _generate_mixed(self):
-        """Yield cross-scenario batches from the current window pool."""
-        # Build per-experiment window index arrays
+        """Yield cross-scenario batches from the current window pool.
+
+        When ``stratified=True`` each batch is assembled so that every
+        period (historical / present / future) is represented equally
+        across all experiments.  Concretely, for n_exp=4 and per_exp=4:
+
+            batch = [hist_exp0, hist_exp1, hist_exp2, hist_exp3,
+                     pres_exp0, pres_exp1, pres_exp2, pres_exp3,
+                     fut_exp0,  fut_exp1,  fut_exp2,  fut_exp3]  (shuffled)
+
+        This guarantees the conditioning encoder sees large emission
+        contrasts (across both scenarios AND time periods) in every step.
+
+        When ``stratified=False`` (default) the original uniform-random
+        behaviour is preserved.
+        """
+        device = self.accelerator.device
+
+        if self.stratified:
+            yield from self._generate_mixed_stratified(device)
+        else:
+            yield from self._generate_mixed_uniform(device)
+
+    def _generate_mixed_uniform(self, device):
+        """Original uniform-random mixed batches."""
         index_pools: list[np.ndarray] = []
         for exp_idx in range(self.n_exp):
             flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
             shuffled = np.random.permutation(flat_idx)
             index_pools.append(shuffled)
 
-        # Number of full batches is limited by the smallest pool
         n_batches = min(len(pool) for pool in index_pools) // self.per_exp
         if self.steps_per_realization is not None:
             n_batches = min(n_batches, self.steps_per_realization)
-
         if n_batches == 0:
-            #print(
-            #    f"[MULTI] WARNING: not enough windows for a full mixed batch "
-            #    f"(per_exp={self.per_exp}).  Skipping realization step."
-            #)
             return
-
-        device = self.accelerator.device
 
         for b in range(n_batches):
             s, e = b * self.per_exp, (b + 1) * self.per_exp
             batch_flat: list[int] = []
             for pool in index_pools:
                 batch_flat.extend(pool[s:e].tolist())
-
-            # Shuffle so scenarios are interleaved within the batch
             random.shuffle(batch_flat)
 
-            samples = [self.dataset[i] for i in batch_flat]
+            samples    = [self.dataset[i] for i in batch_flat]
             x_batch    = torch.stack([s[0] for s in samples]).to(device)
             cond_batch = torch.stack([s[1] for s in samples]).to(device)
             ids_batch  = torch.stack([s[2] for s in samples]).to(device)
+            yield x_batch, cond_batch, ids_batch
 
+    def _generate_mixed_stratified(self, device):
+        """Period-stratified mixed batches.
+
+        For each experiment, build a StratifiedPeriodSampler and get its
+        per-period index arrays.  Then zip them across experiments so that
+        each batch slot [period, exp] draws one window — guaranteeing
+        every batch sees all periods × all scenarios.
+
+        Batch layout (per_period = per_exp // 3, n_exp experiments):
+            [hist × n_exp | present × n_exp | future × n_exp]  shuffled
+        """
+        # per_exp must be divisible by 3 for equal period coverage
+        per_exp = self.per_exp
+        if per_exp % 3 != 0:
+            per_exp = (per_exp // 3) * 3
+            if per_exp == 0:
+                print("[MULTI] WARNING: per_exp < 3, falling back to uniform sampling")
+                yield from self._generate_mixed_uniform(device)
+                return
+
+        per_period_per_exp = per_exp // 3  # samples per (period, experiment) slot
+
+        # Build one sampler per experiment using the currently loaded data
+        samplers: list[StratifiedPeriodSampler] = []
+        for exp_idx, ds in enumerate(self.dataset.datasets):
+            samp = StratifiedPeriodSampler(
+                ds,
+                batch_size=per_exp,           # batch_size only used for per_period calc
+                period_boundaries=self.period_boundaries,
+                shuffle=True,
+            )
+            samp._build_indices()
+            samplers.append(samp)
+
+        # Check all experiments have all three periods
+        if any(s._hist_idx is None for s in samplers):
+            print("[MULTI] WARNING: some experiments missing a period — falling back to uniform")
+            yield from self._generate_mixed_uniform(device)
+            return
+
+        # Offset arrays: sampler indices are local (window_idx), need flat
+        offsets = [self.dataset._index._offsets[i] for i in range(self.n_exp)]
+
+        def sample_period(arr: np.ndarray, n: int) -> np.ndarray:
+            arr = np.random.permutation(arr)
+            if len(arr) < n:
+                arr = np.tile(arr, (n // len(arr) + 1))
+            return arr[:n]
+
+        # How many batches can we make? Limited by smallest period across all experiments
+        n_batches = min(
+            min(len(s._hist_idx), len(s._pres_idx), len(s._fut_idx))
+            for s in samplers
+        ) // per_period_per_exp
+
+        if self.steps_per_realization is not None:
+            n_batches = min(n_batches, self.steps_per_realization)
+
+        if n_batches == 0:
+            print("[MULTI] WARNING: not enough stratified windows — falling back to uniform")
+            yield from self._generate_mixed_uniform(device)
+            return
+
+        # Pre-draw shuffled indices for all experiments and periods
+        h_pools = [sample_period(s._hist_idx, n_batches * per_period_per_exp) for s in samplers]
+        p_pools = [sample_period(s._pres_idx, n_batches * per_period_per_exp) for s in samplers]
+        f_pools = [sample_period(s._fut_idx,  n_batches * per_period_per_exp) for s in samplers]
+
+        for b in range(n_batches):
+            sl = slice(b * per_period_per_exp, (b + 1) * per_period_per_exp)
+            batch_flat: list[int] = []
+            for exp_idx in range(self.n_exp):
+                offset = offsets[exp_idx]
+                # Convert local window indices → flat dataset indices
+                batch_flat.extend((h_pools[exp_idx][sl] + offset).tolist())
+                batch_flat.extend((p_pools[exp_idx][sl] + offset).tolist())
+                batch_flat.extend((f_pools[exp_idx][sl] + offset).tolist())
+
+            random.shuffle(batch_flat)
+
+            samples    = [self.dataset[i] for i in batch_flat]
+            x_batch    = torch.stack([s[0] for s in samples]).to(device)
+            cond_batch = torch.stack([s[1] for s in samples]).to(device)
+            ids_batch  = torch.stack([s[2] for s in samples]).to(device)
             yield x_batch, cond_batch, ids_batch
 
     # ------------------------------------------------------------------
@@ -407,6 +503,8 @@ def build_multi_experiment_loader(
     accelerator: Accelerator,
     batch_size: int,
     mix_scenarios: bool = True,
+    stratified: bool = False,
+    period_boundaries: tuple = (1950, 2020),
     steps_per_realization: Optional[int] = None,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
@@ -507,5 +605,7 @@ def build_multi_experiment_loader(
         accelerator,
         batch_size=batch_size,
         mix_scenarios=mix_scenarios,
+        stratified=stratified,
+        period_boundaries=period_boundaries,
         steps_per_realization=steps_per_realization,
     )
