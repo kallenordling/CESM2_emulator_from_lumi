@@ -146,8 +146,8 @@ class UNetTrainer:
         #   well it shrinks back toward the floor.
         self.cond_loss_scaling = 0.0  # always start silent
         self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
-        self.cond_ramp_epochs   = 10  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
-        self.cond_max_scaling   = 0.1 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
+        self.cond_ramp_epochs   = 30  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
+        self.cond_max_scaling   = 0.2 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
         # Eliminates the expensive second out_null forward pass.
         self.cfg_drop_prob = getattr(self, "cfg_drop_prob", 0.1)
