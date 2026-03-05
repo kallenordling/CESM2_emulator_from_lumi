@@ -106,7 +106,7 @@ LON  = np.linspace(0, 360, 288)
 
 def find_latest_checkpoint(runs_dir: str) -> str:
     """Return path to the highest-epoch checkpoint in runs_dir."""
-    pattern = os.path.join(runs_dir, "run_multi_experiment_*.pt")
+    pattern = os.path.join(runs_dir, "run_multi_experiment2_*.pt")
     paths = glob.glob(pattern)
     if not paths:
         raise FileNotFoundError(f"No checkpoints found in {runs_dir}")
