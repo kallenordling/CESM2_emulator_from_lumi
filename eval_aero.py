@@ -495,8 +495,11 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runs-dir",   default=RUNS_DIR)
-    parser.add_argument("--output-dir", default="eval_output")
+    parser.add_argument("--runs-dir",    default=RUNS_DIR)
+    parser.add_argument("--checkpoint",  default=None,
+                        help="Path to a specific checkpoint file. "
+                             "Overrides --runs-dir / find_latest_checkpoint.")
+    parser.add_argument("--output-dir",  default="eval_output")
     parser.add_argument("--sample-steps", type=int, default=SAMPLE_STEPS)
     parser.add_argument("--batch-size",   type=int, default=BATCH_SIZE)
     args = parser.parse_args()
@@ -508,7 +511,7 @@ def main():
     print(f"[DEVICE] {device}  dtype={dtype}")
 
     # ── load model ─────────────────────────────────────────────────────────
-    ckpt_path = find_latest_checkpoint(args.runs_dir)
+    ckpt_path = args.checkpoint if args.checkpoint else find_latest_checkpoint(args.runs_dir)
     model, pca_state = load_model(ckpt_path, CONFIG_PATH, device)
     model = model.to(dtype)   # match input dtype to avoid bf16/float32 mismatch
     print(f"[PCA] {'Found in checkpoint' if pca_state else 'None — no PCA projection'}")
