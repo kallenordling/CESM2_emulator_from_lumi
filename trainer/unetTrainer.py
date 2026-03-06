@@ -144,8 +144,9 @@ class UNetTrainer:
         #   model output).  If the model is ignoring conditioning
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
-        self.val_loader = None        # set externally in main_aero.py
-        self.val_every  = 10          # evaluate held-out members every N epochs
+        self.val_loader    = None        # set externally in main_aero.py
+        self.val_every     = 10          # evaluate held-out members every N epochs
+        self.best_val_skill = -float("inf")  # tracks best VAL/Skill for auto-save
 
         self.cond_loss_scaling = 0.0  # always start silent
         self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
@@ -447,6 +448,29 @@ class UNetTrainer:
         }
         self.accelerator.log(log_dict, step=self.global_step)
         self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
+
+        # ── Auto-save best checkpoint ──────────────────────────────────────
+        if val_skill > self.best_val_skill and self.accelerator.is_main_process:
+            self.best_val_skill = val_skill
+            if self.save_name is not None:
+                base = self.save_name.split(".pt")[0]
+                best_path = os.path.join(self.save_dir, f"{base}_best.pt")
+                torch.save(
+                    {
+                        "EMA":               self.ema_model.ema_model.state_dict(),
+                        "Unet":              self.accelerator.unwrap_model(self.model).state_dict(),
+                        "Optimizer":         self.optimizer.state_dict(),
+                        "Global Step":       self.global_step,
+                        "cond_loss_scaling": self.cond_loss_scaling,
+                        "best_val_skill":    val_skill,
+                        "best_epoch":        epoch,
+                    },
+                    best_path,
+                    _use_new_zipfile_serialization=False,
+                )
+                self.accelerator.print(
+                    f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
+                )
 
         self.ema_model.ema_model.train()
 
@@ -770,6 +794,11 @@ class UNetTrainer:
         # Restore conditioning scale so resume doesn't restart warmup from 0
         self.cond_loss_scaling = checkpoint.get("cond_loss_scaling", 0.0)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}")
+
+        # Restore best val skill so a resumed run doesn't overwrite a better checkpoint
+        if "best_val_skill" in checkpoint:
+            self.best_val_skill = checkpoint["best_val_skill"]
+            print(f"[INFO] Restored best_val_skill={self.best_val_skill:.4f} (epoch {checkpoint.get('best_epoch', '?')})")
 
         # Avoid ZeroDivisionError if dataloader not yet initialized
         steps_per_epoch_accum = self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
