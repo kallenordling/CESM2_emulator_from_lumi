@@ -1,5 +1,7 @@
 import os
 import random
+import subprocess
+import sys
 from typing import Any, Callable
 
 import torch
@@ -449,7 +451,7 @@ class UNetTrainer:
         self.accelerator.log(log_dict, step=self.global_step)
         self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
 
-        # ── Auto-save best checkpoint ──────────────────────────────────────
+        # ── Auto-save best checkpoint & trigger evaluation ────────────────
         if val_skill > self.best_val_skill and self.accelerator.is_main_process:
             self.best_val_skill = val_skill
             if self.save_name is not None:
@@ -471,8 +473,36 @@ class UNetTrainer:
                 self.accelerator.print(
                     f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
                 )
+                self._spawn_eval(best_path, epoch)
 
         self.ema_model.ema_model.train()
+
+    def _spawn_eval(self, checkpoint_path: str, epoch: int) -> None:
+        """Launch eval_aero.py as a non-blocking subprocess after saving best model."""
+        eval_script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "eval_aero.py",
+        )
+        output_dir = os.path.join(
+            os.path.dirname(checkpoint_path),
+            "..", "eval_output", f"best_ep{epoch:04d}",
+        )
+        output_dir = os.path.normpath(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        cmd = [
+            sys.executable, eval_script,
+            "--checkpoint",   checkpoint_path,
+            "--output-dir",   output_dir,
+            "--sample-steps", "50",
+            "--batch-size",   "16",
+        ]
+        log_path = os.path.join(output_dir, "eval.log")
+        log_fh = open(log_path, "w")
+        subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh, close_fds=True)
+        self.accelerator.print(
+            f"  [EVAL] Spawned eval_aero.py for epoch {epoch} → {output_dir}"
+        )
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
