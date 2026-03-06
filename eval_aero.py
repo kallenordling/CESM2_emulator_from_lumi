@@ -264,6 +264,93 @@ def compute_baseline(gmean: np.ndarray, years: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NetCDF output
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_netcdf(
+    name: str,
+    gen_celsius: np.ndarray,
+    gen_years: np.ndarray,
+    baseline_map: np.ndarray,
+    cesm_data: np.ndarray | None,
+    cesm_years: np.ndarray | None,
+    out_path: str,
+    ckpt_path: str,
+):
+    """Save model output (and optionally CESM2 reference) to a NetCDF file.
+
+    Variables written
+    -----------------
+    TREFHT_model       (year, lat, lon)  — absolute temperature [°C]
+    TREFHT_model_anom  (year, lat, lon)  — anomaly re 1850-1900 baseline [°C]
+    TREFHT_model_gmean (year,)           — area-weighted global mean [°C]
+    TREFHT_model_gmean_anom (year,)      — global-mean anomaly [°C]
+    baseline_map       (lat, lon)        — 1850-1900 climatology used [°C]
+
+    If cesm_data is provided, also writes:
+    TREFHT_cesm        (cesm_year, lat, lon)
+    TREFHT_cesm_anom   (cesm_year, lat, lon)
+    TREFHT_cesm_gmean  (cesm_year,)
+    TREFHT_cesm_gmean_anom (cesm_year,)
+    """
+    coords_model = {"year": gen_years, "lat": LAT, "lon": LON}
+
+    w = np.cos(np.deg2rad(LAT))[:, np.newaxis]
+    w = w / w.mean()
+    gmean_model      = (gen_celsius * w).mean(axis=(-2, -1))
+    bl_scalar        = float((baseline_map * w).mean())
+    anom_model       = gen_celsius - baseline_map          # (T, H, W)
+    gmean_model_anom = gmean_model - bl_scalar
+
+    ds = xr.Dataset(
+        {
+            "TREFHT_model": xr.DataArray(
+                gen_celsius, dims=["year", "lat", "lon"], coords=coords_model,
+                attrs={"units": "degC", "long_name": "Model TREFHT"}),
+            "TREFHT_model_anom": xr.DataArray(
+                anom_model, dims=["year", "lat", "lon"], coords=coords_model,
+                attrs={"units": "degC", "long_name": "Model TREFHT anomaly re 1850-1900"}),
+            "TREFHT_model_gmean": xr.DataArray(
+                gmean_model, dims=["year"], coords={"year": gen_years},
+                attrs={"units": "degC", "long_name": "Model global-mean TREFHT"}),
+            "TREFHT_model_gmean_anom": xr.DataArray(
+                gmean_model_anom, dims=["year"], coords={"year": gen_years},
+                attrs={"units": "degC", "long_name": "Model global-mean TREFHT anomaly re 1850-1900"}),
+            "baseline_map": xr.DataArray(
+                baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
+                attrs={"units": "degC", "long_name": "1850-1900 climatological mean"}),
+        },
+        attrs={
+            "experiment":  name,
+            "checkpoint":  os.path.basename(ckpt_path),
+            "baseline":    f"{BASELINE_START}-{BASELINE_END}",
+            "description": "CESM2 aerosol emulator evaluation output",
+        },
+    )
+
+    if cesm_data is not None and cesm_years is not None:
+        coords_cesm = {"cesm_year": cesm_years, "lat": LAT, "lon": LON}
+        gmean_cesm      = (cesm_data * w).mean(axis=(-2, -1))
+        anom_cesm       = cesm_data - baseline_map
+        gmean_cesm_anom = gmean_cesm - bl_scalar
+        ds["TREFHT_cesm"] = xr.DataArray(
+            cesm_data, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
+            attrs={"units": "degC", "long_name": "CESM2 TREFHT (single member)"})
+        ds["TREFHT_cesm_anom"] = xr.DataArray(
+            anom_cesm, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
+            attrs={"units": "degC", "long_name": "CESM2 TREFHT anomaly re 1850-1900"})
+        ds["TREFHT_cesm_gmean"] = xr.DataArray(
+            gmean_cesm, dims=["cesm_year"], coords={"cesm_year": cesm_years},
+            attrs={"units": "degC", "long_name": "CESM2 global-mean TREFHT"})
+        ds["TREFHT_cesm_gmean_anom"] = xr.DataArray(
+            gmean_cesm_anom, dims=["cesm_year"], coords={"cesm_year": cesm_years},
+            attrs={"units": "degC", "long_name": "CESM2 global-mean TREFHT anomaly re 1850-1900"})
+
+    ds.to_netcdf(out_path)
+    print(f"  → saved {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -498,6 +585,21 @@ def main():
             print(f"  CESM2: {cesm_years_exp[0]}–{cesm_years_exp[-1]}")
         except Exception as e:
             print(f"  CESM2 data not loaded: {e}")
+
+        # -- save NetCDF ---------------------------------------------------
+        if baseline_map is not None:
+            nc_out = os.path.join(args.output_dir, f"TREFHT_{name}.nc")
+            print(f"  Saving NetCDF …")
+            save_netcdf(
+                name         = name,
+                gen_celsius  = gen_celsius,
+                gen_years    = cond_years,
+                baseline_map = baseline_map,
+                cesm_data    = cesm_data_exp,
+                cesm_years   = cesm_years_exp,
+                out_path     = nc_out,
+                ckpt_path    = ckpt_path,
+            )
 
         # -- anomaly maps --------------------------------------------------
         if baseline_map is not None:
