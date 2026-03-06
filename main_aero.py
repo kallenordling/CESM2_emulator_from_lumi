@@ -59,6 +59,27 @@ def main(cfg: DictConfig) -> None:
         persistent_workers=True,
     )
 
+    # ── Build held-out validation dataset ───────────────────────────────────
+    val_set = None
+    if data_cfg.get("val_experiment_configs") is not None:
+        val_set = build_multi_experiment_loader(
+            experiment_configs=OmegaConf.to_container(data_cfg.val_experiment_configs, resolve=True),
+            accelerator=accelerator,
+            batch_size=data_cfg.batch_size,
+            mix_scenarios=data_cfg.get("mix_scenarios", True),
+            steps_per_realization=data_cfg.get("steps_per_realization", None),
+            seq_len=data_cfg.seq_len,
+            target_vars=OmegaConf.to_container(data_cfg.target_vars, resolve=True),
+            cond_vars=OmegaConf.to_container(data_cfg.cond_vars, resolve=True),
+            n_components_target=data_cfg.get("n_components_target", None),
+            n_components_cond=data_cfg.get("n_components_cond", None),
+            num_workers=2,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+        if accelerator.is_main_process:
+            logger.info(f"Validation set: {val_set.dataset.scenario_names} (1 held-out member each)")
+
     if accelerator.is_main_process:
         logger.info(f"Dataset loaded. Creating model: {cfg.model._target_}")
 
@@ -75,6 +96,7 @@ def main(cfg: DictConfig) -> None:
         accelerator=accelerator,
         scheduler=scheduler,
     )
+    trainer.val_loader = val_set
 
     if accelerator.is_main_process:
         print("\n" + "=" * 70)

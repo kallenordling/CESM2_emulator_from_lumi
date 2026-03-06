@@ -51,7 +51,7 @@ experiment_configs:
       - LE2-1171.009
       - LE2-1181.010
       - LE2-1191.010
-      - LE2-1231.001
+      # LE2-1231.001 held out for validation
 
   - scenario_name: ssp370
     time_dim: time
@@ -78,7 +78,7 @@ experiment_configs:
       - LE2-1171.009
       - LE2-1181.010
       - LE2-1191.010
-      - LE2-1231.001
+      # LE2-1231.001 held out for validation
 
   - scenario_name: aaer
     time_dim: time
@@ -94,7 +94,7 @@ experiment_configs:
       - "007"
       - "008"
       - "009"
-      - "010"
+      # "010" held out for validation
 
   - scenario_name: ghg
     time_dim: time
@@ -110,4 +110,35 @@ experiment_configs:
       - "007"
       - "008"
       - "009"
+      # "010" held out for validation
+
+# ── Held-out validation members (never seen during training) ─────────────────
+val_experiment_configs:
+
+  - scenario_name: hist
+    time_dim: time
+    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/hist
+    cond_file: /scratch/project_462001112/emulator_data/emissions_hist_timefixed.nc
+    realizations:
+      - LE2-1231.001
+
+  - scenario_name: ssp370
+    time_dim: time
+    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/ssp370
+    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370_timefixed.nc
+    realizations:
+      - LE2-1231.001
+
+  - scenario_name: aaer
+    time_dim: time
+    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/AAER
+    cond_file: /scratch/project_462001112/emulator_data/emissions_aero_only_timefixed.nc
+    realizations:
+      - "010"
+
+  - scenario_name: ghg
+    time_dim: time
+    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/GHG
+    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only_timefixed.nc
+    realizations:
       - "010"

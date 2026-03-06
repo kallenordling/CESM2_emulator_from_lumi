@@ -144,6 +144,9 @@ class UNetTrainer:
         #   model output).  If the model is ignoring conditioning
         #   (sensitivity < target) the scale grows; if it's already responding
         #   well it shrinks back toward the floor.
+        self.val_loader = None        # set externally in main_aero.py
+        self.val_every  = 10          # evaluate held-out members every N epochs
+
         self.cond_loss_scaling = 0.0  # always start silent
         self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
         self.cond_ramp_epochs   = 30  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
@@ -335,6 +338,117 @@ class UNetTrainer:
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch})
+
+            # ── Held-out validation at end of epoch ───────────────────────
+            if epoch % self.val_every == 0:
+                self.eval_held_out(epoch)
+
+    @torch.no_grad()
+    def _compute_val_metrics(self, batch, cond_map, scenario_ids=None):
+        """Forward pass with EMA model — no backward, returns raw metric tensors."""
+        clean_samples = batch.to(self.weight_dtype)
+        noise = torch.randn_like(clean_samples)
+
+        if isinstance(self.scheduler, ContinuousDDPM):
+            timesteps = torch.rand(clean_samples.shape[0], device=self.device)
+            timesteps = self.scheduler.log_snr(timesteps)
+        else:
+            timesteps = torch.randint(
+                0, self.scheduler.config.num_train_timesteps,
+                (clean_samples.shape[0],), device=self.device,
+            ).long()
+
+        noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
+        ema_model = self.ema_model.ema_model
+
+        model_output = ema_model(noisy_samples, timesteps, cond_map=cond_map)
+
+        if self.scheduler.config.prediction_type == "v_prediction":
+            target = self.scheduler.get_velocity(clean_samples, noise, timesteps)
+        else:
+            target = noise
+
+        mse = calc_mse_loss(model_output, target, self._ref_ds.lats)
+
+        if self.cond_loss_scaling > 0 and self.climatology is not None:
+            null_cond   = torch.full_like(cond_map, -1.0)
+            null_output = ema_model(noisy_samples, timesteps, cond_map=null_cond)
+
+            pred_x0_cond = self.get_original_sample(noisy_samples, model_output, timesteps)
+            pred_x0_null = self.get_original_sample(noisy_samples, null_output, timesteps)
+
+            baseline     = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
+            true_anomaly = clean_samples - baseline
+            pred_anomaly = pred_x0_cond - pred_x0_null
+
+            cond_loss   = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
+            anom_signal = true_anomaly.abs().mean()
+            anom_error  = (pred_anomaly - true_anomaly).abs().mean()
+
+            scen_disc = torch.zeros(1, device=self.device)
+            if scenario_ids is not None:
+                unique_scenarios = scenario_ids.unique()
+                if len(unique_scenarios) >= 2:
+                    scenario_means = [
+                        pred_x0_cond[scenario_ids == sid].mean(dim=0)
+                        for sid in unique_scenarios
+                        if (scenario_ids == sid).sum() > 0
+                    ]
+                    if len(scenario_means) >= 2:
+                        n = len(scenario_means)
+                        pair_dists = [
+                            (scenario_means[i] - scenario_means[j]).abs().mean()
+                            for i in range(n) for j in range(i + 1, n)
+                        ]
+                        scen_disc = torch.stack(pair_dists).mean()
+        else:
+            cond_loss   = torch.zeros(1, device=self.device)
+            anom_signal = torch.zeros(1, device=self.device)
+            anom_error  = torch.zeros(1, device=self.device)
+            scen_disc   = torch.zeros(1, device=self.device)
+
+        return mse, cond_loss, anom_signal, anom_error, scen_disc
+
+    def eval_held_out(self, epoch: int) -> None:
+        """Evaluate EMA model on held-out members, log VAL/* metrics."""
+        if self.val_loader is None:
+            return
+
+        self.ema_model.ema_model.eval()
+
+        accum = {"mse": [], "cond": [], "signal": [], "error": [], "disc": []}
+
+        for batch_tuple in self.val_loader.generate():
+            if len(batch_tuple) == 3:
+                batch, cond, scenario_ids = batch_tuple
+            else:
+                batch, cond = batch_tuple
+                scenario_ids = None
+
+            mse, cond_l, sig, err, disc = self._compute_val_metrics(batch, cond, scenario_ids)
+
+            accum["mse"].append(self.accelerator.gather_for_metrics(mse).mean().item())
+            accum["cond"].append(self.accelerator.gather_for_metrics(cond_l).mean().item())
+            accum["signal"].append(self.accelerator.gather_for_metrics(sig).mean().item())
+            accum["error"].append(self.accelerator.gather_for_metrics(err).mean().item())
+            accum["disc"].append(self.accelerator.gather_for_metrics(disc).mean().item())
+
+        import numpy as _np
+        avg_sig   = _np.mean(accum["signal"])
+        avg_err   = _np.mean(accum["error"])
+        val_skill = float(1.0 - avg_err / (avg_sig + 1e-6))
+
+        log_dict = {
+            "VAL/MSE":         _np.mean(accum["mse"]),
+            "VAL/Skill":       val_skill,
+            "VAL/DISC":        _np.mean(accum["disc"]),
+            "VAL/ANOM_ERROR":  avg_err,
+            "VAL/ANOM_SIGNAL": avg_sig,
+        }
+        self.accelerator.log(log_dict, step=self.global_step)
+        self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
+
+        self.ema_model.ema_model.train()
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
