@@ -10,7 +10,7 @@ data_config: config_data.yaml
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 1
     device_placement: True
     sync_batchnorm: True
 
@@ -46,7 +46,7 @@ trainer:
     save_dir: runs/
     save_name: run_multi_experiment.pt
     load_path: 0 #/projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_multi_experiment_73.pt
-    lr: 0.00002
+    lr: 0.0002
     sample_steps: 250
     cfg_drop_prob: 0.1
 
