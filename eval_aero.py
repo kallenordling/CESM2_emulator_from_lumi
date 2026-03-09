@@ -94,6 +94,7 @@ BASELINE_START = 1850
 BASELINE_END   = 1900
 SAMPLE_STEPS   = 100          # fewer steps than training → faster inference
 BATCH_SIZE     = 16           # years per GPU batch
+N_ENSEMBLE     = 5            # diffusion samples per experiment
 COND_VARS      = ["CO2", "SUL"]
 TARGET_VAR     = "TREFHT"
 LAT  = np.linspace(-90, 90, 192)
@@ -186,14 +187,18 @@ def generate_timeseries(
     dtype: torch.dtype,
     sample_steps: int,
     batch_size: int = 16,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Diffusion sampling for every year in cond_tensor.
 
     Args:
         cond_tensor: (n_vars, T, H, W) normalised conditioning on CPU
+        seed: optional RNG seed for reproducible ensemble members
     Returns:
         numpy array (T, H, W) in *normalised* model output space
     """
+    if seed is not None:
+        torch.manual_seed(seed)
     _, T, H, W = cond_tensor.shape
     scheduler.set_timesteps(sample_steps)
     steps = torch.linspace(1.0, 0.0, sample_steps + 1, device=device)
@@ -269,7 +274,7 @@ def compute_baseline(gmean: np.ndarray, years: np.ndarray,
 
 def save_netcdf(
     name: str,
-    gen_celsius: np.ndarray,
+    gen_ensemble: np.ndarray,
     gen_years: np.ndarray,
     baseline_map: np.ndarray,
     cesm_data: np.ndarray | None,
@@ -278,56 +283,82 @@ def save_netcdf(
     ckpt_path: str,
     gen_baseline_map: np.ndarray | None = None,
 ):
-    """Save model output (and optionally CESM2 reference) to a NetCDF file.
+    """Save ensemble model output (and optionally CESM2 reference) to NetCDF.
 
     Variables written
     -----------------
-    TREFHT_model       (year, lat, lon)  — absolute temperature [°C]
-    TREFHT_model_anom  (year, lat, lon)  — anomaly re 1850-1900 baseline [°C]
-    TREFHT_model_gmean (year,)           — area-weighted global mean [°C]
-    TREFHT_model_gmean_anom (year,)      — global-mean anomaly [°C]
-    baseline_map       (lat, lon)        — 1850-1900 climatology used [°C]
+    TREFHT_model_mean          (year, lat, lon)  — ensemble mean [°C]
+    TREFHT_model_mean_anom     (year, lat, lon)  — ensemble mean anomaly [°C]
+    TREFHT_model_gmean_mean    (year,)           — ensemble mean global-mean [°C]
+    TREFHT_model_gmean_mean_anom (year,)         — ensemble mean global-mean anomaly [°C]
+    TREFHT_model_mN            (year, lat, lon)  — member N absolute [°C]
+    TREFHT_model_mN_anom       (year, lat, lon)  — member N anomaly [°C]
+    TREFHT_model_gmean_mN      (year,)           — member N global-mean [°C]
+    TREFHT_model_gmean_mN_anom (year,)           — member N global-mean anomaly [°C]
+    baseline_map               (lat, lon)        — 1850-1900 CESM2 climatology [°C]
+    TREFHT_model_baseline      (lat, lon)        — 1850-1900 model climatology [°C]
 
     If cesm_data is provided, also writes:
-    TREFHT_cesm        (cesm_year, lat, lon)
-    TREFHT_cesm_anom   (cesm_year, lat, lon)
-    TREFHT_cesm_gmean  (cesm_year,)
-    TREFHT_cesm_gmean_anom (cesm_year,)
+    TREFHT_cesm / _anom / _gmean / _gmean_anom
     """
-    coords_model = {"year": gen_years, "lat": LAT, "lon": LON}
+    N_ENS = gen_ensemble.shape[0]
+    gen_mean = gen_ensemble.mean(axis=0)           # (T, H, W) ensemble mean
 
+    coords_model = {"year": gen_years, "lat": LAT, "lon": LON}
     w = np.cos(np.deg2rad(LAT))[:, np.newaxis]
     w = w / w.mean()
-    gmean_model      = (gen_celsius * w).mean(axis=(-2, -1))
-    bl_scalar        = float((baseline_map * w).mean())
-    anom_model       = gen_celsius - baseline_map          # (T, H, W)
-    gmean_model_anom = gmean_model - bl_scalar
+    bl_scalar = float((baseline_map * w).mean())
+
+    anom_mean       = gen_mean - baseline_map
+    gmean_mean      = (gen_mean * w).mean(axis=(-2, -1))
+    gmean_mean_anom = gmean_mean - bl_scalar
 
     ds = xr.Dataset(
         {
-            "TREFHT_model": xr.DataArray(
-                gen_celsius, dims=["year", "lat", "lon"], coords=coords_model,
-                attrs={"units": "degC", "long_name": "Model TREFHT"}),
-            "TREFHT_model_anom": xr.DataArray(
-                anom_model, dims=["year", "lat", "lon"], coords=coords_model,
-                attrs={"units": "degC", "long_name": "Model TREFHT anomaly re 1850-1900"}),
-            "TREFHT_model_gmean": xr.DataArray(
-                gmean_model, dims=["year"], coords={"year": gen_years},
-                attrs={"units": "degC", "long_name": "Model global-mean TREFHT"}),
-            "TREFHT_model_gmean_anom": xr.DataArray(
-                gmean_model_anom, dims=["year"], coords={"year": gen_years},
-                attrs={"units": "degC", "long_name": "Model global-mean TREFHT anomaly re 1850-1900"}),
+            "TREFHT_model_mean": xr.DataArray(
+                gen_mean, dims=["year", "lat", "lon"], coords=coords_model,
+                attrs={"units": "degC", "long_name": f"Ensemble mean model TREFHT (N={N_ENS})"}),
+            "TREFHT_model_mean_anom": xr.DataArray(
+                anom_mean, dims=["year", "lat", "lon"], coords=coords_model,
+                attrs={"units": "degC", "long_name": "Ensemble mean TREFHT anomaly re 1850-1900"}),
+            "TREFHT_model_gmean_mean": xr.DataArray(
+                gmean_mean, dims=["year"], coords={"year": gen_years},
+                attrs={"units": "degC", "long_name": "Ensemble mean global-mean TREFHT"}),
+            "TREFHT_model_gmean_mean_anom": xr.DataArray(
+                gmean_mean_anom, dims=["year"], coords={"year": gen_years},
+                attrs={"units": "degC", "long_name": "Ensemble mean global-mean TREFHT anomaly re 1850-1900"}),
             "baseline_map": xr.DataArray(
                 baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
                 attrs={"units": "degC", "long_name": "1850-1900 climatological mean (CESM2)"}),
         },
         attrs={
-            "experiment":  name,
-            "checkpoint":  os.path.basename(ckpt_path),
-            "baseline":    f"{BASELINE_START}-{BASELINE_END}",
-            "description": "CESM2 aerosol emulator evaluation output",
+            "experiment":   name,
+            "checkpoint":   os.path.basename(ckpt_path),
+            "baseline":     f"{BASELINE_START}-{BASELINE_END}",
+            "n_ensemble":   N_ENS,
+            "description":  "CESM2 aerosol emulator evaluation output",
         },
     )
+
+    # ── per-member variables ──────────────────────────────────────────────────
+    for m in range(N_ENS):
+        mem = gen_ensemble[m]                          # (T, H, W)
+        anom_m      = mem - baseline_map
+        gmean_m     = (mem * w).mean(axis=(-2, -1))
+        gmean_m_anom = gmean_m - bl_scalar
+        tag = f"m{m + 1}"
+        ds[f"TREFHT_model_{tag}"] = xr.DataArray(
+            mem, dims=["year", "lat", "lon"], coords=coords_model,
+            attrs={"units": "degC", "long_name": f"Model TREFHT member {m + 1}"})
+        ds[f"TREFHT_model_{tag}_anom"] = xr.DataArray(
+            anom_m, dims=["year", "lat", "lon"], coords=coords_model,
+            attrs={"units": "degC", "long_name": f"Model TREFHT anomaly member {m + 1}"})
+        ds[f"TREFHT_model_gmean_{tag}"] = xr.DataArray(
+            gmean_m, dims=["year"], coords={"year": gen_years},
+            attrs={"units": "degC", "long_name": f"Global-mean TREFHT member {m + 1}"})
+        ds[f"TREFHT_model_gmean_{tag}_anom"] = xr.DataArray(
+            gmean_m_anom, dims=["year"], coords={"year": gen_years},
+            attrs={"units": "degC", "long_name": f"Global-mean TREFHT anomaly member {m + 1}"})
 
     if gen_baseline_map is not None:
         ds["TREFHT_model_baseline"] = xr.DataArray(
@@ -374,13 +405,24 @@ def plot_timeseries(results: dict, out_path: str):
 
     for name, d in results.items():
         c = d["color"]
+        gen_anom_ens  = d["gen_anom_ens"]            # (N_ENS, T)
+        gen_anom_mean = gen_anom_ens.mean(axis=0)    # (T,)
 
-        da_gen = xr.DataArray(
-            d["gen_anom"], dims=["year"],
+        # individual ensemble members — thin, semi-transparent
+        for m in range(gen_anom_ens.shape[0]):
+            da_m = xr.DataArray(
+                gen_anom_ens[m], dims=["year"],
+                coords={"year": d["gen_years"]},
+            )
+            da_m.plot.line(ax=ax_top, color=c, lw=0.7, alpha=0.35)
+
+        # ensemble mean — thick solid line with legend entry
+        da_mean = xr.DataArray(
+            gen_anom_mean, dims=["year"],
             coords={"year": d["gen_years"]},
             attrs={"long_name": "TREFHT anomaly", "units": "°C"},
         )
-        da_gen.plot.line(ax=ax_top, color=c, lw=1.8, label=f"{name} (model)")
+        da_mean.plot.line(ax=ax_top, color=c, lw=2.0, label=f"{name} (model mean)")
 
         if d.get("cesm_anom") is not None:
             da_cesm = xr.DataArray(
@@ -394,13 +436,17 @@ def plot_timeseries(results: dict, out_path: str):
             common, idx_gen, idx_cs = np.intersect1d(
                 d["gen_years"], d["cesm_years"], return_indices=True
             )
-            diff = d["gen_anom"][idx_gen] - d["cesm_anom"][idx_cs]
+            # bias: ensemble mean vs CESM2
+            diff_mean = gen_anom_mean[idx_gen] - d["cesm_anom"][idx_cs]
             da_diff = xr.DataArray(
-                diff, dims=["year"], coords={"year": common},
+                diff_mean, dims=["year"], coords={"year": common},
                 attrs={"long_name": "Model − CESM2", "units": "°C"},
             )
             da_diff.plot.line(ax=ax_bot, color=c, lw=1.5, label=name)
-            ax_bot.fill_between(common, diff, alpha=0.12, color=c)
+            # shade ensemble spread around bias
+            diff_min = gen_anom_ens[:, idx_gen].min(axis=0) - d["cesm_anom"][idx_cs]
+            diff_max = gen_anom_ens[:, idx_gen].max(axis=0) - d["cesm_anom"][idx_cs]
+            ax_bot.fill_between(common, diff_min, diff_max, alpha=0.12, color=c)
 
     ax_top.axhline(0, color="k", lw=0.6, ls=":")
     ax_top.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline period")
@@ -595,17 +641,23 @@ def main():
         print(f"  Conditioning: {cond_years[0]}–{cond_years[-1]}"
               f"  shape={tuple(cond_tensor.shape)}")
 
-        # -- generation ----------------------------------------------------
-        print(f"  Generating {len(cond_years)} years "
-              f"(batch={args.batch_size}, steps={args.sample_steps}) …")
-        gen_norm = generate_timeseries(
-            model, scheduler, cond_tensor,
-            device, dtype, args.sample_steps, args.batch_size,
-        )
-        # denormalise: DENORM_FN["TREFHT"] = lambda x: x * 21.0 + 4.5
-        gen_celsius = gen_norm * 21.0 + 4.5          # (T, H, W)
+        # -- generation: ensemble of N_ENSEMBLE members ----------------------
+        print(f"  Generating ensemble of {N_ENSEMBLE} members "
+              f"({len(cond_years)} years each, "
+              f"batch={args.batch_size}, steps={args.sample_steps}) …")
+        members = []
+        for m in range(N_ENSEMBLE):
+            print(f"    member {m + 1}/{N_ENSEMBLE} …")
+            gen_norm = generate_timeseries(
+                model, scheduler, cond_tensor,
+                device, dtype, args.sample_steps, args.batch_size, seed=m,
+            )
+            members.append(gen_norm * 21.0 + 4.5)   # denormalise → °C
 
-        # -- model baseline (1850-1900 mean from this experiment's output) ---
+        gen_ensemble = np.stack(members, axis=0)     # (N_ENS, T, H, W)
+        gen_celsius  = gen_ensemble.mean(axis=0)     # (T, H, W) ensemble mean
+
+        # -- model baseline (ensemble mean 1850-1900) ------------------------
         mask_bl = (cond_years >= BASELINE_START) & (cond_years <= BASELINE_END)
         gen_baseline_map = gen_celsius[mask_bl].mean(axis=0) if mask_bl.any() else None
         if gen_baseline_map is not None:
@@ -633,7 +685,7 @@ def main():
             print(f"  Saving NetCDF …")
             save_netcdf(
                 name             = name,
-                gen_celsius      = gen_celsius,
+                gen_ensemble     = gen_ensemble,
                 gen_years        = cond_years,
                 baseline_map     = baseline_map,
                 cesm_data        = cesm_data_exp,
@@ -658,17 +710,20 @@ def main():
                 out_path    = map_out,
             )
 
-        # -- global-mean anomaly -------------------------------------------
-        gen_gmean = area_weighted_gmean(gen_celsius, LAT)
-
-        # baseline from hist model run (or CESM2)
+        # -- global-mean anomaly per ensemble member -------------------------
         if baseline_map is not None:
             bl_scalar = float(area_weighted_gmean(baseline_map[np.newaxis], LAT)[0])
         else:
-            bl_scalar = float(gen_gmean[(cond_years >= BASELINE_START) &
-                                        (cond_years <= BASELINE_END)].mean())
+            gen_gmean_tmp = area_weighted_gmean(gen_celsius, LAT)
+            bl_scalar = float(gen_gmean_tmp[(cond_years >= BASELINE_START) &
+                                            (cond_years <= BASELINE_END)].mean())
 
-        gen_anom = gen_gmean - bl_scalar
+        # (N_ENS, T) — one global-mean anomaly time series per member
+        gen_anom_ens = np.stack(
+            [area_weighted_gmean(gen_ensemble[m], LAT) - bl_scalar
+             for m in range(N_ENSEMBLE)],
+            axis=0,
+        )
 
         cesm_anom = cesm_years_out = None
         if cesm_data_exp is not None:
@@ -677,11 +732,11 @@ def main():
             cesm_years_out = cesm_years_exp
 
         timeseries_results[name] = dict(
-            gen_anom   = gen_anom,
-            gen_years  = cond_years,
-            cesm_anom  = cesm_anom,
-            cesm_years = cesm_years_out,
-            color      = exp["color"],
+            gen_anom_ens = gen_anom_ens,
+            gen_years    = cond_years,
+            cesm_anom    = cesm_anom,
+            cesm_years   = cesm_years_out,
+            color        = exp["color"],
         )
 
     # ── combined time series plot ──────────────────────────────────────────
