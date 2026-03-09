@@ -800,7 +800,7 @@ class UNetTrainer:
             all_ckpts = [
                 os.path.join(self.save_dir, f)
                 for f in os.listdir(self.save_dir)
-                if f.startswith(base + "_") and f.endswith(".pt")
+                if f.startswith(base + "_") and f.endswith(".pt") and not f.endswith("_best.pt")
             ]
 
             # Sort by epoch number extracted from filename
