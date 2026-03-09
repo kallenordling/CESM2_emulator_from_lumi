@@ -479,29 +479,42 @@ class UNetTrainer:
         self.ema_model.ema_model.train()
 
     def _spawn_eval(self, checkpoint_path: str, epoch: int) -> None:
-        """Submit run_eval_aero.sh to SLURM after saving best model."""
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sbatch_script = os.path.join(project_root, "run_eval_aero.sh")
+        """Submit run_eval_aero.sh to SLURM after saving best model.
 
-        output_dir = os.path.join(
-            os.path.dirname(checkpoint_path),
-            "..", "eval_output", f"best_ep{epoch:04d}",
-        )
-        output_dir = os.path.normpath(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+        Wrapped in try/except so a missing sbatch (e.g. inside Singularity)
+        never crashes training.
+        """
+        try:
+            import shutil
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sbatch_script = os.path.join(project_root, "run_eval_aero.sh")
 
-        cmd = [
-            "sbatch",
-            f"--job-name=eval_ep{epoch:04d}",
-            f"--output={project_root}/logs/eval_aero_ep{epoch:04d}_%j.out",
-            f"--export=ALL,CHECKPOINT={checkpoint_path},OUTPUT_DIR={output_dir}",
-            sbatch_script,
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        job_info = result.stdout.strip() or result.stderr.strip()
-        self.accelerator.print(
-            f"  [EVAL] Submitted SLURM job for epoch {epoch} → {output_dir}  ({job_info})"
-        )
+            output_dir = os.path.join(
+                os.path.dirname(checkpoint_path),
+                "..", "eval_output", f"best_ep{epoch:04d}",
+            )
+            output_dir = os.path.normpath(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+
+            # sbatch may not be on PATH inside Singularity; try common locations
+            sbatch = shutil.which("sbatch") or "/usr/bin/sbatch" or "/usr/local/bin/sbatch"
+
+            cmd = [
+                sbatch,
+                f"--job-name=eval_ep{epoch:04d}",
+                f"--output={project_root}/logs/eval_aero_ep{epoch:04d}_%j.out",
+                f"--export=ALL,CHECKPOINT={checkpoint_path},OUTPUT_DIR={output_dir}",
+                sbatch_script,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            job_info = result.stdout.strip() or result.stderr.strip()
+            self.accelerator.print(
+                f"  [EVAL] Submitted SLURM job for epoch {epoch} → {output_dir}  ({job_info})"
+            )
+        except Exception as e:
+            self.accelerator.print(
+                f"  [EVAL] WARNING: could not submit SLURM eval job for epoch {epoch}: {e}"
+            )
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
