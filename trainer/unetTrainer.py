@@ -452,7 +452,8 @@ class UNetTrainer:
         self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
 
         # ── Auto-save best checkpoint & trigger evaluation ────────────────
-        if val_skill > self.best_val_skill and self.accelerator.is_main_process:
+        # Guard against degenerate epoch-0 skill=1.0 (avg_sig≈0 during warm-up)
+        if avg_sig > 1e-4 and val_skill > self.best_val_skill and self.accelerator.is_main_process:
             self.best_val_skill = val_skill
             if self.save_name is not None:
                 base = self.save_name.split(".pt")[0]
@@ -478,11 +479,10 @@ class UNetTrainer:
         self.ema_model.ema_model.train()
 
     def _spawn_eval(self, checkpoint_path: str, epoch: int) -> None:
-        """Launch eval_aero.py as a non-blocking subprocess after saving best model."""
-        eval_script = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "eval_aero.py",
-        )
+        """Submit run_eval_aero.sh to SLURM after saving best model."""
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sbatch_script = os.path.join(project_root, "run_eval_aero.sh")
+
         output_dir = os.path.join(
             os.path.dirname(checkpoint_path),
             "..", "eval_output", f"best_ep{epoch:04d}",
@@ -491,17 +491,16 @@ class UNetTrainer:
         os.makedirs(output_dir, exist_ok=True)
 
         cmd = [
-            sys.executable, eval_script,
-            "--checkpoint",   checkpoint_path,
-            "--output-dir",   output_dir,
-            "--sample-steps", "50",
-            "--batch-size",   "16",
+            "sbatch",
+            f"--job-name=eval_ep{epoch:04d}",
+            f"--output={project_root}/logs/eval_aero_ep{epoch:04d}_%j.out",
+            f"--export=ALL,CHECKPOINT={checkpoint_path},OUTPUT_DIR={output_dir}",
+            sbatch_script,
         ]
-        log_path = os.path.join(output_dir, "eval.log")
-        log_fh = open(log_path, "w")
-        subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh, close_fds=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        job_info = result.stdout.strip() or result.stderr.strip()
         self.accelerator.print(
-            f"  [EVAL] Spawned eval_aero.py for epoch {epoch} → {output_dir}"
+            f"  [EVAL] Submitted SLURM job for epoch {epoch} → {output_dir}  ({job_info})"
         )
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:

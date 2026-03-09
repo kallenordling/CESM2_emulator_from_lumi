@@ -31,8 +31,21 @@ mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 
 cd /projappl/project_462001112/CESM2_emulator_from_lumi
 
-python eval_aero.py \
-    --runs-dir  /projappl/project_462001112/CESM2_emulator_from_lumi/runs \
-    --output-dir /projappl/project_462001112/CESM2_emulator_from_lumi/eval_output \
-    --sample-steps 100 \
-    --batch-size 16
+# When submitted by the trainer, CHECKPOINT and OUTPUT_DIR are set via --export.
+# Fall back to defaults for manual submission.
+CHECKPOINT="${CHECKPOINT:-}"
+OUTPUT_DIR="${OUTPUT_DIR:-/projappl/project_462001112/CESM2_emulator_from_lumi/eval_output}"
+
+if [ -n "${CHECKPOINT}" ]; then
+    python eval_aero.py \
+        --checkpoint  "${CHECKPOINT}" \
+        --output-dir  "${OUTPUT_DIR}" \
+        --sample-steps 100 \
+        --batch-size 16
+else
+    python eval_aero.py \
+        --runs-dir  /projappl/project_462001112/CESM2_emulator_from_lumi/runs \
+        --output-dir "${OUTPUT_DIR}" \
+        --sample-steps 100 \
+        --batch-size 16
+fi
