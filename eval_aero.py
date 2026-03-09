@@ -97,7 +97,7 @@ BATCH_SIZE     = 16           # years per GPU batch
 COND_VARS      = ["CO2", "SUL"]
 TARGET_VAR     = "TREFHT"
 LAT  = np.linspace(-90, 90, 192)
-LON  = np.linspace(0, 360, 288)
+LON  = np.linspace(0, 360, 288, endpoint=False)   # 0…358.75, no duplicate at 360
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +276,7 @@ def save_netcdf(
     cesm_years: np.ndarray | None,
     out_path: str,
     ckpt_path: str,
+    gen_baseline_map: np.ndarray | None = None,
 ):
     """Save model output (and optionally CESM2 reference) to a NetCDF file.
 
@@ -318,7 +319,7 @@ def save_netcdf(
                 attrs={"units": "degC", "long_name": "Model global-mean TREFHT anomaly re 1850-1900"}),
             "baseline_map": xr.DataArray(
                 baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
-                attrs={"units": "degC", "long_name": "1850-1900 climatological mean"}),
+                attrs={"units": "degC", "long_name": "1850-1900 climatological mean (CESM2)"}),
         },
         attrs={
             "experiment":  name,
@@ -327,6 +328,12 @@ def save_netcdf(
             "description": "CESM2 aerosol emulator evaluation output",
         },
     )
+
+    if gen_baseline_map is not None:
+        ds["TREFHT_model_baseline"] = xr.DataArray(
+            gen_baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
+            attrs={"units": "degC",
+                   "long_name": f"Model {BASELINE_START}-{BASELINE_END} climatological mean"})
 
     if cesm_data is not None and cesm_years is not None:
         coords_cesm = {"cesm_year": cesm_years, "lat": LAT, "lon": LON}
@@ -480,6 +487,10 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
         da.plot.pcolormesh(**plot_kwargs)
         if USE_CARTOPY:
             ax.add_feature(cfeature.COASTLINE, lw=0.5)
+            gl = ax.gridlines(draw_labels=True, linewidth=0.3,
+                              color="grey", alpha=0.5, linestyle="--")
+            gl.top_labels = False
+            gl.right_labels = False
         ax.set_title(title, fontsize=9)
 
     for col, yr_target in enumerate(map_years):
@@ -594,10 +605,16 @@ def main():
         # denormalise: DENORM_FN["TREFHT"] = lambda x: x * 21.0 + 4.5
         gen_celsius = gen_norm * 21.0 + 4.5          # (T, H, W)
 
-        # -- if baseline_map not yet set, use first-pass of hist ------------
+        # -- model baseline (1850-1900 mean from this experiment's output) ---
+        mask_bl = (cond_years >= BASELINE_START) & (cond_years <= BASELINE_END)
+        gen_baseline_map = gen_celsius[mask_bl].mean(axis=0) if mask_bl.any() else None
+        if gen_baseline_map is not None:
+            print(f"  [MODEL BASELINE]  mean={gen_baseline_map.mean():.2f}°C"
+                  f"  std={gen_baseline_map.std():.2f}°C")
+
+        # -- if CESM2 baseline not yet set, fall back to model hist ---------
         if baseline_map is None and name == "hist":
-            mask_bl = (cond_years >= BASELINE_START) & (cond_years <= BASELINE_END)
-            baseline_map = gen_celsius[mask_bl].mean(axis=0)
+            baseline_map = gen_baseline_map
             print(f"  [BASELINE set from model hist]  mean={baseline_map.mean():.2f}°C")
 
         # -- CESM2 actual data ---------------------------------------------
@@ -615,14 +632,15 @@ def main():
             nc_out = os.path.join(args.output_dir, f"TREFHT_{name}.nc")
             print(f"  Saving NetCDF …")
             save_netcdf(
-                name         = name,
-                gen_celsius  = gen_celsius,
-                gen_years    = cond_years,
-                baseline_map = baseline_map,
-                cesm_data    = cesm_data_exp,
-                cesm_years   = cesm_years_exp,
-                out_path     = nc_out,
-                ckpt_path    = ckpt_path,
+                name             = name,
+                gen_celsius      = gen_celsius,
+                gen_years        = cond_years,
+                baseline_map     = baseline_map,
+                cesm_data        = cesm_data_exp,
+                cesm_years       = cesm_years_exp,
+                out_path         = nc_out,
+                ckpt_path        = ckpt_path,
+                gen_baseline_map = gen_baseline_map,
             )
 
         # -- anomaly maps --------------------------------------------------
