@@ -367,22 +367,37 @@ def plot_timeseries(results: dict, out_path: str):
 
     for name, d in results.items():
         c = d["color"]
-        ax_top.plot(d["gen_years"], d["gen_anom"],
-                    color=c, lw=1.8, label=f"{name} (model)")
-        if d.get("cesm_anom") is not None:
-            ax_top.plot(d["cesm_years"], d["cesm_anom"],
-                        color=c, lw=1.0, ls="--", alpha=0.6, label=f"{name} (CESM2 member)")
 
-            # difference on common years
+        da_gen = xr.DataArray(
+            d["gen_anom"], dims=["year"],
+            coords={"year": d["gen_years"]},
+            attrs={"long_name": "TREFHT anomaly", "units": "°C"},
+        )
+        da_gen.plot.line(ax=ax_top, color=c, lw=1.8, label=f"{name} (model)")
+
+        if d.get("cesm_anom") is not None:
+            da_cesm = xr.DataArray(
+                d["cesm_anom"], dims=["year"],
+                coords={"year": d["cesm_years"]},
+                attrs={"long_name": "TREFHT anomaly", "units": "°C"},
+            )
+            da_cesm.plot.line(ax=ax_top, color=c, lw=1.0, ls="--", alpha=0.6,
+                              label=f"{name} (CESM2 member)")
+
             common, idx_gen, idx_cs = np.intersect1d(
                 d["gen_years"], d["cesm_years"], return_indices=True
             )
             diff = d["gen_anom"][idx_gen] - d["cesm_anom"][idx_cs]
-            ax_bot.plot(common, diff, color=c, lw=1.5, label=name)
+            da_diff = xr.DataArray(
+                diff, dims=["year"], coords={"year": common},
+                attrs={"long_name": "Model − CESM2", "units": "°C"},
+            )
+            da_diff.plot.line(ax=ax_bot, color=c, lw=1.5, label=name)
             ax_bot.fill_between(common, diff, alpha=0.12, color=c)
 
     ax_top.axhline(0, color="k", lw=0.6, ls=":")
     ax_top.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline period")
+    ax_top.set_xlabel("")
     ax_top.set_ylabel("TREFHT anomaly (°C)")
     ax_top.set_title("Global-mean temperature anomaly vs 1850–1900\n(model solid, CESM2 single member dashed)")
     ax_top.legend(fontsize=8, ncol=2)
@@ -450,16 +465,22 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     norm_diff = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_diff, vmax=vmax_diff)
 
     def _plot_panel(ax, data, norm, title):
+        da = xr.DataArray(
+            data, dims=["lat", "lon"],
+            coords={"lat": LAT, "lon": LON},
+            attrs={"units": "°C"},
+        )
+        plot_kwargs = dict(
+            ax=ax, cmap=cmap, norm=norm,
+            add_colorbar=True,
+            cbar_kwargs={"label": "°C", "shrink": 0.75},
+        )
         if USE_CARTOPY:
-            im = ax.pcolormesh(LON, LAT, data, cmap=cmap, norm=norm,
-                               transform=ccrs.PlateCarree())
+            plot_kwargs["transform"] = ccrs.PlateCarree()
+        da.plot.pcolormesh(**plot_kwargs)
+        if USE_CARTOPY:
             ax.add_feature(cfeature.COASTLINE, lw=0.5)
-        else:
-            im = ax.imshow(data, origin="lower", aspect="auto",
-                           cmap=cmap, norm=norm,
-                           extent=[0, 360, -90, 90])
         ax.set_title(title, fontsize=9)
-        plt.colorbar(im, ax=ax, shrink=0.75, label="°C")
 
     for col, yr_target in enumerate(map_years):
         yr_gen  = _nearest_year(gen_years, yr_target)
