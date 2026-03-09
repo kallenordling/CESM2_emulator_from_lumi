@@ -97,8 +97,8 @@ BATCH_SIZE     = 16           # years per GPU batch
 N_ENSEMBLE     = 5            # diffusion samples per experiment
 COND_VARS      = ["CO2", "SUL"]
 TARGET_VAR     = "TREFHT"
-LAT  = np.linspace(-90, 90, 192)
-LON  = np.linspace(0, 360, 288, endpoint=False)   # 0…358.75, no duplicate at 360
+LAT  = None   # set from first conditioning file in main()
+LON  = None   # set from first conditioning file in main()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,9 +157,14 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
     Returns:
         cond_tensor : torch.Tensor  (n_vars, T, H, W)
         years       : np.ndarray    (T,) integer years
+        lat         : np.ndarray    (H,) latitude values from file
+        lon         : np.ndarray    (W,) longitude values from file
     """
     raw = xr.open_dataset(cond_file, chunks={time_dim: -1})[cond_vars]
     norm = raw.map(normalize)
+
+    lat = norm["lat"].values.astype(np.float64)
+    lon = norm["lon"].values.astype(np.float64)
 
     # to_stacked_array needs ("var", time_dim, "lat", "lon")
     stacked = norm.to_stacked_array("var", sample_dims=[time_dim, "lon", "lat"])
@@ -176,7 +181,7 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
         )
 
     raw.close()
-    return cond_tensor, years
+    return cond_tensor, years, lat, lon
 
 
 def generate_timeseries(
@@ -518,9 +523,17 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     norm_diff = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_diff, vmax=vmax_diff)
 
     def _plot_panel(ax, data, norm, title):
+        # Add a cyclic longitude column so pcolormesh closes the wrap at 0°/360°
+        if USE_CARTOPY:
+            from cartopy.util import add_cyclic_point
+            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
+        else:
+            data_cyc = np.concatenate([data, data[:, :1]], axis=1)
+            lon_cyc  = np.append(LON, LON[0] + 360.0)
+
         da = xr.DataArray(
-            data, dims=["lat", "lon"],
-            coords={"lat": LAT, "lon": LON},
+            data_cyc, dims=["lat", "lon"],
+            coords={"lat": LAT, "lon": lon_cyc},
             attrs={"units": "°C"},
         )
         plot_kwargs = dict(
@@ -630,13 +643,20 @@ def main():
         # -- conditioning --------------------------------------------------
         print("  Building conditioning tensor …")
         try:
-            cond_tensor, cond_years = build_cond_tensor(
+            cond_tensor, cond_years, lat_file, lon_file = build_cond_tensor(
                 exp["cond_file"], COND_VARS, exp["time_dim"],
                 pca_cond, N_COMP_COND,
             )
         except Exception as e:
             print(f"  SKIP (conditioning failed): {e}")
             continue
+
+        # Use actual lat/lon from first successfully loaded file
+        global LAT, LON
+        if LAT is None:
+            LAT, LON = lat_file, lon_file
+            print(f"  [COORDS] lat {LAT[0]:.2f}…{LAT[-1]:.2f} ({len(LAT)})"
+                  f"  lon {LON[0]:.2f}…{LON[-1]:.2f} ({len(LON)})")
 
         print(f"  Conditioning: {cond_years[0]}–{cond_years[-1]}"
               f"  shape={tuple(cond_tensor.shape)}")
