@@ -28,7 +28,7 @@ export RCCL_ENABLE_SHARP=0
 # ── Python / Hydra ────────────────────────────────────────────────────────────
 export HYDRA_FULL_ERROR=1
 export PYTHONNOUSERSITE=1
-export SINGULARITY_BIND="$SINGULARITY_BIND,/usr/bin/sbatch"
+export SINGULARITY_BIND="/usr/bin/sbatch"
 # ── ROCm / HIP ───────────────────────────────────────────────────────────────
 export ACCELERATE_USE_FSDP=0
 export CUDA_LAUNCH_BLOCKING=0
