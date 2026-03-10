@@ -510,7 +510,7 @@ class UNetTrainer:
                 "/usr/lib/slurm/sbatch",
             ]
             sbatch = next((p for p in _sbatch_candidates if p and os.path.isfile(p)), None)
-
+            '''
             if sbatch is None:
                 # Fallback: write a shell script the user can submit manually.
                 fallback = os.path.join(output_dir, "submit_eval.sh")
@@ -531,8 +531,8 @@ class UNetTrainer:
                     f"         To auto-submit in future runs, add to your training sbatch script:\n"
                     f"           export SINGULARITY_BIND=\"$SINGULARITY_BIND,/usr/bin/sbatch\""
                 )
-                return
-
+                #return
+            '''
             cmd = [
                 "/usr/bin/env",
                 "-i",  # clean environment
