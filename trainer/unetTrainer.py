@@ -534,12 +534,15 @@ class UNetTrainer:
                 return
 
             cmd = [
-                sbatch,
+                "/usr/bin/env",
+                "-i",  # clean environment
+                "/usr/bin/sbatch",
                 f"--job-name=eval_ep{epoch:04d}",
                 f"--output={project_root}/logs/eval_aero_ep{epoch:04d}_%j.out",
                 f"--export=ALL,CHECKPOINT={checkpoint_path},OUTPUT_DIR={output_dir}",
                 sbatch_script,
             ]
+
             result = subprocess.run(cmd, capture_output=True, text=True)
             job_info = result.stdout.strip() or result.stderr.strip()
             self.accelerator.print(
