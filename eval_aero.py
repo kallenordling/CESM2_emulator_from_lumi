@@ -53,40 +53,42 @@ CONFIG_PATH = "configs/config_aero.yaml"
 # ── experiment definitions ─────────────────────────────────────────────────────
 EXPERIMENTS = [
     dict(
-        name        = "hist",
-        data_dir    = os.path.join(DATA_ROOT, "hist"),
-        cond_file   = os.path.join(EMIS_DIR, "emissions_hist_timefixed.nc"),
-        realization = "LE2-1001.001",
-        time_dim    = "time",
-        map_years   = [1900, 2000, 2014],   # last available year instead of 2100
-        color       = "#1f77b4",
+        name         = "hist",
+        data_dir     = os.path.join(DATA_ROOT, "hist"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_timefixed.nc"),
+        realizations = ["LE2-1001.001", "LE2-1011.001", "LE2-1021.002",
+                        "LE2-1031.002", "LE2-1041.003"],
+        time_dim     = "time",
+        map_years    = [1900, 2000, 2014],   # last available year instead of 2100
+        color        = "#1f77b4",
     ),
     dict(
-        name        = "ssp370",
-        data_dir    = os.path.join(DATA_ROOT, "ssp370"),
-        cond_file   = os.path.join(EMIS_DIR, "emissions_ssp370_timefixed.nc"),
-        realization = "LE2-1001.001",
-        time_dim    = "time",
-        map_years   = [2015, 2050, 2100],
-        color       = "#d62728",
+        name         = "ssp370",
+        data_dir     = os.path.join(DATA_ROOT, "ssp370"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_timefixed.nc"),
+        realizations = ["LE2-1001.001", "LE2-1011.001", "LE2-1021.002",
+                        "LE2-1031.002", "LE2-1041.003"],
+        time_dim     = "time",
+        map_years    = [2015, 2050, 2100],
+        color        = "#d62728",
     ),
     dict(
-        name        = "aaer",
-        data_dir    = os.path.join(DATA_ROOT, "AAER"),
-        cond_file   = os.path.join(EMIS_DIR, "emissions_aero_only_timefixed.nc"),
-        realization = "001",
-        time_dim    = "time",
-        map_years   = [1900, 2000, 2100],
-        color       = "#ff7f0e",
+        name         = "aaer",
+        data_dir     = os.path.join(DATA_ROOT, "AAER"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_aero_only_timefixed.nc"),
+        realizations = ["001", "002", "003", "004", "005"],
+        time_dim     = "time",
+        map_years    = [1900, 2000, 2100],
+        color        = "#ff7f0e",
     ),
     dict(
-        name        = "ghg",
-        data_dir    = os.path.join(DATA_ROOT, "GHG"),
-        cond_file   = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed.nc"),
-        realization = "001",
-        time_dim    = "time",
-        map_years   = [1900, 2000, 2100],
-        color       = "#2ca02c",
+        name         = "ghg",
+        data_dir     = os.path.join(DATA_ROOT, "GHG"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed.nc"),
+        realizations = ["001", "002", "003", "004", "005"],
+        time_dim     = "time",
+        map_years    = [1900, 2000, 2100],
+        color        = "#2ca02c",
     ),
 ]
 
@@ -227,10 +229,10 @@ def generate_timeseries(
     return torch.cat(results, dim=0).numpy()   # (T, H, W)
 
 
-def load_cesm2_annual(data_dir: str, realization: str, time_dim: str) -> tuple:
+def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str) -> tuple:
     """Load CESM2 TREFHT for one realization, return (years, data_celsius array).
 
-    data_celsius shape: (T, 192, 288)
+    data_celsius shape: (T, lat, lon)
     """
     path = os.path.join(data_dir, realization, "*.nc")
     ds = xr.open_mfdataset(path, combine="by_coords",
@@ -258,6 +260,36 @@ def load_cesm2_annual(data_dir: str, realization: str, time_dim: str) -> tuple:
     return years, data
 
 
+def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str) -> tuple:
+    """Load CESM2 TREFHT for multiple realizations.
+
+    Returns:
+        years           : np.ndarray (T,) — years from first successfully loaded member
+        cesm_ensemble   : np.ndarray (N, T, lat, lon) — all members on common years
+    """
+    members = []
+    common_years = None
+    for real in realizations:
+        try:
+            yrs, data = load_cesm2_annual_single(data_dir, real, time_dim)
+            if common_years is None:
+                common_years = yrs
+                members.append(data)
+            else:
+                # align to common years
+                common, idx_c, idx_m = np.intersect1d(common_years, yrs, return_indices=True)
+                members = [m[idx_c] for m in members]
+                members.append(data[idx_m])
+                common_years = common
+        except Exception as e:
+            print(f"    WARNING: could not load realization {real}: {e}")
+
+    if not members:
+        raise FileNotFoundError(f"No CESM2 members loaded from {data_dir}")
+
+    return common_years, np.stack(members, axis=0)   # (N, T, lat, lon)
+
+
 def area_weighted_gmean(data: np.ndarray, lat: np.ndarray) -> np.ndarray:
     """Area-weighted global mean.  data: (..., H, W), lat: (H,)."""
     w = np.cos(np.deg2rad(lat))[:, np.newaxis]           # (H, 1)
@@ -282,7 +314,7 @@ def save_netcdf(
     gen_ensemble: np.ndarray,
     gen_years: np.ndarray,
     baseline_map: np.ndarray,
-    cesm_data: np.ndarray | None,
+    cesm_ensemble: np.ndarray | None,
     cesm_years: np.ndarray | None,
     out_path: str,
     ckpt_path: str,
@@ -337,11 +369,11 @@ def save_netcdf(
                 attrs={"units": "degC", "long_name": "1850-1900 climatological mean (CESM2)"}),
         },
         attrs={
-            "experiment":   name,
-            "checkpoint":   os.path.basename(ckpt_path),
-            "baseline":     f"{BASELINE_START}-{BASELINE_END}",
-            "n_ensemble":   N_ENS,
-            "description":  "CESM2 aerosol emulator evaluation output",
+            "experiment":        name,
+            "checkpoint":        os.path.basename(ckpt_path),
+            "baseline":          f"{BASELINE_START}-{BASELINE_END}",
+            "n_model_ensemble":  N_ENS,
+            "description":       "CESM2 aerosol emulator evaluation output",
         },
     )
 
@@ -371,23 +403,44 @@ def save_netcdf(
             attrs={"units": "degC",
                    "long_name": f"Model {BASELINE_START}-{BASELINE_END} climatological mean"})
 
-    if cesm_data is not None and cesm_years is not None:
+    if cesm_ensemble is not None and cesm_years is not None:
+        N_CESM = cesm_ensemble.shape[0]
+        cesm_data = cesm_ensemble.mean(axis=0)          # (T, H, W) ensemble mean
         coords_cesm = {"cesm_year": cesm_years, "lat": LAT, "lon": LON}
         gmean_cesm      = (cesm_data * w).mean(axis=(-2, -1))
         anom_cesm       = cesm_data - baseline_map
         gmean_cesm_anom = gmean_cesm - bl_scalar
-        ds["TREFHT_cesm"] = xr.DataArray(
+        ds["TREFHT_cesm_mean"] = xr.DataArray(
             cesm_data, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-            attrs={"units": "degC", "long_name": "CESM2 TREFHT (single member)"})
-        ds["TREFHT_cesm_anom"] = xr.DataArray(
+            attrs={"units": "degC", "long_name": f"CESM2 TREFHT ensemble mean (N={N_CESM})"})
+        ds["TREFHT_cesm_mean_anom"] = xr.DataArray(
             anom_cesm, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-            attrs={"units": "degC", "long_name": "CESM2 TREFHT anomaly re 1850-1900"})
-        ds["TREFHT_cesm_gmean"] = xr.DataArray(
+            attrs={"units": "degC", "long_name": "CESM2 ensemble mean TREFHT anomaly re 1850-1900"})
+        ds["TREFHT_cesm_gmean_mean"] = xr.DataArray(
             gmean_cesm, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-            attrs={"units": "degC", "long_name": "CESM2 global-mean TREFHT"})
-        ds["TREFHT_cesm_gmean_anom"] = xr.DataArray(
+            attrs={"units": "degC", "long_name": "CESM2 ensemble mean global-mean TREFHT"})
+        ds["TREFHT_cesm_gmean_mean_anom"] = xr.DataArray(
             gmean_cesm_anom, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-            attrs={"units": "degC", "long_name": "CESM2 global-mean TREFHT anomaly re 1850-1900"})
+            attrs={"units": "degC", "long_name": "CESM2 ensemble mean global-mean TREFHT anomaly re 1850-1900"})
+        # per-member CESM2 variables
+        for m in range(N_CESM):
+            mem = cesm_ensemble[m]
+            anom_m = mem - baseline_map
+            gmean_m = (mem * w).mean(axis=(-2, -1))
+            gmean_m_anom = gmean_m - bl_scalar
+            tag = f"m{m + 1}"
+            ds[f"TREFHT_cesm_{tag}"] = xr.DataArray(
+                mem, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
+                attrs={"units": "degC", "long_name": f"CESM2 TREFHT member {m + 1}"})
+            ds[f"TREFHT_cesm_{tag}_anom"] = xr.DataArray(
+                anom_m, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
+                attrs={"units": "degC", "long_name": f"CESM2 TREFHT anomaly member {m + 1}"})
+            ds[f"TREFHT_cesm_gmean_{tag}"] = xr.DataArray(
+                gmean_m, dims=["cesm_year"], coords={"cesm_year": cesm_years},
+                attrs={"units": "degC", "long_name": f"CESM2 global-mean TREFHT member {m + 1}"})
+            ds[f"TREFHT_cesm_gmean_{tag}_anom"] = xr.DataArray(
+                gmean_m_anom, dims=["cesm_year"], coords={"cesm_year": cesm_years},
+                attrs={"units": "degC", "long_name": f"CESM2 global-mean TREFHT anomaly member {m + 1}"})
 
     ds.to_netcdf(out_path)
     print(f"  → saved {out_path}")
@@ -430,34 +483,46 @@ def plot_timeseries(results: dict, out_path: str):
         da_mean.plot.line(ax=ax_top, color=c, lw=2.0, label=f"{name} (model mean)")
 
         if d.get("cesm_anom") is not None:
+            cesm_anom_ens = d["cesm_anom_ens"]           # (N_CESM, T)
+            cesm_anom_mean = d["cesm_anom"]               # (T,)
+
+            # individual CESM2 members — thin dashed, semi-transparent
+            for m in range(cesm_anom_ens.shape[0]):
+                da_cm = xr.DataArray(
+                    cesm_anom_ens[m], dims=["year"],
+                    coords={"year": d["cesm_years"]},
+                )
+                da_cm.plot.line(ax=ax_top, color=c, lw=0.7, ls="--", alpha=0.35)
+
+            # CESM2 ensemble mean — thick dashed with legend entry
             da_cesm = xr.DataArray(
-                d["cesm_anom"], dims=["year"],
+                cesm_anom_mean, dims=["year"],
                 coords={"year": d["cesm_years"]},
                 attrs={"long_name": "TREFHT anomaly", "units": "°C"},
             )
-            da_cesm.plot.line(ax=ax_top, color=c, lw=1.0, ls="--", alpha=0.6,
-                              label=f"{name} (CESM2 member)")
+            da_cesm.plot.line(ax=ax_top, color=c, lw=2.0, ls="--", alpha=0.8,
+                              label=f"{name} (CESM2 ens. mean)")
 
             common, idx_gen, idx_cs = np.intersect1d(
                 d["gen_years"], d["cesm_years"], return_indices=True
             )
-            # bias: ensemble mean vs CESM2
-            diff_mean = gen_anom_mean[idx_gen] - d["cesm_anom"][idx_cs]
+            # bias: model ensemble mean vs CESM2 ensemble mean
+            diff_mean = gen_anom_mean[idx_gen] - cesm_anom_mean[idx_cs]
             da_diff = xr.DataArray(
                 diff_mean, dims=["year"], coords={"year": common},
                 attrs={"long_name": "Model − CESM2", "units": "°C"},
             )
             da_diff.plot.line(ax=ax_bot, color=c, lw=1.5, label=name)
-            # shade ensemble spread around bias
-            diff_min = gen_anom_ens[:, idx_gen].min(axis=0) - d["cesm_anom"][idx_cs]
-            diff_max = gen_anom_ens[:, idx_gen].max(axis=0) - d["cesm_anom"][idx_cs]
+            # shade model spread around bias
+            diff_min = gen_anom_ens[:, idx_gen].min(axis=0) - cesm_anom_mean[idx_cs]
+            diff_max = gen_anom_ens[:, idx_gen].max(axis=0) - cesm_anom_mean[idx_cs]
             ax_bot.fill_between(common, diff_min, diff_max, alpha=0.12, color=c)
 
     ax_top.axhline(0, color="k", lw=0.6, ls=":")
     ax_top.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline period")
     ax_top.set_xlabel("")
     ax_top.set_ylabel("TREFHT anomaly (°C)")
-    ax_top.set_title("Global-mean temperature anomaly vs 1850–1900\n(model solid, CESM2 single member dashed)")
+    ax_top.set_title("Global-mean temperature anomaly vs 1850–1900\n(model solid, CESM2 dashed — both 5-member ensembles)")
     ax_top.legend(fontsize=8, ncol=2)
     ax_top.grid(True, alpha=0.25)
 
@@ -618,15 +683,17 @@ def main():
     scheduler: ContinuousDDPM = instantiate(cfg.scheduler)
 
     # ── compute hist baseline map (H, W) for anomaly reference ─────────────
-    print("\n[BASELINE] Loading hist CESM2 data to compute 1850–1900 mean …")
+    print("\n[BASELINE] Loading hist CESM2 ensemble to compute 1850–1900 mean …")
     hist_exp = next(e for e in EXPERIMENTS if e["name"] == "hist")
     try:
-        cesm_hist_years, cesm_hist_data = load_cesm2_annual(
-            hist_exp["data_dir"], hist_exp["realization"], hist_exp["time_dim"]
+        cesm_hist_years, cesm_hist_ens = load_cesm2_ensemble(
+            hist_exp["data_dir"], hist_exp["realizations"], hist_exp["time_dim"]
         )
+        cesm_hist_data = cesm_hist_ens.mean(axis=0)   # ensemble mean (T, H, W)
         mask_bl = (cesm_hist_years >= BASELINE_START) & (cesm_hist_years <= BASELINE_END)
         baseline_map = cesm_hist_data[mask_bl].mean(axis=0)       # (H, W)  in °C
-        print(f"  baseline map  mean={baseline_map.mean():.2f}°C  std={baseline_map.std():.2f}°C")
+        print(f"  baseline map  mean={baseline_map.mean():.2f}°C  std={baseline_map.std():.2f}°C"
+              f"  (from {cesm_hist_ens.shape[0]} members)")
     except Exception as exc:
         print(f"  WARNING: could not load CESM2 hist data ({exc})")
         print("  Will use model-generated hist 1850–1900 mean as baseline instead.")
@@ -689,13 +756,15 @@ def main():
             baseline_map = gen_baseline_map
             print(f"  [BASELINE set from model hist]  mean={baseline_map.mean():.2f}°C")
 
-        # -- CESM2 actual data ---------------------------------------------
-        cesm_years_exp, cesm_data_exp = None, None
+        # -- CESM2 actual data (ensemble) ----------------------------------
+        cesm_years_exp, cesm_data_exp, cesm_ens_exp = None, None, None
         try:
-            cesm_years_exp, cesm_data_exp = load_cesm2_annual(
-                exp["data_dir"], exp["realization"], exp["time_dim"]
+            cesm_years_exp, cesm_ens_exp = load_cesm2_ensemble(
+                exp["data_dir"], exp["realizations"], exp["time_dim"]
             )
-            print(f"  CESM2: {cesm_years_exp[0]}–{cesm_years_exp[-1]}")
+            cesm_data_exp = cesm_ens_exp.mean(axis=0)   # (T, H, W) ensemble mean
+            print(f"  CESM2: {cesm_years_exp[0]}–{cesm_years_exp[-1]}"
+                  f"  ({cesm_ens_exp.shape[0]} members)")
         except Exception as e:
             print(f"  CESM2 data not loaded: {e}")
 
@@ -708,7 +777,7 @@ def main():
                 gen_ensemble     = gen_ensemble,
                 gen_years        = cond_years,
                 baseline_map     = baseline_map,
-                cesm_data        = cesm_data_exp,
+                cesm_ensemble    = cesm_ens_exp,
                 cesm_years       = cesm_years_exp,
                 out_path         = nc_out,
                 ckpt_path        = ckpt_path,
@@ -745,18 +814,24 @@ def main():
             axis=0,
         )
 
-        cesm_anom = cesm_years_out = None
-        if cesm_data_exp is not None:
-            cesm_gmean = area_weighted_gmean(cesm_data_exp, LAT)
-            cesm_anom  = cesm_gmean - bl_scalar
+        cesm_anom_ens = cesm_anom = cesm_years_out = None
+        if cesm_ens_exp is not None:
+            # (N_CESM, T) global-mean anomaly per CESM2 member
+            cesm_anom_ens = np.stack(
+                [area_weighted_gmean(cesm_ens_exp[m], LAT) - bl_scalar
+                 for m in range(cesm_ens_exp.shape[0])],
+                axis=0,
+            )
+            cesm_anom     = cesm_anom_ens.mean(axis=0)   # ensemble mean
             cesm_years_out = cesm_years_exp
 
         timeseries_results[name] = dict(
-            gen_anom_ens = gen_anom_ens,
-            gen_years    = cond_years,
-            cesm_anom    = cesm_anom,
-            cesm_years   = cesm_years_out,
-            color        = exp["color"],
+            gen_anom_ens  = gen_anom_ens,
+            gen_years     = cond_years,
+            cesm_anom_ens = cesm_anom_ens,
+            cesm_anom     = cesm_anom,
+            cesm_years    = cesm_years_out,
+            color         = exp["color"],
         )
 
     # ── combined time series plot ──────────────────────────────────────────
