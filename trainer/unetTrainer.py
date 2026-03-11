@@ -482,47 +482,45 @@ class UNetTrainer:
         self.ema_model.ema_model.train()
 
     def _spawn_eval(self, checkpoint_path: str, epoch: int) -> None:
-            """Submit run_eval_aero.sh to SLURM after saving best model.
+        """Request an evaluation job by writing a trigger file to disk.
 
-            Wrapped in try/except so a missing sbatch (e.g. inside Singularity)
-            never crashes training.  When sbatch cannot be found, writes a
-            ready-to-run submit_eval.sh into the output directory instead.
-            """
-        #try:
-            import shutil
+        sbatch is not available inside the Singularity container, so instead
+        of calling it directly we write a small JSON trigger file into
+        eval_triggers/.  An external watcher script (watch_eval_triggers.sh)
+        running outside the container picks these up and calls sbatch.
+        """
+        import json
+        try:
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            sbatch_script = os.path.join(project_root, "run_eval_aero.sh")
+            trigger_dir = os.path.join(project_root, "eval_triggers")
+            os.makedirs(trigger_dir, exist_ok=True)
 
-            output_dir = os.path.join(
-                os.path.dirname(checkpoint_path),
-                "..", "eval_output", f"best_ep{epoch:04d}",
-            )
-            output_dir = os.path.normpath(output_dir)
-            os.makedirs(output_dir, exist_ok=True)
+            output_dir = os.path.normpath(os.path.join(
+                os.path.dirname(checkpoint_path), "..", "eval_output", f"best_ep{epoch:04d}",
+            ))
 
-            # sbatch may not be on PATH inside a Singularity container even
-            # though it exists on the host.  Search several candidate paths.
+            trigger_path = os.path.join(trigger_dir, f"eval_request_ep{epoch:04d}.json")
+            payload = {
+                "epoch": epoch,
+                "checkpoint": checkpoint_path,
+                "output_dir": output_dir,
+                "sbatch_script": os.path.join(project_root, "run_eval_aero.sh"),
+                "log_dir": os.path.join(project_root, "logs"),
+            }
+            # Write atomically: tmp file then rename so watcher never sees a partial file
+            tmp = trigger_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp, trigger_path)
 
-
-            cmd = [
-                "/usr/bin/env",
-                "-i",  # clean environment
-                "/usr/bin/sbatch",
-                f"--job-name=eval_ep{epoch:04d}",
-                f"--output={project_root}/logs/eval_aero_ep{epoch:04d}_%j.out",
-                f"--export=ALL,CHECKPOINT={checkpoint_path},OUTPUT_DIR={output_dir}",
-                sbatch_script,
-            ]
-            self.accelerator.print(cmd)
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            job_info = result.stdout.strip() or result.stderr.strip()
             self.accelerator.print(
-                f"  [EVAL] Submitted SLURM job for epoch {epoch} → {output_dir}  ({job_info})"
+                f"  [EVAL] Trigger written → {trigger_path}\n"
+                f"         (run watch_eval_triggers.sh outside container to auto-submit)"
             )
-        #except Exception as e:
-        #    self.accelerator.print(
-        #        f"  [EVAL] WARNING: could not submit SLURM eval job for epoch {epoch}: {e}"
-        #    )
+        except Exception as e:
+            self.accelerator.print(
+                f"  [EVAL] WARNING: could not write eval trigger for epoch {epoch}: {e}"
+            )
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
