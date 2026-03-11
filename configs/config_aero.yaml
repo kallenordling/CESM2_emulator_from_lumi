@@ -10,7 +10,7 @@ data_config: config_data.yaml
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 1
+    gradient_accumulation_steps: 4
     device_placement: True
     sync_batchnorm: True
 
@@ -45,12 +45,12 @@ trainer:
     batch_size: 16       # must match batch_size in conf_data.yaml
     save_dir: runs/
     save_name: run_multi_experiment.pt
-    load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_multi_experiment_221.pt
-    lr: 0.0002
+    load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_multi_experiment_251.pt
+    lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.1
 
   optimizer:
     _target_: torch.optim.Adam
     _partial_: True
-    betas: [0.9, 0.99]
+    betas: [0.9, 0.999]
