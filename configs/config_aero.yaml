@@ -51,6 +51,7 @@ trainer:
     cfg_drop_prob: 0.1
     cfg_co2_drop_prob: 0.1
     cfg_sul_drop_prob: 0.1
+    eval_script: run_eval_aero.sh
 
   optimizer:
     _target_: torch.optim.Adam
