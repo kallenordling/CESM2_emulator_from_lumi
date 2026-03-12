@@ -9,7 +9,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 LOG_DIR = Path("/mnt/lumi/CESM2_emulator_from_lumi/logs")
-PATTERN = "diffusion_aero_16*.out"
+PATTERN = "diffusion_aero_*.out"
 
 # Metrics to plot and their display names
 METRICS = [
