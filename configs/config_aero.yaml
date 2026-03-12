@@ -49,6 +49,8 @@ trainer:
     lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.1
+    cfg_co2_drop_prob: 0.1
+    cfg_sul_drop_prob: 0.1
 
   optimizer:
     _target_: torch.optim.Adam
