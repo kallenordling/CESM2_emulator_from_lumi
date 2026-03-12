@@ -189,6 +189,9 @@ def main(config: DictConfig) -> None:
                     sample_steps=config.sample_steps,
                     model=model,
                     disable=True,
+                    guidance_scale=getattr(config, "guidance_scale", 1.0),
+                    guidance_co2=getattr(config, "guidance_co2", None),
+                    guidance_sul=getattr(config, "guidance_sul", None),
                 )
             else:
                 gen_months = tensor_batch

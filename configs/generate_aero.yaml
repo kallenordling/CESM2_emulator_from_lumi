@@ -9,7 +9,9 @@ scheduler:
       
 data_dir: /scratch/project_462001112/emulator_data/ 
 save_dir: ./
-guidance_scale: 1.0
+guidance_scale: 1.0   # Joint CFG scale (both channels). Ignored when guidance_co2/sul are set.
+guidance_co2: null    # Per-channel CFG scale for CO2 (set to float, e.g. 1.5, to enable)
+guidance_sul: null    # Per-channel CFG scale for SUL (set to float, e.g. 1.5, to enable)
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
