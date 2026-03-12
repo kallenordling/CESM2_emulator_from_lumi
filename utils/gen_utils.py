@@ -15,12 +15,26 @@ def generate_samples2(
     disable=False,
     explain=True,
     guidance_scale=1.0,
+    guidance_co2: float | None = None,
+    guidance_sul: float | None = None,
 ):
     """Generate samples from a trained model with optional classifier-free guidance.
 
     Args:
-        guidance_scale: CFG scale. 1.0 = no guidance (normal sampling).
-                        >1.0 amplifies conditioning effect (try 1.5-3.0).
+        guidance_scale: Joint CFG scale applied to both channels together.
+                        1.0 = no guidance (normal sampling), >1.0 amplifies
+                        conditioning effect (try 1.5-3.0).
+                        Ignored when guidance_co2 or guidance_sul is set.
+        guidance_co2:   Per-channel CFG scale for CO2 (channel 0).
+                        When set (along with guidance_sul), enables independent
+                        per-channel guidance using 3 model forward passes per step:
+                          pred = pred_null
+                               + guidance_co2 * (pred_co2_only - pred_null)
+                               + guidance_sul * (pred_sul_only - pred_null)
+                        Requires the model to have been trained with per-channel
+                        CFG dropout (cfg_co2_drop_prob / cfg_sul_drop_prob).
+        guidance_sul:   Per-channel CFG scale for SUL (channel 1).
+                        See guidance_co2 for details.
     """
     # ===== EMA SAMPLING ASSERT =====
     assert hasattr(model, "parameters"), "model is not a torch module?"
@@ -53,12 +67,28 @@ def generate_samples2(
         t_all = scheduler.log_snr(steps[timesteps])
 
     batch_size = clean_samples.shape[0]
-    use_cfg = guidance_scale != 1.0
 
-    # Prepare null conditioning for classifier-free guidance
-    if use_cfg:
+    # ── Guidance mode selection ───────────────────────────────────────────────
+    # Per-channel CFG takes precedence over joint guidance_scale.
+    NULL_COND_VALUE = -1.0
+    use_channel_cfg = guidance_co2 is not None or guidance_sul is not None
+    use_joint_cfg = (guidance_scale != 1.0) and not use_channel_cfg
+
+    if use_channel_cfg:
+        w_co2 = guidance_co2 if guidance_co2 is not None else 1.0
+        w_sul = guidance_sul if guidance_sul is not None else 1.0
+        # Three null maps for per-channel guidance (all precomputed, no clone per step)
+        cond_co2_only = cond_map.clone()
+        cond_co2_only[:, 1] = NULL_COND_VALUE   # SUL nulled; CO2 active
+        cond_sul_only = cond_map.clone()
+        cond_sul_only[:, 0] = NULL_COND_VALUE   # CO2 nulled; SUL active
+        cond_null_all = torch.full_like(cond_map, NULL_COND_VALUE)  # both null
+        print(
+            f"[GEN_UTILS] Per-channel CFG: guidance_co2={w_co2}, guidance_sul={w_sul}"
+        )
+    elif use_joint_cfg:
         cond_null = torch.zeros_like(cond_map)
-        print(f"[GEN_UTILS] Using classifier-free guidance with scale={guidance_scale}")
+        print(f"[GEN_UTILS] Joint CFG: guidance_scale={guidance_scale}")
 
     # --- Saliency maps (optional) ---
     sal_co2 = None
@@ -101,23 +131,23 @@ def generate_samples2(
             else:
                 t = t_idx
 
-            # Conditioned prediction
-            output_cond = model(
-                gen_sample,
-                t,
-                cond_map=cond_map,
-            )
-
-            # Classifier-free guidance
-            if use_cfg:
-                output_uncond = model(
-                    gen_sample,
-                    t,
-                    cond_map=cond_null,
-                )
+            if use_channel_cfg:
+                # Per-channel CFG: 3 forward passes
+                # pred = pred_null
+                #      + w_co2 * (pred_co2_only - pred_null)   ← CO2 contribution
+                #      + w_sul * (pred_sul_only - pred_null)   ← SUL contribution
+                pred_co2 = model(gen_sample, t, cond_map=cond_co2_only)
+                pred_sul = model(gen_sample, t, cond_map=cond_sul_only)
+                pred_null = model(gen_sample, t, cond_map=cond_null_all)
+                output = pred_null + w_co2 * (pred_co2 - pred_null) + w_sul * (pred_sul - pred_null)
+            elif use_joint_cfg:
+                # Joint CFG: 2 forward passes
+                output_cond = model(gen_sample, t, cond_map=cond_map)
+                output_uncond = model(gen_sample, t, cond_map=cond_null)
                 output = output_uncond + guidance_scale * (output_cond - output_uncond)
             else:
-                output = output_cond
+                # No guidance: 1 forward pass
+                output = model(gen_sample, t, cond_map=cond_map)
 
             # One reverse diffusion step
             gen_sample = scheduler.step(
@@ -138,8 +168,13 @@ def generate_samples(
     model: torch.nn.Module,
     disable=False,
     guidance_scale=1.0,
+    guidance_co2: float | None = None,
+    guidance_sul: float | None = None,
 ):
-    """Generate samples from a trained model with optional classifier-free guidance."""
+    """Generate samples from a trained model with optional classifier-free guidance.
+
+    See generate_samples2 for guidance_co2 / guidance_sul semantics.
+    """
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
 
@@ -149,8 +184,19 @@ def generate_samples(
     gen_sample = gen_sample.to(device=device, dtype=dtype)
     cond_map = cond_map.to(device=device, dtype=dtype)
 
-    use_cfg = guidance_scale != 1.0
-    if use_cfg:
+    NULL_COND_VALUE = -1.0
+    use_channel_cfg = guidance_co2 is not None or guidance_sul is not None
+    use_joint_cfg = (guidance_scale != 1.0) and not use_channel_cfg
+
+    if use_channel_cfg:
+        w_co2 = guidance_co2 if guidance_co2 is not None else 1.0
+        w_sul = guidance_sul if guidance_sul is not None else 1.0
+        cond_co2_only = cond_map.clone()
+        cond_co2_only[:, 1] = NULL_COND_VALUE
+        cond_sul_only = cond_map.clone()
+        cond_sul_only[:, 0] = NULL_COND_VALUE
+        cond_null_all = torch.full_like(cond_map, NULL_COND_VALUE)
+    elif use_joint_cfg:
         cond_null = torch.zeros_like(cond_map)
 
     scheduler.set_timesteps(sample_steps)
@@ -166,21 +212,17 @@ def generate_samples(
         else:
             t = i
 
-        output_cond = model(
-            gen_sample,
-            t,
-            cond_map=cond_map,
-        )
-
-        if use_cfg:
-            output_uncond = model(
-                gen_sample,
-                t,
-                cond_map=cond_null,
-            )
+        if use_channel_cfg:
+            pred_co2 = model(gen_sample, t, cond_map=cond_co2_only)
+            pred_sul = model(gen_sample, t, cond_map=cond_sul_only)
+            pred_null = model(gen_sample, t, cond_map=cond_null_all)
+            output = pred_null + w_co2 * (pred_co2 - pred_null) + w_sul * (pred_sul - pred_null)
+        elif use_joint_cfg:
+            output_cond = model(gen_sample, t, cond_map=cond_map)
+            output_uncond = model(gen_sample, t, cond_map=cond_null)
             output = output_uncond + guidance_scale * (output_cond - output_uncond)
         else:
-            output = output_cond
+            output = model(gen_sample, t, cond_map=cond_map)
 
         gen_sample = scheduler.step(output, timestep=i, sample=gen_sample).prev_sample
 
