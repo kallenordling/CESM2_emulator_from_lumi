@@ -510,7 +510,7 @@ class UNetTrainer:
                 "epoch": epoch,
                 "checkpoint": checkpoint_path,
                 "output_dir": output_dir,
-                "sbatch_script": os.path.join(project_root, "run_eval_aero.sh"),
+                "sbatch_script": os.path.join(project_root, getattr(self, "eval_script", "run_eval_aero.sh")),
                 "log_dir": os.path.join(project_root, "logs"),
             }
             # Write atomically: tmp file then rename so watcher never sees a partial file
