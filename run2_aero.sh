@@ -50,6 +50,19 @@ export MIOPEN_FIND_ENFORCE=2
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     bash -c "mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}"
 
+# ── Launch eval watcher as a background SLURM job ────────────────────────────
+# Submits watch_eval_triggers.sh on the small partition so it can call sbatch
+# to dispatch eval jobs when the trainer writes trigger files.
+# Runs outside the container (no GPU needed, just needs sbatch access).
+mkdir -p logs
+sbatch --job-name=eval_watcher \
+       --account=project_462001112 \
+       --partition=small \
+       --time=48:00:00 \
+       --ntasks=1 --cpus-per-task=1 --mem=256M \
+       --output=logs/eval_watcher_%j.out \
+       watch_eval_triggers.sh
+
 # ── Launch ────────────────────────────────────────────────────────────────────
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
