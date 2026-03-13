@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_aero
-#SBATCH --account=project_462001112
+#SBATCH --account=project_462001328
 #SBATCH --partition=standard-g
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
@@ -17,7 +17,7 @@ module --force purge
 module use /appl/local/csc/modulefiles
 module load LUMI
 module load pytorch
-source "/projappl/project_462001112/venvs/diffesm/bin/activate"
+source "/projappl/project_462001328/venvs/diffesm/bin/activate"
 
 # ── Networking ────────────────────────────────────────────────────────────────
 export NCCL_DEBUG=WARN

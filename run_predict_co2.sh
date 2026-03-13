@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=generate_co2
-#SBATCH --account=project_462001112
+#SBATCH --account=project_462001328
 #SBATCH --partition=standard-g
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
@@ -18,7 +18,7 @@ module use /appl/local/csc/modulefiles
 module load LUMI
 module load pytorch
 #module load cray-python
-source "/projappl/project_462001112/venvs/diffesm/bin/activate"
+source "/projappl/project_462001328/venvs/diffesm/bin/activate"
 
 # Common settings
 export HYDRA_FULL_ERROR=1

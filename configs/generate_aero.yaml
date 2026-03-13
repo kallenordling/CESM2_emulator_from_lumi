@@ -7,7 +7,7 @@ scheduler:
       - 0
       - null
       
-data_dir: /scratch/project_462001112/emulator_data/ 
+data_dir: /scratch/project_462001328/emulator_data/ 
 save_dir: ./
 guidance_scale: 1.0   # Joint CFG scale (both channels). Ignored when guidance_co2/sul are set.
 guidance_co2: null    # Per-channel CFG scale for CO2 (set to float, e.g. 1.5, to enable)
@@ -15,7 +15,7 @@ guidance_sul: null    # Per-channel CFG scale for SUL (set to float, e.g. 1.5, t
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
-load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/best_epoch_48.pt
+load_path: /projappl/project_462001328/CESM2_emulator_from_lumi/runs/best_epoch_48.pt
 gen_mode: gen  # Either gen/val/test
 batch_size: 8
 sample_steps: 1000

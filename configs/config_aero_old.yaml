@@ -14,7 +14,7 @@ data:
   train:
     seq_len: 1
     _target_: data.climate_dataset.ClimateDataset
-    data_dir: /scratch/project_462001112/emulator_data/       # e.g. tas, pr
+    data_dir: /scratch/project_462001328/emulator_data/       # e.g. tas, pr
     realizations: ['r10i1181p1f1','r10i1231p1f1','r10i1251p1f1','r10i1281p1f1','r10i1301p1f1','r1i1001p1f1','r1i1231p1f1','r1i1251p1f1']
     cond_file: emissions.nc  # e.g. ghg, aerosol, sst, etc.
     target_vars: ["TREFHT"]
@@ -68,7 +68,7 @@ trainer:
     batch_size: 8
     save_dir: runs/
     save_name: run_test_aero4.pt
-    load_path: 0 #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_113.pt #/projappl/project_462001112/CESM_emulatorV2/runs/run_test_aero2_89.pt # The path to checkpoint to load from
+    load_path: 0 #/projappl/project_462001328/CESM_emulatorV2/runs/run_test_aero2_113.pt #/projappl/project_462001328/CESM_emulatorV2/runs/run_test_aero2_89.pt # The path to checkpoint to load from
     lr: 0.00001 #0.0001
     sample_steps: 250
 

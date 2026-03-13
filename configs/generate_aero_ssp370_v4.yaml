@@ -7,13 +7,13 @@ scheduler:
       - 0
       - null
       
-data_dir: /scratch/project_462001112/emulator_data/ 
+data_dir: /scratch/project_462001328/emulator_data/ 
 save_dir: ./
 
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
-load_path: /projappl/project_462001112/CESM_emulatorV2/run_test_aero_standard1_374.pt
+load_path: /projappl/project_462001328/CESM_emulatorV2/run_test_aero_standard1_374.pt
 gen_mode: gen  # Either gen/val/test
 batch_size: 2
 sample_steps: 250

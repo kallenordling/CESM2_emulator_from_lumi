@@ -7,14 +7,14 @@ scheduler:
       - 4.5
       - 3.5
       
-data_dir: /scratch/project_462001112/emulator_data/ 
+data_dir: /scratch/project_462001328/emulator_data/ 
 save_dir: ./
 guidance_scale: 2.0
 
 # Seed for random number generators
 seed: 42
 variables: ["TREFHT"]
-load_path: /projappl/project_462001112/CESM2_emulator_from_lumi/runs/run_test_aero_condenc2_1299.pt
+load_path: /projappl/project_462001328/CESM2_emulator_from_lumi/runs/run_test_aero_condenc2_1299.pt
 gen_mode: gen  # Either gen/val/test
 batch_size: 8
 sample_steps:  250
