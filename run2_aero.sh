@@ -2,14 +2,14 @@
 #SBATCH --job-name=diffusion_aero
 #SBATCH --account=project_462001328
 #SBATCH --partition=standard-g
-#SBATCH --nodes=40
+#SBATCH --nodes=20
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=128G
 #SBATCH --time=40:30:00
 #SBATCH --output=logs/%x_%j.out
-#SBATCH --exclude=nid005270,nid007250
+#SBATCH --exclude=nid005270,nid007250,nid005391
 
 set -euo pipefail
 mkdir -p logs
