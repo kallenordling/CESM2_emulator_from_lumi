@@ -349,8 +349,8 @@ class UNetTrainer:
                     self.accelerator.print(log_dict, {"Epoch": epoch})
 
             # ── Held-out validation at end of epoch ───────────────────────
-            if epoch % self.val_every == 0:
-                self.eval_held_out(epoch)
+            # Run every epoch; eval script is only spawned when a new best is found.
+            self.eval_held_out(epoch)
 
     @torch.no_grad()
     def _compute_val_metrics(self, batch, cond_map, scenario_ids=None):
