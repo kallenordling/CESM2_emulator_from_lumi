@@ -9,6 +9,7 @@
 #SBATCH --mem=128G
 #SBATCH --time=40:30:00
 #SBATCH --output=logs/%x_%j.out
+#SBATCH --exclude=nid005270,nid007250
 
 set -euo pipefail
 mkdir -p logs
