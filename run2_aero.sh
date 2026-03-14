@@ -61,8 +61,9 @@ sbatch --job-name=eval_watcher \
        --partition=small \
        --time=48:00:00 \
        --ntasks=1 --cpus-per-task=1 --mem=256M \
-       --output=logs/eval_watcher_%j.out \
-       watch_eval_triggers.sh
+       --chdir="${SLURM_SUBMIT_DIR}" \
+       --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
+       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh"
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
