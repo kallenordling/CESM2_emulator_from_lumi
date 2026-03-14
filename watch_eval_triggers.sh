@@ -12,7 +12,10 @@
 #          --ntasks=1 --cpus-per-task=1 --mem=256M \
 #          --output=logs/eval_watcher_%j.out watch_eval_triggers.sh
 
-TRIGGER_DIR="$(dirname "$0")/eval_triggers"
+# When run as a SLURM job, $0 points to /var/spool/slurmd/jobXXX/ so we
+# use SLURM_SUBMIT_DIR instead. Fall back to dirname $0 for manual runs.
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(dirname "$(realpath "$0")")}"
+TRIGGER_DIR="${PROJECT_DIR}/eval_triggers"
 DONE_DIR="${TRIGGER_DIR}/done"
 POLL_INTERVAL=60   # seconds between checks
 
