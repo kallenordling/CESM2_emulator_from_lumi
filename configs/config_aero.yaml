@@ -45,7 +45,7 @@ trainer:
     batch_size: 16       # must match batch_size in conf_data.yaml
     save_dir: runs/
     save_name: run_per-channel-cfg.pt
-    load_path: /project/project_462001328/CESM2_emulator_from_lumi/runs/run_per-channel-cfg_4.pt
+    load_path: /project/project_462001328/CESM2_emulator_from_lumi/runs/run_per-channel-cfg_44.pt
     lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.1
