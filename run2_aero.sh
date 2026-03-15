@@ -56,14 +56,15 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
 # to dispatch eval jobs when the trainer writes trigger files.
 # Runs outside the container (no GPU needed, just needs sbatch access).
 mkdir -p logs
-sbatch --job-name=eval_watcher \
+WATCHER_JOB=$(sbatch --job-name=eval_watcher \
        --account=project_462001112 \
        --partition=small \
        --time=48:00:00 \
        --ntasks=1 --cpus-per-task=1 --mem=256M \
        --chdir="${SLURM_SUBMIT_DIR}" \
        --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
-       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh"
+       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" | awk '{print $NF}')
+echo "[watcher] Submitted eval watcher job ${WATCHER_JOB}"
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
@@ -77,4 +78,10 @@ RUN_CMD="accelerate launch \
     --main_process_ip=$MAIN_PROCESS_IP \
     main_aero.py"
 
-srun bash -c "$RUN_CMD"
+srun bash -c "$RUN_CMD" || true
+
+# ── Cancel watcher when training finishes (walltime, crash, or clean exit) ───
+if [[ -n "${WATCHER_JOB}" ]]; then
+    echo "[watcher] Training finished — cancelling eval watcher job ${WATCHER_JOB}"
+    scancel "${WATCHER_JOB}" 2>/dev/null || true
+fi
