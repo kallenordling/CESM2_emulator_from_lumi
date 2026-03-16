@@ -17,7 +17,7 @@ module --force purge
 module use /appl/local/csc/modulefiles
 module load LUMI
 module load pytorch
-source "/projappl/project_462001328/venvs/diffesm/bin/activate"
+source "/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate"
 
 export PYTHONNOUSERSITE=1
 export HYDRA_FULL_ERROR=1
