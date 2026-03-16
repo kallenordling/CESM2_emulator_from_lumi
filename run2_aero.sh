@@ -22,18 +22,15 @@ source "/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate"
 
 # ── Networking ────────────────────────────────────────────────────────────────
 export NCCL_DEBUG=WARN
-export NCCL_IB_HCA=mlx5
 export NCCL_SOCKET_IFNAME=hsn
-export RCCL_ENABLE_SHARP=0
 
 # ── Python / Hydra ────────────────────────────────────────────────────────────
 export HYDRA_FULL_ERROR=1
 export PYTHONNOUSERSITE=1
+
 # ── ROCm / HIP ───────────────────────────────────────────────────────────────
 export ACCELERATE_USE_FSDP=0
-export CUDA_LAUNCH_BLOCKING=0
 export HSA_ENABLE_SDMA=0
-export MIOPEN_DEBUG_CONV_IMPLICIT_GEMM=0
 export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
 export TORCH_COMPILE=0
 # ── Per-job private MIOpen/HIP kernel cache ───────────────────────────────────
@@ -55,7 +52,6 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
 # Submits watch_eval_triggers.sh on the small partition so it can call sbatch
 # to dispatch eval jobs when the trainer writes trigger files.
 # Runs outside the container (no GPU needed, just needs sbatch access).
-mkdir -p logs
 WATCHER_JOB=$(sbatch --job-name=eval_watcher \
        --account=project_462001112 \
        --partition=small \
