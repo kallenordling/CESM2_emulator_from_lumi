@@ -792,11 +792,36 @@ class UNetTrainer:
                 except OSError:
                     pass
 
+    @staticmethod
+    def _migrate_circular_conv_keys(state_dict, model):
+        """Remap pre-LonCircularConv3d checkpoint keys to the new naming scheme.
+
+        LonCircularConv3d wraps nn.Conv3d in a .conv attribute, so old keys like
+        'input_conv.weight' become 'input_conv.conv.weight'.  We detect mismatches
+        by comparing against the current model's parameter names and remap on the fly.
+        """
+        model_keys = set(model.state_dict().keys())
+        new_sd = {}
+        for k, v in state_dict.items():
+            if k not in model_keys:
+                # Try inserting '.conv' before the final '.weight' / '.bias'
+                for suffix in (".weight", ".bias"):
+                    if k.endswith(suffix):
+                        candidate = k[: -len(suffix)] + ".conv" + suffix
+                        if candidate in model_keys:
+                            k = candidate
+                            break
+            new_sd[k] = v
+        return new_sd
+
     def load(self, path):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
-        # Restore model
-        self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["Unet"], strict=True)
+        # Restore model — migrate keys if checkpoint predates LonCircularConv3d
+        raw_sd = checkpoint["Unet"]
+        model = self.accelerator.unwrap_model(self.model)
+        migrated_sd = self._migrate_circular_conv_keys(raw_sd, model)
+        model.load_state_dict(migrated_sd, strict=True)
 
         # Restore EMA (optional)
         if "EMA" in checkpoint and checkpoint["EMA"] is not None and hasattr(self, "ema_model"):
@@ -819,6 +844,7 @@ class UNetTrainer:
                     update_after_step=100,  # only after this number of .update() calls will it start updating
                     update_every=10,
                 ).to(self.device)
+                ema_model_sd = self._migrate_circular_conv_keys(ema_model_sd, self.accelerator.unwrap_model(self.model))
                 ema_model.ema_model.load_state_dict(ema_model_sd)
                 ema_model.eval()
 
