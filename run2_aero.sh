@@ -33,18 +33,22 @@ export ACCELERATE_USE_FSDP=0
 export HSA_ENABLE_SDMA=0
 export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
 export TORCH_COMPILE=0
-# ── Per-job private MIOpen/HIP kernel cache ───────────────────────────────────
-# Prevents "filesystem error: cannot remove: Operation not permitted" crashes.
-# A previous job leaves /tmp/gfx90a6e.HIP.*.ufdb.txt behind; MIOpen tries to
-# update it and aborts when it can't. Using $SLURM_JOB_ID gives every job its
-# own isolated cache directory on each node's local /tmp.
-export MIOPEN_USER_DB_PATH=/tmp/miopen_${SLURM_JOB_ID}
+# ── MIOpen / HIP kernel cache ─────────────────────────────────────────────────
+# MIOPEN_USER_DB_PATH: persistent across jobs — stores benchmarked kernel
+# selections so MIOpen doesn't re-benchmark every restart (very slow on new
+# conv shapes). Shared across jobs for the same model; safe to read concurrently.
+#
+# MIOPEN_CUSTOM_CACHE_DIR / HIP_CACHE_PATH: per-job in /tmp to avoid the
+# "Operation not permitted" crash where a previous job's lock files block MIOpen.
+PERSISTENT_CACHE="${SLURM_SUBMIT_DIR}/.miopen_cache"
+mkdir -p "${PERSISTENT_CACHE}"
+export MIOPEN_USER_DB_PATH="${PERSISTENT_CACHE}"
 export MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen_${SLURM_JOB_ID}
 export HIP_CACHE_PATH=/tmp/hip_${SLURM_JOB_ID}
-# MIOPEN_FIND_ENFORCE=2: use cached kernels when present; don't crash on miss.
+# MIOPEN_FIND_ENFORCE=2: use cached kernels when present; benchmark on miss.
 export MIOPEN_FIND_ENFORCE=2
 
-# Create cache dirs on every node's local /tmp before any GPU process starts.
+# Create per-job cache dirs on every node's local /tmp before any GPU process starts.
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     bash -c "mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}"
 
