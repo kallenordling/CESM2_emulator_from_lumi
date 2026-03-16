@@ -3,12 +3,47 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops_exts import rearrange_many
 from einops import rearrange
 
 from torch.utils import checkpoint as torch_checkpoint
 
 from models.rotary_embedding import RotaryEmbedding
+
+
+class LonCircularConv3d(nn.Module):
+    """Conv3d with circular padding along the longitude (W) dimension.
+
+    Longitude is periodic (0° == 360°), so zero-padding at the left/right
+    edges introduces a spurious discontinuity.  This wrapper manually applies
+    circular padding along W before the convolution, while keeping the normal
+    zero-padding along H (latitude, which is NOT periodic).
+
+    Weight shapes are identical to the equivalent nn.Conv3d, so existing
+    checkpoints load without modification.
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, **kwargs):
+        super().__init__()
+        # Normalise to 3-tuples
+        def _t(v): return (v, v, v) if isinstance(v, int) else tuple(v)
+        kernel_size = _t(kernel_size)
+        stride      = _t(stride)
+        padding     = _t(padding)
+
+        self.lon_pad = padding[2]   # circular padding amount for W
+        # Hand off T and H padding to Conv3d; W padding is done manually
+        self.conv = nn.Conv3d(
+            in_channels, out_channels, kernel_size, stride=stride,
+            padding=(padding[0], padding[1], 0),
+            **kwargs,
+        )
+
+    def forward(self, x):
+        if self.lon_pad > 0:
+            x = F.pad(x, (self.lon_pad, self.lon_pad, 0, 0, 0, 0), mode="circular")
+        return self.conv(x)
 
 
 def checkpoint(fn, *args, enabled=False):
@@ -69,7 +104,7 @@ class Identity(nn.Module):
 
 
 def Downsample(dim):
-    return nn.Conv3d(dim, dim, (1, 4, 4), (1, 2, 2), (0, 1, 1))
+    return LonCircularConv3d(dim, dim, (1, 4, 4), (1, 2, 2), (0, 1, 1))
 
 
 def Upsample(dim):
@@ -222,7 +257,7 @@ class Cond_2D_CNN(nn.Module):
 class Block(nn.Module):
     def __init__(self, dim, dim_out, groups=8):
         super().__init__()
-        self.proj = nn.Conv3d(dim, dim_out, (1, 3, 3), padding=(0, 1, 1))
+        self.proj = LonCircularConv3d(dim, dim_out, (1, 3, 3), padding=(0, 1, 1))
         self.norm = nn.GroupNorm(groups, dim_out)
         self.act = nn.SiLU()
 
@@ -578,17 +613,17 @@ class SpatialCondEncoder(nn.Module):
         for i, out_ch in enumerate(level_dims):
             g = min(resnet_groups, out_ch)
             self.levels.append(nn.Sequential(
-                nn.Conv3d(in_ch,   out_ch, (1, 3, 3), padding=(0, 1, 1)),
+                LonCircularConv3d(in_ch,   out_ch, (1, 3, 3), padding=(0, 1, 1)),
                 nn.GroupNorm(g, out_ch),
                 nn.SiLU(),
-                nn.Conv3d(out_ch, out_ch, (1, 3, 3), padding=(0, 1, 1)),
+                LonCircularConv3d(out_ch, out_ch, (1, 3, 3), padding=(0, 1, 1)),
                 nn.GroupNorm(g, out_ch),
                 nn.SiLU(),
             ))
             # Match UNet Downsample; last level is identity (is_last)
             if i < n_levels - 1:
                 self.downsamplers.append(
-                    nn.Conv3d(out_ch, out_ch, (1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1))
+                    LonCircularConv3d(out_ch, out_ch, (1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1))
                 )
             else:
                 self.downsamplers.append(nn.Identity())
@@ -683,7 +718,7 @@ class UNetModel3D(nn.Module):
 
         # Initial convolution and attention to process input
         init_padding = init_kernel_size // 2
-        self.input_conv = nn.Conv3d(
+        self.input_conv = LonCircularConv3d(
             in_channels,
             model_dim,
             (1, init_kernel_size, init_kernel_size),
