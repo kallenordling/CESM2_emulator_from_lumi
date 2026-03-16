@@ -505,7 +505,8 @@ class UNetTrainer:
                 os.path.dirname(checkpoint_path), "..", "eval_output", f"best_ep{epoch:04d}",
             ))
 
-            trigger_path = os.path.join(trigger_dir, f"eval_request_ep{epoch:04d}.json")
+            run_tag = os.path.splitext(os.path.basename(self.save_name))[0]
+            trigger_path = os.path.join(trigger_dir, f"eval_request_{run_tag}_ep{epoch:04d}.json")
             payload = {
                 "epoch": epoch,
                 "checkpoint": checkpoint_path,

@@ -23,7 +23,7 @@ mkdir -p "$TRIGGER_DIR" "$DONE_DIR"
 echo "[watcher] Started. Watching ${TRIGGER_DIR} every ${POLL_INTERVAL}s"
 
 while true; do
-    for trigger in "${TRIGGER_DIR}"/eval_request_ep*.json; do
+    for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
         # glob returns the pattern itself if no match
         [[ -f "$trigger" ]] || continue
 
