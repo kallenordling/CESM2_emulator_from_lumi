@@ -24,7 +24,13 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
-VENV=/projappl/project_462001328/venvs/diffesm_laif/bin/activate
+# Resolve venv site-packages to the canonical /pfs/lustrep1/ path so it is
+# accessible inside singularity on compute nodes (where /projappl/ symlink
+# may not be mounted).  PYTHONPATH is exported and inherited by the container.
+_VENV_BASE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
+             || echo /projappl/project_462001328/venvs/diffesm_laif)
+export PYTHONPATH="${_VENV_BASE}/lib/python3.12/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+echo "[VENV] PYTHONPATH=${PYTHONPATH}"
 
 # ── Networking ────────────────────────────────────────────────────────────────
 export NCCL_DEBUG=WARN
@@ -82,7 +88,6 @@ NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
 RUN_CMD="singularity exec ${SIF} bash -c '
-    source ${VENV}
     accelerate launch \
         --config_file=accelerate_config.yaml \
         --num_processes=${NUM_PROCESSES} \
