@@ -15,15 +15,26 @@
 set -euo pipefail
 mkdir -p logs
 
+# ── LUMI AI Factory container ─────────────────────────────────────────────────
+# Replaces: module use /appl/local/csc/modulefiles && module load LUMI pytorch
+# CSC PyTorch no longer works with Slingshot after LUMI service break 21.1.2026.
+# Check available versions: ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif
 module --force purge
-module use /appl/local/csc/modulefiles
-module load LUMI
-module load pytorch
-source "/projappl/project_462001112/venvs/diffesm/bin/activate"
+module use /appl/local/laifs/modules
+module load lumi-aif-singularity-bindings
+SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1)
+echo "[CONTAINER] Using: ${SIF}"
+
+VENV=/projappl/project_462001112/venvs/diffesm/bin/activate
 
 # ── Networking ────────────────────────────────────────────────────────────────
 export NCCL_DEBUG=WARN
 export NCCL_SOCKET_IFNAME=hsn
+
+# ── Multi-node Slingshot performance fix ─────────────────────────────────────
+# https://github.com/lumi-ai-factory/laifs-container-recipes/issues/18
+# Preloads the host libfabric so RCCL uses the Slingshot 11 network correctly.
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libfabric.so.1
 
 # ── Python / Hydra ────────────────────────────────────────────────────────────
 export HYDRA_FULL_ERROR=1
@@ -34,6 +45,7 @@ export ACCELERATE_USE_FSDP=0
 export HSA_ENABLE_SDMA=0
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export TORCH_COMPILE=0
+
 # ── MIOpen / HIP kernel cache ─────────────────────────────────────────────────
 # Strategy: copy the persistent DB to each node's /tmp at startup, run with
 # the local copy (no Lustre concurrent-write races), then copy back from the
@@ -70,13 +82,16 @@ echo "[watcher] Submitted eval watcher job ${WATCHER_JOB}"
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
-RUN_CMD="accelerate launch \
-    --config_file=accelerate_config.yaml \
-    --num_processes=$NUM_PROCESSES \
-    --num_machines=$SLURM_NNODES \
-    --machine_rank=\$SLURM_NODEID \
-    --main_process_ip=$MAIN_PROCESS_IP \
-    main_aero.py"
+RUN_CMD="singularity exec \${SIF} bash -c '
+    source ${VENV}
+    accelerate launch \
+        --config_file=accelerate_config.yaml \
+        --num_processes=${NUM_PROCESSES} \
+        --num_machines=${SLURM_NNODES} \
+        --machine_rank=\${SLURM_NODEID} \
+        --main_process_ip=${MAIN_PROCESS_IP} \
+        main_aero.py
+'"
 
 srun bash -c "$RUN_CMD" || true
 
