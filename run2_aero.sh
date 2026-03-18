@@ -10,6 +10,7 @@
 #SBATCH --time=40:30:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --exclude=nid005270,nid007250,nid005671,nid005573
+#SBATCH --requeue
 
 set -euo pipefail
 mkdir -p logs
