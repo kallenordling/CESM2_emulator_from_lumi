@@ -15,6 +15,17 @@
 
 set -euo pipefail
 
+# Ensure the 'module' command is available when the script is run as
+# 'bash setup_venv_laif.sh' (non-login shell, module not yet defined).
+if ! type module &>/dev/null 2>&1; then
+    for _init in \
+        /usr/share/lmod/lmod/init/bash \
+        /appl/lmod/lmod/init/bash \
+        /etc/profile.d/lmod.sh; do
+        [[ -f "$_init" ]] && { source "$_init"; break; }
+    done
+fi
+
 PROJECT="${1:-project_462001328}"
 VENV_DIR="/projappl/${PROJECT}/venvs/diffesm_laif"
 
