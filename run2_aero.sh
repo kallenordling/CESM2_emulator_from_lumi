@@ -21,7 +21,7 @@ mkdir -p logs
 module --force purge
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
-SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1)
+SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
 VENV=/projappl/project_462001328/venvs/diffesm_laif/bin/activate
