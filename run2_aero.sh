@@ -81,7 +81,7 @@ echo "[watcher] Submitted eval watcher job ${WATCHER_JOB}"
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
-RUN_CMD="singularity exec \${SIF} bash -c '
+RUN_CMD="singularity exec ${SIF} bash -c '
     source ${VENV}
     accelerate launch \
         --config_file=accelerate_config.yaml \
