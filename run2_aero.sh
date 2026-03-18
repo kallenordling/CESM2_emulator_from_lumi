@@ -32,7 +32,7 @@ export PYTHONNOUSERSITE=1
 # ── ROCm / HIP ───────────────────────────────────────────────────────────────
 export ACCELERATE_USE_FSDP=0
 export HSA_ENABLE_SDMA=0
-export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export TORCH_COMPILE=0
 # ── MIOpen / HIP kernel cache ─────────────────────────────────────────────────
 # Strategy: copy the persistent DB to each node's /tmp at startup, run with
