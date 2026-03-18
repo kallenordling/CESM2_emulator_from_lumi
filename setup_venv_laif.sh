@@ -38,7 +38,7 @@ echo "Step 3: module load lumi-aif-singularity-bindings"
 module load lumi-aif-singularity-bindings
 echo "Step 4: finding SIF container"
 
-SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1)
+SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1) || true
 if [[ -z "${SIF}" ]]; then
     echo "ERROR: no lumi-multitorch-full container found in /appl/local/laifs/containers/"
     echo "Available containers:"
