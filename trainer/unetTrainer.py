@@ -238,8 +238,15 @@ class UNetTrainer:
             self.log_hparams()
 
         # Load model states from checkpoints if they exist
+        # load_path="0"     → start from scratch (no checkpoint loaded)
+        # load_path="newest" → auto-resolve the latest checkpoint in save_dir
         if self.load_path:
-            self.load(self.load_path)
+            resolved = self._resolve_load_path(self.load_path)
+            if resolved:
+                self.load_path = resolved
+                self.load(resolved)
+            else:
+                self.load_path = None
 
         # Prepare everything for GPU training
         self.prepare()
@@ -841,6 +848,38 @@ class UNetTrainer:
                             break
             new_sd[k] = v
         return new_sd
+
+    def _resolve_load_path(self, load_path):
+        """Resolve special load_path values to a concrete file path or None.
+
+        "0"      / 0      → None  (train from scratch)
+        "newest"          → newest checkpoint in save_dir matching save_name pattern
+        anything else     → returned as-is
+        """
+        if str(load_path) == "0":
+            print("[TRAINER] load_path=0 — starting from scratch")
+            return None
+
+        if str(load_path).lower() == "newest":
+            import glob
+            base = self.save_name.split(".pt")[0]
+            pattern = os.path.join(self.save_dir, f"{base}_*.pt")
+            paths = [p for p in glob.glob(pattern) if not p.endswith("_best.pt")]
+            if not paths:
+                print(f"[TRAINER] load_path=newest — no checkpoints found in {self.save_dir}, starting from scratch")
+                return None
+
+            def _epoch(p):
+                try:
+                    return int(os.path.basename(p).split("_")[-1].split(".")[0])
+                except ValueError:
+                    return -1
+
+            newest = max(paths, key=_epoch)
+            print(f"[TRAINER] load_path=newest → {newest}")
+            return newest
+
+        return load_path
 
     def load(self, path):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
