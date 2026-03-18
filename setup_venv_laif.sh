@@ -30,19 +30,15 @@ echo "Venv    : ${VENV_DIR}"
 echo ""
 
 # ── Load LAIF modules ─────────────────────────────────────────────────────────
-echo "Step 1: module --force purge"
 module --force purge
-echo "Step 2: module use /appl/local/laifs/modules"
 module use /appl/local/laifs/modules
-echo "Step 3: module load lumi-aif-singularity-bindings"
 module load lumi-aif-singularity-bindings
-echo "Step 4: finding SIF container"
 
-SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1) || true
-if [[ -z "${SIF}" ]]; then
-    echo "ERROR: no lumi-multitorch-full container found in /appl/local/laifs/containers/"
+SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
+if [[ ! -f "${SIF}" ]]; then
+    echo "ERROR: container not found at ${SIF}"
     echo "Available containers:"
-    ls /appl/local/laifs/containers/ 2>/dev/null || echo "  (directory not found)"
+    ls /appl/local/laifs/containers/*.sif 2>/dev/null || echo "  (none found)"
     exit 1
 fi
 echo "Container: ${SIF}"
