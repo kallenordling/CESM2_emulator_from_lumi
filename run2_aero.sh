@@ -25,7 +25,7 @@ module load lumi-aif-singularity-bindings
 SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1)
 echo "[CONTAINER] Using: ${SIF}"
 
-VENV=/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate
+VENV=/projappl/project_462001328/venvs/diffesm_laif/bin/activate
 
 # ── Networking ────────────────────────────────────────────────────────────────
 export NCCL_DEBUG=WARN
