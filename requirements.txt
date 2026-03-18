@@ -1,0 +1,26 @@
+# Extra packages needed on top of the LUMI AI Factory container.
+# The container already provides: torch, torchvision, numpy, scipy,
+# matplotlib, pandas, scikit-learn, tqdm.
+#
+# Install with setup_venv_laif.sh — do NOT pip install torch here.
+
+# Training / model
+accelerate
+diffusers
+hydra-core
+omegaconf
+ema-pytorch
+einops
+einops-exts          # required by models/video_net.py (rearrange_many)
+beartype             # required by models/rotary_embedding.py
+
+# Data
+xarray
+dask
+netCDF4
+
+# Evaluation / plotting
+cartopy              # optional — spatial maps in eval_aero.py
+
+# Attribution (generate_ssp*.py scripts only)
+captum
