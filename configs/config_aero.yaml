@@ -45,7 +45,7 @@ trainer:
     batch_size: 16       # must match batch_size in conf_data.yaml
     save_dir: runs/
     save_name: run_per-channel-cfg.pt
-    load_path: newest   # "0" = train from scratch, "newest" = auto-load latest checkpoint, or explicit path
+    load_path: "0"   # "0" = train from scratch, "newest" = auto-load latest checkpoint, or explicit path
     lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.1
