@@ -74,8 +74,8 @@ WATCHER_JOB=$(sbatch --job-name=eval_watcher \
        --ntasks=1 --cpus-per-task=1 --mem=256M \
        --chdir="${SLURM_SUBMIT_DIR}" \
        --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
-       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" | awk '{print $NF}')
-echo "[watcher] Submitted eval watcher job ${WATCHER_JOB}"
+       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" 2>/dev/null | awk '{print $NF}') || WATCHER_JOB=""
+echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED}"
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
