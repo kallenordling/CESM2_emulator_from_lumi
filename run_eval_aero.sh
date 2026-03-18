@@ -34,7 +34,7 @@ cd /projappl/project_462001328/CESM2_emulator_from_lumi
 # When submitted by the trainer, CHECKPOINT and OUTPUT_DIR are set via --export.
 # Fall back to defaults for manual submission.
 CHECKPOINT="${CHECKPOINT:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-/projappl/project_462001328/CESM2_emulator_from_lumi/eval_output}"
+OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
 
 if [ -n "${CHECKPOINT}" ]; then
     python eval_aero.py \

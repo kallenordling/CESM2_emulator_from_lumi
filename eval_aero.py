@@ -655,7 +655,7 @@ def main():
     parser.add_argument("--checkpoint",  default=None,
                         help="Path to a specific checkpoint file. "
                              "Overrides --runs-dir / find_latest_checkpoint.")
-    parser.add_argument("--output-dir",  default="eval_output")
+    parser.add_argument("--output-dir",  default="/scratch/project_462001328/eval_output")
     parser.add_argument("--sample-steps", type=int, default=SAMPLE_STEPS)
     parser.add_argument("--batch-size",   type=int, default=BATCH_SIZE)
     args = parser.parse_args()
