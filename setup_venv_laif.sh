@@ -52,12 +52,16 @@ singularity exec "${SIF}" python -m venv --system-site-packages "${VENV_DIR}"
 
 # ── Install project-specific packages ────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve to real path in case /project/ is a symlink not visible inside
+# the container (LUMI mounts /pfs/lustrep1/... but not always /project/).
+REAL_SCRIPT_DIR="$(realpath "${SCRIPT_DIR}" 2>/dev/null || echo "${SCRIPT_DIR}")"
+REQ_FILE="${REAL_SCRIPT_DIR}/requirements.txt"
 
-echo "Installing packages from requirements.txt ..."
+echo "Installing packages from ${REQ_FILE} ..."
 singularity exec "${SIF}" bash -c "
     source ${VENV_DIR}/bin/activate
     pip install --upgrade pip
-    pip install -r ${SCRIPT_DIR}/requirements.txt
+    pip install -r ${REQ_FILE}
 "
 
 echo ""
