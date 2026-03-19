@@ -300,9 +300,11 @@ class UNetTrainer:
                 print(f"[TRAINER] torch.compile skipped: {e}")
 
     def train(self):
+        import time
         epoch_anom_signals = []
         epoch_anom_errors = []
         for epoch in range(self.first_epoch, self.max_epochs):
+            epoch_start = time.time()
             for step, batch_tuple in enumerate(self.train_loader.generate()):
                 self.model.train()
 
@@ -361,6 +363,13 @@ class UNetTrainer:
                     self.accelerator.log(log_dict, step=self.global_step)
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch})
+
+            if self.accelerator.is_main_process:
+                epoch_secs = time.time() - epoch_start
+                self.accelerator.print(
+                    f"[EPOCH {epoch}] duration: {epoch_secs/60:.1f} min  "
+                    f"({epoch_secs:.0f}s)  steps: {step+1}"
+                )
 
             # ── Held-out validation at end of epoch ───────────────────────
             # Run every epoch; eval script is only spawned when a new best is found.
