@@ -49,7 +49,7 @@ export PYTHONNOUSERSITE=1
 export ACCELERATE_USE_FSDP=0
 export HSA_ENABLE_SDMA=0
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export TORCH_COMPILE=1
+export TORCH_COMPILE=0  # ROCm Triton missing cluster_dims — inductor crash
 
 # ── MIOpen / HIP kernel cache ─────────────────────────────────────────────────
 # Strategy: copy the persistent DB to each node's /tmp at startup, run with
