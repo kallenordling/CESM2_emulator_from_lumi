@@ -349,8 +349,52 @@ class MultiExperimentDataLoader:
         else:
             yield from self._generate_mixed_uniform(device)
 
+    def _vectorized_fetch(
+        self,
+        window_indices_per_exp: list[np.ndarray],
+        device,
+        shuffle: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Assemble a batch via vectorized tensor indexing (no Python loop per sample).
+
+        Parameters
+        ----------
+        window_indices_per_exp:
+            List of length n_exp; each element is an int array of local
+            window indices (0-based within that experiment's tensor_data).
+        device:
+            Target device.
+        shuffle:
+            Whether to randomly permute the assembled batch.
+        """
+        seq_len = self.dataset.seq_len
+        t_offsets = torch.arange(seq_len, dtype=torch.long)
+        x_parts: list[torch.Tensor] = []
+        cond_parts: list[torch.Tensor] = []
+        ids_parts: list[torch.Tensor] = []
+
+        for exp_idx, win_idx in enumerate(window_indices_per_exp):
+            ds = self.dataset.datasets[exp_idx]
+            # t_idx: [B_exp, seq_len]
+            t_idx = torch.from_numpy(win_idx.astype(np.int64)).unsqueeze(1) + t_offsets
+            # tensor_data: [V, T, H, W] → indexed by t_idx → [V, B_exp, seq_len, H, W]
+            x_parts.append(ds.tensor_data[:, t_idx].permute(1, 0, 2, 3, 4))
+            cond_parts.append(ds.tensor_data_cond[:, t_idx].permute(1, 0, 2, 3, 4))
+            ids_parts.append(torch.full((len(win_idx),), exp_idx, dtype=torch.long))
+
+        x_cat    = torch.cat(x_parts,    dim=0)
+        cond_cat = torch.cat(cond_parts, dim=0)
+        ids_cat  = torch.cat(ids_parts,  dim=0)
+
+        if shuffle:
+            perm = torch.randperm(x_cat.shape[0])
+            x_cat, cond_cat, ids_cat = x_cat[perm], cond_cat[perm], ids_cat[perm]
+
+        return x_cat.to(device), cond_cat.to(device), ids_cat.to(device)
+
     def _generate_mixed_uniform(self, device):
         """Original uniform-random mixed batches."""
+        offsets = self.dataset._index._offsets
         index_pools: list[np.ndarray] = []
         for exp_idx in range(self.n_exp):
             flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
@@ -365,16 +409,11 @@ class MultiExperimentDataLoader:
 
         for b in range(n_batches):
             s, e = b * self.per_exp, (b + 1) * self.per_exp
-            batch_flat: list[int] = []
-            for pool in index_pools:
-                batch_flat.extend(pool[s:e].tolist())
-            random.shuffle(batch_flat)
-
-            samples    = [self.dataset[i] for i in batch_flat]
-            x_batch    = torch.stack([s[0] for s in samples]).to(device)
-            cond_batch = torch.stack([s[1] for s in samples]).to(device)
-            ids_batch  = torch.stack([s[2] for s in samples]).to(device)
-            yield x_batch, cond_batch, ids_batch
+            window_indices_per_exp = [
+                pool[s:e] - offsets[exp_idx]
+                for exp_idx, pool in enumerate(index_pools)
+            ]
+            yield self._vectorized_fetch(window_indices_per_exp, device)
 
     def _generate_mixed_stratified(self, device):
         """Period-stratified mixed batches.
@@ -446,21 +485,12 @@ class MultiExperimentDataLoader:
 
         for b in range(n_batches):
             sl = slice(b * per_period_per_exp, (b + 1) * per_period_per_exp)
-            batch_flat: list[int] = []
-            for exp_idx in range(self.n_exp):
-                offset = offsets[exp_idx]
-                # Convert local window indices → flat dataset indices
-                batch_flat.extend((h_pools[exp_idx][sl] + offset).tolist())
-                batch_flat.extend((p_pools[exp_idx][sl] + offset).tolist())
-                batch_flat.extend((f_pools[exp_idx][sl] + offset).tolist())
-
-            random.shuffle(batch_flat)
-
-            samples    = [self.dataset[i] for i in batch_flat]
-            x_batch    = torch.stack([s[0] for s in samples]).to(device)
-            cond_batch = torch.stack([s[1] for s in samples]).to(device)
-            ids_batch  = torch.stack([s[2] for s in samples]).to(device)
-            yield x_batch, cond_batch, ids_batch
+            # Pools already contain local window indices (no offset needed)
+            window_indices_per_exp = [
+                np.concatenate([h_pools[exp_idx][sl], p_pools[exp_idx][sl], f_pools[exp_idx][sl]])
+                for exp_idx in range(self.n_exp)
+            ]
+            yield self._vectorized_fetch(window_indices_per_exp, device)
 
     # ------------------------------------------------------------------
 
@@ -482,16 +512,11 @@ class MultiExperimentDataLoader:
             if self.steps_per_realization is not None:
                 n_batches = min(n_batches, self.steps_per_realization)
 
+            offset = self.dataset._index._offsets[exp_idx]
             for b in range(n_batches):
                 s, e = b * self.batch_size, (b + 1) * self.batch_size
-                batch_flat = shuffled[s:e].tolist()
-
-                samples = [self.dataset[i] for i in batch_flat]
-                x_batch    = torch.stack([s[0] for s in samples]).to(device)
-                cond_batch = torch.stack([s[1] for s in samples]).to(device)
-                ids_batch  = torch.stack([s[2] for s in samples]).to(device)
-
-                yield x_batch, cond_batch, ids_batch
+                window_indices = shuffled[s:e] - offset
+                yield self._vectorized_fetch([window_indices], device, shuffle=False)
 
 
 # ---------------------------------------------------------------------------
