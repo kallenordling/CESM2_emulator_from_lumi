@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_aero
-#SBATCH --account=project_462001112
+#SBATCH --account=project_462001328
 #SBATCH --partition=standard-g
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
@@ -9,7 +9,6 @@
 #SBATCH --mem=128G
 #SBATCH --time=40:30:00
 #SBATCH --output=logs/%x_%j.out
-#SBATCH --exclude=nid005270,nid007250,nid005671,nid005573
 #SBATCH --requeue
 
 set -euo pipefail
@@ -22,10 +21,16 @@ mkdir -p logs
 module --force purge
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
-SIF=$(ls /appl/local/laifs/containers/lumi-multitorch-full-*.sif 2>/dev/null | sort -V | tail -1)
+SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
-VENV=/projappl/project_462001112/venvs/diffesm_laif/bin/activate
+# Inject our venv's site-packages into the container via SINGULARITYENV_PYTHONPATH.
+# Regular PYTHONPATH is ignored/overridden by the container's own environment;
+# SINGULARITYENV_* variables are guaranteed to be set inside singularity.
+_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
+             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
+echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
 
 # ── Networking ────────────────────────────────────────────────────────────────
 export NCCL_DEBUG=WARN
@@ -75,15 +80,14 @@ WATCHER_JOB=$(sbatch --job-name=eval_watcher \
        --ntasks=1 --cpus-per-task=1 --mem=256M \
        --chdir="${SLURM_SUBMIT_DIR}" \
        --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
-       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" | awk '{print $NF}')
-echo "[watcher] Submitted eval watcher job ${WATCHER_JOB}"
+       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" 2>/dev/null | awk '{print $NF}') || WATCHER_JOB=""
+echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED}"
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
-RUN_CMD="singularity exec \${SIF} bash -c '
-    source ${VENV}
+RUN_CMD="singularity exec ${SIF} bash -c '
     accelerate launch \
         --config_file=accelerate_config.yaml \
         --num_processes=${NUM_PROCESSES} \
