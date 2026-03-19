@@ -10,9 +10,9 @@ data_config: config_data.yaml
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 1
     device_placement: True
-    sync_batchnorm: True
+    sync_batchnorm: False
 
 model:
     _target_: models.video_net.UNetModel3D

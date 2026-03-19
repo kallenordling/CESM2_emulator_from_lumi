@@ -195,8 +195,15 @@ class UNetTrainer:
             self.climatology = None
             print("[TRAINER] No climatology found on dataset – anomaly loss will use batch mean as baseline.")
 
+        # Scale LR linearly with effective batch size relative to a 32-GPU baseline.
+        # Keeps convergence speed consistent regardless of how many nodes are used.
+        _ref_gpus = 32  # 4 nodes × 8 GPUs — the original tuned configuration
+        _scaled_lr = self.lr * (self.accelerator.num_processes / _ref_gpus)
+        if self.accelerator.is_main_process:
+            print(f"[TRAINER] LR scaled: {self.lr:.2e} × "
+                  f"({self.accelerator.num_processes}/{_ref_gpus}) = {_scaled_lr:.2e}")
         self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr
+            self.model.parameters(), lr=_scaled_lr
         )
 
         if self._multi:
