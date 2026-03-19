@@ -21,15 +21,15 @@ n_components_cond: null
 # ── Loader settings ──────────────────────────────────────────
 batch_size: 16          # 4 scenarios × 2 windows — increase to 16 if VRAM allows
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
-steps_per_realization: null  # use all available windows per realization
+steps_per_realization: 100  # ~39% of each realization per epoch; full coverage over ~3 epochs
 
 # ── Per-experiment configs ────────────────────────────────────
 experiment_configs:
 
   - scenario_name: hist
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/hist
-    cond_file: /scratch/project_462001112/emulator_data/emissions_hist_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
+    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_timefixed.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -55,8 +55,8 @@ experiment_configs:
 
   - scenario_name: ssp370
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/ssp370
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -82,8 +82,8 @@ experiment_configs:
 
   - scenario_name: aaer
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/AAER
-    cond_file: /scratch/project_462001112/emulator_data/emissions_aero_only_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
+    cond_file: /scratch/project_462001328/emulator_data/emissions_aero_only_timefixed.nc
     realizations:
       - "001"
       - "002"
@@ -98,8 +98,8 @@ experiment_configs:
 
   - scenario_name: ghg
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/GHG
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc
     realizations:
       - "001"
       - "002"
@@ -117,28 +117,28 @@ val_experiment_configs:
 
   - scenario_name: hist
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/hist
-    cond_file: /scratch/project_462001112/emulator_data/emissions_hist_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
+    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_timefixed.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: ssp370
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/ssp370
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: aaer
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/AAER
-    cond_file: /scratch/project_462001112/emulator_data/emissions_aero_only_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
+    cond_file: /scratch/project_462001328/emulator_data/emissions_aero_only_timefixed.nc
     realizations:
       - "010"
 
   - scenario_name: ghg
     time_dim: time
-    data_dir: /scratch/project_462001112/emulator_data/training_data/TREFHT/GHG
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only_timefixed.nc
+    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc
     realizations:
       - "010"
