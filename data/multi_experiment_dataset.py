@@ -390,7 +390,11 @@ class MultiExperimentDataLoader:
             perm = torch.randperm(x_cat.shape[0])
             x_cat, cond_cat, ids_cat = x_cat[perm], cond_cat[perm], ids_cat[perm]
 
-        return x_cat.to(device), cond_cat.to(device), ids_cat.to(device)
+        return (
+            x_cat.to(device, non_blocking=True),
+            cond_cat.to(device, non_blocking=True),
+            ids_cat.to(device, non_blocking=True),
+        )
 
     def _generate_mixed_uniform(self, device):
         """Original uniform-random mixed batches."""
