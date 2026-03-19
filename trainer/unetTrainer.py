@@ -157,6 +157,12 @@ class UNetTrainer:
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
         # Eliminates the expensive second out_null forward pass.
         self.cfg_drop_prob = getattr(self, "cfg_drop_prob", 0.1)
+        # Per-channel CFG dropout: independently drop CO2 (ch 0) and SUL (ch 1).
+        # Required for per-channel classifier-free guidance at inference time.
+        # Each channel is dropped independently, so the model sees all four
+        # conditioning subsets: (co2, sul), (co2, null), (null, sul), (null, null).
+        self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
+        self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
         self._cached_sensitivity = 0.0  # last valid sensitivity value
         self.scheduler.set_timesteps(self.sample_steps)
 
@@ -189,8 +195,15 @@ class UNetTrainer:
             self.climatology = None
             print("[TRAINER] No climatology found on dataset – anomaly loss will use batch mean as baseline.")
 
+        # Scale LR linearly with effective batch size relative to a 32-GPU baseline.
+        # Keeps convergence speed consistent regardless of how many nodes are used.
+        _ref_gpus = 32  # 4 nodes × 8 GPUs — the original tuned configuration
+        _scaled_lr = self.lr * (self.accelerator.num_processes / _ref_gpus)
+        if self.accelerator.is_main_process:
+            print(f"[TRAINER] LR scaled: {self.lr:.2e} × "
+                  f"({self.accelerator.num_processes}/{_ref_gpus}) = {_scaled_lr:.2e}")
         self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr
+            self.model.parameters(), lr=_scaled_lr
         )
 
         if self._multi:
@@ -512,7 +525,7 @@ class UNetTrainer:
                 "epoch": epoch,
                 "checkpoint": checkpoint_path,
                 "output_dir": output_dir,
-                "sbatch_script": os.path.join(project_root, "run_eval_aero.sh"),
+                "sbatch_script": os.path.join(project_root, getattr(self, "eval_script", "run_eval_aero.sh")),
                 "log_dir": os.path.join(project_root, "logs"),
             }
             # Write atomically: tmp file then rename so watcher never sees a partial file
@@ -583,8 +596,29 @@ class UNetTrainer:
 
             NULL_COND_VALUE = -1.0
 
+            # ── Per-channel CFG dropout ───────────────────────────────────────
+            # Independently zero CO2 (ch 0) and SUL (ch 1) for randomly chosen
+            # batch elements. This trains the model on all four conditioning
+            # subsets so that per-channel guidance works correctly at inference.
+            if self.cfg_co2_drop_prob > 0 or self.cfg_sul_drop_prob > 0:
+                cond_map_input = cond_map.clone()
+                if self.cfg_co2_drop_prob > 0:
+                    drop_co2 = (
+                        torch.rand(clean_samples.shape[0], device=self.device)
+                        < self.cfg_co2_drop_prob
+                    )
+                    cond_map_input[drop_co2, 0] = NULL_COND_VALUE
+                if self.cfg_sul_drop_prob > 0:
+                    drop_sul = (
+                        torch.rand(clean_samples.shape[0], device=self.device)
+                        < self.cfg_sul_drop_prob
+                    )
+                    cond_map_input[drop_sul, 1] = NULL_COND_VALUE
+            else:
+                cond_map_input = cond_map
+
             # ── Conditioned forward pass (with gradients) ─────────────────────
-            model_output = self.model(noisy_samples, timesteps, cond_map=cond_map)
+            model_output = self.model(noisy_samples, timesteps, cond_map=cond_map_input)
 
             # Make sure to get the right target for the loss
             if self.scheduler.config.prediction_type == "epsilon":
