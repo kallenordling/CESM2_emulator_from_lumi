@@ -525,9 +525,11 @@ class UNetTrainer:
             trigger_dir = os.path.join(project_root, "eval_triggers")
             os.makedirs(trigger_dir, exist_ok=True)
 
-            output_dir = os.path.normpath(os.path.join(
-                os.path.dirname(checkpoint_path), "..", "eval_output", f"best_ep{epoch:04d}",
-            ))
+            # Write eval output to scratch (writable), not next to the checkpoint
+            # which may be in projappl (read-only on compute nodes).
+            run_tag_for_dir = os.path.splitext(os.path.basename(self.save_name))[0]
+            scratch_root = os.environ.get("SCRATCH", "/scratch/project_462001328")
+            output_dir = os.path.join(scratch_root, "eval_output", run_tag_for_dir, f"best_ep{epoch:04d}")
 
             run_tag = os.path.splitext(os.path.basename(self.save_name))[0]
             trigger_path = os.path.join(trigger_dir, f"eval_request_{run_tag}_ep{epoch:04d}.json")
