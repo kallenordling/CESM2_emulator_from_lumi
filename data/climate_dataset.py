@@ -503,6 +503,8 @@ class ClimateDataset(Dataset):
                 available = set(int(v) for v in coord_vals)
                 valid = sorted(selected_years & available)
                 self.xr_data = self.xr_data.sel({self.time_dim: valid})
+            # Store year values before converting so we can close xr_data early
+            self._time_values = self.xr_data[self.time_dim].values.astype(int)
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
@@ -843,13 +845,13 @@ class ClimateDataset(Dataset):
             If no target data is loaded (``cond_only=True``) or if the loaded
             dataset contains no years in the requested baseline window.
         """
-        if self.tensor_data is None or self.xr_data is None:
+        if self.tensor_data is None or not hasattr(self, "_time_values") or self._time_values is None:
             raise RuntimeError(
                 "get_baseline_mean() requires target data to be loaded.  "
                 "Call load_data() first and make sure cond_only=False."
             )
 
-        all_years = self.xr_data[self.time_dim].values.astype(int)
+        all_years = self._time_values
         mask = (all_years >= baseline_start) & (all_years <= baseline_end)
 
         if not mask.any():
@@ -980,7 +982,7 @@ class StratifiedPeriodSampler:
         Uses self.dataset.xr_data.year to assign each window index to a
         period based on the *first* year of that window.
         """
-        years = self.dataset.xr_data.year.values.astype(int)
+        years = self.dataset._time_values
         n_windows = len(self.dataset)   # = len(years) - seq_len + 1
 
         # Year of the first time-step in each window

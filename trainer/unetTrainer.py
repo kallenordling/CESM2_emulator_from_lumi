@@ -374,6 +374,7 @@ class UNetTrainer:
             # ── Held-out validation at end of epoch ───────────────────────
             # Run every epoch; eval script is only spawned when a new best is found.
             self.eval_held_out(epoch)
+            torch.cuda.empty_cache()
 
     @torch.no_grad()
     def _compute_val_metrics(self, batch, cond_map, scenario_ids=None):
@@ -626,16 +627,31 @@ class UNetTrainer:
             else:
                 cond_map_input = cond_map
 
-            # ── Conditioned forward pass (with gradients) ─────────────────────
-            model_output = self.model(noisy_samples, timesteps, cond_map=cond_map_input)
-
-            # Make sure to get the right target for the loss
+            # ── Precompute target and true_anomaly before forward passes ──────
+            # This lets us free clean_samples before the (memory-heavy) forward
+            # passes, reducing peak VRAM when the null pass is also needed.
             if self.scheduler.config.prediction_type == "epsilon":
                 target = noise
             elif self.scheduler.config.prediction_type == "v_prediction":
                 target = self.scheduler.get_velocity(clean_samples, noise, timesteps)
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
+
+            if self.cond_loss_scaling > 0:
+                assert self.climatology is not None, (
+                    "climatology must be set on the dataset — "
+                    "anomaly loss requires a fixed 1850-1900 baseline"
+                )
+                baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
+                true_anomaly = (clean_samples - baseline).detach()
+                del baseline
+            else:
+                true_anomaly = None
+
+            del clean_samples  # no longer needed; free before forward passes
+
+            # ── Conditioned forward pass (with gradients) ─────────────────────
+            model_output = self.model(noisy_samples, timesteps, cond_map=cond_map_input)
 
             # ── Primary denoising loss ────────────────────────────────────────
             mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
@@ -649,27 +665,18 @@ class UNetTrainer:
                 with torch.no_grad():
                     null_cond = torch.full_like(cond_map, NULL_COND_VALUE)
                     null_output = self.model(noisy_samples, timesteps, cond_map=null_cond)
+                    del null_cond
 
                 # ── Decode both outputs to x0 space ──────────────────────────
                 pred_x0_cond = self.get_original_sample(noisy_samples, model_output, timesteps)
                 with torch.no_grad():
                     pred_x0_null = self.get_original_sample(noisy_samples, null_output, timesteps)
+                del null_output  # no longer needed; not part of grad graph
 
                 # ── Sensitivity metric: how much does conditioning move output ─
                 # Measured in x0 space so it's in physical units (not noise space).
                 cond_sensitivity = (pred_x0_cond - pred_x0_null).abs().mean().detach()
                 self._cached_sensitivity = cond_sensitivity.item()
-
-                # ── True anomaly: target - climatology ────────────────────
-                # The forced climate signal is what the training target looks
-                # like relative to the fixed 1850-1900 pre-industrial baseline.
-                assert self.climatology is not None, (
-                    "climatology must be set on the dataset — "
-                    "anomaly loss requires a fixed 1850-1900 baseline"
-                )
-                baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
-                true_anomaly = (clean_samples - baseline).detach()
-                del baseline
 
                 # ── Predicted anomaly: cond output - null output ──────────────
                 # The difference between the conditioned and null model x0
