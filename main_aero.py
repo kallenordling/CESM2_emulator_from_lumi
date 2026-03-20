@@ -1,3 +1,8 @@
+import os
+# Must be set before any GPU allocation (before torch import)
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+
 from omegaconf import DictConfig, OmegaConf
 import hydra
 from hydra.utils import instantiate
@@ -9,10 +14,8 @@ from diffusers import DDPMScheduler
 from data.multi_experiment_dataset import MultiExperimentDataset, build_multi_experiment_loader
 from trainer.unetTrainer import UNetTrainer
 from models.video_net import UNetModel3D
-import os
 import torch
 print(f"PyTorch: {torch.__version__}  ROCm/HIP: {torch.version.hip}  CUDA: {torch.version.cuda}")
-os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.distributed')
 warnings.filterwarnings('ignore', category=FutureWarning)
