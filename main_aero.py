@@ -10,6 +10,8 @@ from data.multi_experiment_dataset import MultiExperimentDataset, build_multi_ex
 from trainer.unetTrainer import UNetTrainer
 from models.video_net import UNetModel3D
 import os
+import torch
+print(f"PyTorch: {torch.__version__}  ROCm/HIP: {torch.version.hip}  CUDA: {torch.version.cuda}")
 os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.distributed')
