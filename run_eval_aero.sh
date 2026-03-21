@@ -17,7 +17,12 @@ module --force purge
 module use /appl/local/csc/modulefiles
 module load LUMI
 module load pytorch
-source "/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate"
+# Try container-internal path first (/pfs/lustrep1/projappl), fall back to login-node path
+if [ -f "/pfs/lustrep1/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate" ]; then
+    source "/pfs/lustrep1/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate"
+else
+    source "/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate"
+fi
 
 export PYTHONNOUSERSITE=1
 export HYDRA_FULL_ERROR=1
@@ -29,7 +34,12 @@ export HIP_CACHE_PATH=/tmp/hip_${SLURM_JOB_ID}
 export MIOPEN_FIND_ENFORCE=2
 mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 
-cd /projappl/project_462001328/CESM2_emulator_from_lumi
+# Use container-internal path if available
+if [ -d "/pfs/lustrep1/projappl/project_462001328/CESM2_emulator_from_lumi" ]; then
+    cd /pfs/lustrep1/projappl/project_462001328/CESM2_emulator_from_lumi
+else
+    cd /projappl/project_462001328/CESM2_emulator_from_lumi
+fi
 
 # When submitted by the trainer, CHECKPOINT and OUTPUT_DIR are set via --export.
 # Fall back to defaults for manual submission.
