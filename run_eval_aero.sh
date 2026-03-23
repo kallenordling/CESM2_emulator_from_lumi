@@ -17,6 +17,8 @@ module --force purge
 module use /appl/local/csc/modulefiles
 module load LUMI
 module load pytorch
+# Clear any inherited PYTHONPATH to avoid venv contamination from --export=ALL
+unset PYTHONPATH
 # Try container-internal path first (/pfs/lustrep1/projappl), fall back to login-node path
 if [ -f "/pfs/lustrep1/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate" ]; then
     source "/pfs/lustrep1/projappl/project_462001328/venvs/diffesm/diffesm/bin/activate"
