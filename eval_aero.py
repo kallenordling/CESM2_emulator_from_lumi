@@ -26,6 +26,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from scipy import stats
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 from ema_pytorch import EMA
@@ -549,16 +550,23 @@ def _nearest_year(years: np.ndarray, target: int) -> int:
 def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                       baseline_map: np.ndarray, map_years: list,
                       cesm_data: np.ndarray | None, cesm_years: np.ndarray | None,
-                      out_path: str):
+                      out_path: str,
+                      gen_ensemble: np.ndarray | None = None,
+                      cesm_ensemble: np.ndarray | None = None):
     """Spatial anomaly maps at requested years.
 
-    gen_data    : (T, H, W) generated temperature [°C]
-    baseline_map: (H, W)    time-mean over 1850-1900 from hist
+    gen_data    : (T, H, W)       generated temperature ensemble mean [°C]
+    baseline_map: (H, W)          time-mean over 1850-1900 from hist
+    gen_ensemble : (N, T, H, W)   individual model members (optional)
+    cesm_ensemble: (M, T, H, W)   individual CESM2 members (optional)
 
     Rows:
       0 — Model anomaly  (re 1850-1900)
       1 — CESM2 anomaly  (re 1850-1900)   [only if cesm_data provided]
       2 — Difference: Model − CESM2        [only if cesm_data provided]
+          Stippling marks grid cells where the difference is statistically
+          significant (Welch t-test p < 0.05 across ensemble members),
+          i.e. not explained by natural climate variability.
     """
     try:
         import cartopy.crs as ccrs
@@ -634,6 +642,28 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                         f"{name} CESM2  ({yr_cs})")
             _plot_panel(axes[2, col], anom_gen - anom_cs, norm_diff,
                         f"Model − CESM2  ({yr_gen})")
+
+            # Stipple where difference is significant vs natural variability
+            if gen_ensemble is not None and cesm_ensemble is not None:
+                # Per-member anomalies at this year: (N, H, W) and (M, H, W)
+                gen_members  = gen_ensemble[:, idx_gen]  - baseline_map   # (N, H, W)
+                cesm_members = cesm_ensemble[:, idx_cs] - baseline_map    # (M, H, W)
+                # Welch's t-test at each grid point
+                _, pvals = stats.ttest_ind(gen_members, cesm_members,
+                                           axis=0, equal_var=False)       # (H, W)
+                sig_mask = pvals < 0.05
+                # Overlay stipple dots on significant grid cells
+                lon_idx, lat_idx = np.meshgrid(np.arange(sig_mask.shape[1]),
+                                               np.arange(sig_mask.shape[0]))
+                sig_lats = LAT[lat_idx[sig_mask]]
+                sig_lons = LON[lon_idx[sig_mask]]
+                ax_diff = axes[2, col]
+                plot_kw = dict(color="k", s=0.3, alpha=0.5, linewidths=0, rasterized=True)
+                if USE_CARTOPY:
+                    ax_diff.scatter(sig_lons, sig_lats, transform=ccrs.PlateCarree(),
+                                    zorder=5, **plot_kw)
+                else:
+                    ax_diff.scatter(sig_lons, sig_lats, zorder=5, **plot_kw)
 
     for row, label in enumerate(row_labels):
         axes[row, 0].set_ylabel(label, fontsize=10)
@@ -789,14 +819,16 @@ def main():
             map_out = os.path.join(args.output_dir, f"anomaly_maps_{name}.png")
             print(f"  Plotting anomaly maps …")
             plot_anomaly_maps(
-                name        = name,
-                gen_data    = gen_celsius,
-                gen_years   = cond_years,
-                baseline_map= baseline_map,
-                map_years   = exp["map_years"],
-                cesm_data   = cesm_data_exp,
-                cesm_years  = cesm_years_exp,
-                out_path    = map_out,
+                name         = name,
+                gen_data     = gen_celsius,
+                gen_years    = cond_years,
+                baseline_map = baseline_map,
+                map_years    = exp["map_years"],
+                cesm_data    = cesm_data_exp,
+                cesm_years   = cesm_years_exp,
+                out_path     = map_out,
+                gen_ensemble = gen_ensemble,
+                cesm_ensemble= cesm_ens_exp,
             )
 
         # -- global-mean anomaly per ensemble member -------------------------
