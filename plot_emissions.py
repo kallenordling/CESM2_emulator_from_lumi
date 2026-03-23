@@ -1,4 +1,8 @@
-"""Plot raw CO2 and SUL emissions from all experiment conditioning files."""
+"""Plot raw CO2 and SUL emissions from all experiment conditioning files.
+
+Each experiment gets its own y-axis so lines with very different magnitudes
+(e.g. aaer CO2 max=0.02 vs ssp370 CO2 max=28.3) are all clearly visible.
+"""
 import numpy as np
 import xarray as xr
 import matplotlib
@@ -13,8 +17,9 @@ EXPERIMENTS = {
     "aaer":   f"{EMIS_DIR}/emissions_aero_only_timefixed.nc",
     "ghg":    f"{EMIS_DIR}/emissions_ghg_only_timefixed.nc",
 }
-COLORS = {"hist": "#1f77b4", "ssp370": "#d62728", "aaer": "#ff7f0e", "ghg": "#2ca02c"}
-COND_VARS = ["CO2", "SUL"]
+COLORS     = {"hist": "#1f77b4", "ssp370": "#d62728", "aaer": "#ff7f0e", "ghg": "#2ca02c"}
+LINESTYLE  = {"hist": "-",       "ssp370": "--",       "aaer": "-.",      "ghg": ":"}
+COND_VARS  = ["CO2", "SUL"]
 
 
 def gmean_ts(da, time_dim):
@@ -30,36 +35,57 @@ def extract_years(time_vals):
         return list(range(len(time_vals)))
 
 
-fig, axes = plt.subplots(len(COND_VARS), 1, figsize=(12, 5 * len(COND_VARS)), sharex=False)
+n_exp = len(EXPERIMENTS)
+n_var = len(COND_VARS)
+
+fig, axes = plt.subplots(n_var, n_exp,
+                         figsize=(5 * n_exp, 4 * n_var),
+                         sharey=False, sharex=False)
 
 for vi, var in enumerate(COND_VARS):
-    ax = axes[vi]
-    for exp_name, cond_file in EXPERIMENTS.items():
+    for ei, (exp_name, cond_file) in enumerate(EXPERIMENTS.items()):
+        ax = axes[vi, ei]
         try:
             ds = xr.open_dataset(cond_file)
             if var not in ds:
-                print(f"  [{exp_name}] {var} not in file — skipping")
+                ax.text(0.5, 0.5, f"{var}\nnot in file",
+                        ha="center", va="center", transform=ax.transAxes, fontsize=9)
+                ax.set_title(f"{exp_name}", fontsize=10)
                 ds.close()
                 continue
             da = ds[var]
             time_dim = [d for d in da.dims if d not in ("lat", "lon")][0]
             years = extract_years(ds[time_dim].values)
-            ts = gmean_ts(da, time_dim)
-            ax.plot(years, ts, label=exp_name, color=COLORS[exp_name], lw=1.8)
-            print(f"  [{exp_name}] {var}: min={float(da.min()):.4g}  max={float(da.max()):.4g}")
+            ts    = gmean_ts(da, time_dim)
+
+            ax.plot(years, ts,
+                    color=COLORS[exp_name], lw=1.8,
+                    linestyle=LINESTYLE[exp_name], label=exp_name)
+            ax.set_title(f"{exp_name}  —  {var}", fontsize=10)
+            ax.set_xlabel("Year", fontsize=8)
+            ax.set_ylabel(var, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, alpha=0.3)
+
+            # Annotate min/max
+            raw_max = float(da.max())
+            raw_min = float(da.min())
+            ax.text(0.02, 0.97, f"max={raw_max:.3g}\nmin={raw_min:.3g}",
+                    transform=ax.transAxes, fontsize=7, va="top",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7, ec="none"))
+
+            print(f"  [{exp_name}] {var}: min={raw_min:.4g}  max={raw_max:.4g}")
             ds.close()
         except FileNotFoundError:
-            print(f"  [{exp_name}] file not found: {cond_file}")
+            ax.text(0.5, 0.5, "file not found", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=9, color="red")
+            ax.set_title(f"{exp_name}  —  {var}", fontsize=10)
         except Exception as e:
+            ax.set_title(f"{exp_name}  —  {var} ERROR", fontsize=10)
             print(f"  [{exp_name}] {var}: ERROR — {e}")
 
-    ax.set_title(f"{var} — global mean emissions", fontsize=12)
-    ax.set_xlabel("Year")
-    ax.set_ylabel(var)
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-fig.suptitle("Conditioning emissions — all experiments", fontsize=14, fontweight="bold")
+fig.suptitle("Raw emissions per experiment — each panel has its own y-axis",
+             fontsize=13, fontweight="bold")
 plt.tight_layout()
 out = "/scratch/project_462001328/eval_output/emissions.png"
 plt.savefig(out, dpi=130, bbox_inches="tight")
