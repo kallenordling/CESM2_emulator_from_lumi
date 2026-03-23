@@ -378,17 +378,23 @@ class UNetTrainer:
 
     @torch.no_grad()
     def _compute_val_metrics(self, batch, cond_map, scenario_ids=None):
-        """Forward pass with EMA model — no backward, returns raw metric tensors."""
+        """Forward pass with EMA model — no backward, returns raw metric tensors.
+
+        Uses a fixed low noise level (t=0.05) so that skill/anomaly metrics are
+        stable across epochs and reflect actual denoising quality rather than a
+        random mix of noise levels (which was the main source of skill-score noise).
+        """
         clean_samples = batch.to(self.weight_dtype)
         noise = torch.randn_like(clean_samples)
 
+        # Fixed low timestep: t=0.05 → mostly clean, consistent across epochs
         if isinstance(self.scheduler, ContinuousDDPM):
-            timesteps = torch.rand(clean_samples.shape[0], device=self.device)
-            timesteps = self.scheduler.log_snr(timesteps)
+            t_fixed = torch.full((clean_samples.shape[0],), 0.05, device=self.device)
+            timesteps = self.scheduler.log_snr(t_fixed)
         else:
-            timesteps = torch.randint(
-                0, self.scheduler.config.num_train_timesteps,
-                (clean_samples.shape[0],), device=self.device,
+            t_idx = max(1, self.scheduler.config.num_train_timesteps // 20)
+            timesteps = torch.full(
+                (clean_samples.shape[0],), t_idx, device=self.device,
             ).long()
 
         noisy_samples = self.scheduler.add_noise(clean_samples, noise, timesteps)
