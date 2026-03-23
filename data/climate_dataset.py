@@ -118,7 +118,7 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
     return PREPROCESS_FN[ds.name](ds)
 
 
-EMISSIONS_PATH = "/scratch/project_462001112/emulator_data/emissions_co2_so2_regridded.nc"
+EMISSIONS_PATH = "/scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc"
 
 def scale_cumulative_linear(da: xr.DataArray):
     """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
