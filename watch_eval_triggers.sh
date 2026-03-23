@@ -44,10 +44,13 @@ while true; do
 
         mkdir -p "$OUTPUT_DIR"
 
+        # Explicitly pass SINGULARITYENV_PYTHONPATH so that --export=ALL cannot
+        # propagate a stale value from the training job's container environment.
+        _EVAL_VENV=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
         JOB_INFO=$(sbatch \
             --job-name="eval_ep$(printf '%04d' $EPOCH)" \
             --output="${LOG_DIR}/eval_aero_ep$(printf '%04d' $EPOCH)_%j.out" \
-            --export="ALL,CHECKPOINT=${CHECKPOINT},OUTPUT_DIR=${OUTPUT_DIR}" \
+            --export="ALL,CHECKPOINT=${CHECKPOINT},OUTPUT_DIR=${OUTPUT_DIR},SINGULARITYENV_PYTHONPATH=${_EVAL_VENV}" \
             "$SBATCH_SCRIPT" 2>&1)
 
         echo "[watcher] sbatch result: $JOB_INFO"
