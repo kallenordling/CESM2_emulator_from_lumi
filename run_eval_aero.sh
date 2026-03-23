@@ -29,6 +29,14 @@ fi
 export PYTHONNOUSERSITE=1
 export HYDRA_FULL_ERROR=1
 
+# --- diagnostics (remove once venv issue is resolved) ---
+echo "[DEBUG] PYTHONPATH=${PYTHONPATH:-<empty>}"
+echo "[DEBUG] VIRTUAL_ENV=${VIRTUAL_ENV:-<empty>}"
+echo "[DEBUG] which python=$(which python)"
+python -c "import sys; print('[DEBUG] sys.path:', sys.path)"
+python -c "import sklearn; print('[DEBUG] sklearn path:', sklearn.__file__)" 2>&1 || true
+# ---
+
 # ROCm / HIP caches
 export MIOPEN_USER_DB_PATH=/tmp/miopen_${SLURM_JOB_ID}
 export MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen_${SLURM_JOB_ID}
