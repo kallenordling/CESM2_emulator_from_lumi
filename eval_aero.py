@@ -624,6 +624,11 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
             gl.top_labels = False
             gl.right_labels = False
         ax.set_title(title, fontsize=9)
+        # Global mean annotation in bottom-right corner
+        gmean = float(area_weighted_gmean(data[np.newaxis], LAT)[0])
+        ax.text(0.98, 0.03, f"GM: {gmean:+.2f}°C",
+                transform=ax.transAxes, fontsize=7.5, ha="right", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7, ec="none"))
 
     for col, yr_target in enumerate(map_years):
         yr_gen  = _nearest_year(gen_years, yr_target)
