@@ -619,6 +619,7 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
         da.plot.pcolormesh(**plot_kwargs)
         if USE_CARTOPY:
             ax.add_feature(cfeature.COASTLINE, lw=0.5)
+            ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
             gl = ax.gridlines(draw_labels=True, linewidth=0.3,
                               color="grey", alpha=0.5, linestyle="--")
             gl.top_labels = False
