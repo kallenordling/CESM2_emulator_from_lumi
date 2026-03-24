@@ -118,7 +118,10 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
     return PREPROCESS_FN[ds.name](ds)
 
 
-EMISSIONS_PATH = "/scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc"
+EMISSIONS_PATHS = [
+    "/scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc",
+    "/scratch/project_462001328/emulator_data/emissions_hist_timefixed.nc",
+]
 
 def scale_cumulative_linear(da: xr.DataArray):
     """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
@@ -309,23 +312,23 @@ def pca_denoise_dataset(
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
     """
-    Lataa emissions.nc vain kerran ja palauttaa min/max-arvot
-    CO2_em_anthro:lle ja sul:lle.
+    Load all EMISSIONS_PATHS and return the combined (global) min/max for
+    CO2 and SUL so that normalization covers the full range of all experiments.
     """
-    ds_emis = xr.open_dataset(EMISSIONS_PATH)
-
-    minmax = {}
-    for var in ["CO2", "SO2",'SUL','sul']:
-        if var in ds_emis.data_vars:
-            da = ds_emis[var]
-        else:
-            continue
-        min_val = float(da.min())
-        max_val = float(da.max())
-        minmax[var] = (min_val, max_val)
-
-    ds_emis.close()
-    return minmax
+    combined = {}  # var -> (min, max)
+    for path in EMISSIONS_PATHS:
+        ds_emis = xr.open_dataset(path)
+        for var in ["CO2", "SO2", "SUL", "sul"]:
+            if var not in ds_emis.data_vars:
+                continue
+            lo = float(ds_emis[var].min())
+            hi = float(ds_emis[var].max())
+            if var in combined:
+                combined[var] = (min(combined[var][0], lo), max(combined[var][1], hi))
+            else:
+                combined[var] = (lo, hi)
+        ds_emis.close()
+    return combined
 
 
 def normalize(ds: xr.DataArray) -> xr.DataArray:
