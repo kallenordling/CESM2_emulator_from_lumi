@@ -417,7 +417,7 @@ class UNetTrainer:
             pred_x0_null = self.get_original_sample(noisy_samples, null_output, timesteps)
 
             baseline     = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
-            true_anomaly = clean_samples - baseline
+            true_anomaly = self._scenario_ensemble_mean(clean_samples - baseline, scenario_ids)
             pred_anomaly = pred_x0_cond - pred_x0_null
 
             cond_loss   = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
@@ -588,6 +588,22 @@ class UNetTrainer:
         beta_prod_t = 1 - alpha_prod_t
         return (alpha_prod_t ** 0.5) * noisy_sample - (beta_prod_t ** 0.5) * model_output
 
+    @staticmethod
+    def _scenario_ensemble_mean(anomaly: torch.Tensor, scenario_ids) -> torch.Tensor:
+        """Replace each sample with the mean over same-scenario members in the batch.
+
+        This converts a single-realization anomaly (forced signal + internal variability)
+        into an estimate of the forced response only, which is learnable from the forcings.
+        Falls back to the original tensor when scenario_ids is None or all the same.
+        """
+        if scenario_ids is None:
+            return anomaly
+        result = torch.zeros_like(anomaly)
+        for sid in scenario_ids.unique():
+            mask = scenario_ids == sid
+            result[mask] = anomaly[mask].mean(dim=0, keepdim=True)
+        return result
+
     def get_loss(self, batch, cond_map, scenario_ids=None):
         clean_samples = batch.to(self.weight_dtype)
 
@@ -654,7 +670,9 @@ class UNetTrainer:
                     "anomaly loss requires a fixed 1850-1900 baseline"
                 )
                 baseline = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
-                true_anomaly = (clean_samples - baseline).detach()
+                true_anomaly = self._scenario_ensemble_mean(
+                    (clean_samples - baseline).detach(), scenario_ids
+                )
                 del baseline
             else:
                 true_anomaly = None
