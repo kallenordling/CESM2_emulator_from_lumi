@@ -50,7 +50,8 @@ trainer:
     sample_steps: 250
     cfg_drop_prob: 0.1
     cfg_co2_drop_prob: 0.1
-    cfg_sul_drop_prob: 0.1
+    cfg_sul_drop_prob: 0.3   # 3× SUL dropout → more CO2-only training batches
+    co2_cond_loss_scaling: 0.4  # extra conditioning loss for GHG CO2 channel
     eval_script: run_eval_aero.sh
 
   optimizer:
