@@ -44,8 +44,8 @@ from custom_diffusers.continuous_ddpm import ContinuousDDPM
 from models.video_net import UNetModel3D
 
 # ── paths ──────────────────────────────────────────────────────────────────────
-PROJ_ROOT   = "/projappl/project_462001112/CESM2_emulator_from_lumi"
-SCRATCH     = "/scratch/project_462001112/emulator_data"
+PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
+SCRATCH     = "/scratch/project_462001328/emulator_data"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 DATA_ROOT   = os.path.join(SCRATCH, "training_data/TREFHT")
 EMIS_DIR    = SCRATCH
@@ -110,8 +110,8 @@ LON  = None   # set from first conditioning file in main()
 
 def find_latest_checkpoint(runs_dir: str) -> str:
     """Return path to the highest-epoch checkpoint in runs_dir."""
-    pattern = os.path.join(runs_dir, "run_multi_experiment_*.pt")
-    paths = glob.glob(pattern)
+    paths = [p for p in glob.glob(os.path.join(runs_dir, "*.pt"))
+             if not p.endswith("_best.pt")]
     if not paths:
         raise FileNotFoundError(f"No checkpoints found in {runs_dir}")
 
