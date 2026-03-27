@@ -53,6 +53,7 @@ def main(cfg: DictConfig) -> None:
         batch_size=data_cfg.batch_size,
         mix_scenarios=data_cfg.get("mix_scenarios", True),
         steps_per_realization=data_cfg.get("steps_per_realization", None),
+        scenario_weights=OmegaConf.to_container(data_cfg.scenario_weights, resolve=True) if data_cfg.get("scenario_weights") is not None else None,
         # shared ClimateDataset kwargs
         seq_len=data_cfg.seq_len,
         target_vars=OmegaConf.to_container(data_cfg.target_vars, resolve=True),
