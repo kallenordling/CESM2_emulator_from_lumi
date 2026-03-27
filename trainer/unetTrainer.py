@@ -163,6 +163,12 @@ class UNetTrainer:
         # conditioning subsets: (co2, sul), (co2, null), (null, sul), (null, null).
         self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
         self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
+        # Per-channel CO2 conditioning loss: extra MSE loss on GHG batches that
+        # directly targets the CO2-only response (model(CO2, SUL=null) - model(null, null)).
+        # Forces the model to correctly attribute GHG warming to the CO2 channel,
+        # counteracting the CO2-aerosol collinearity in ssp370 that makes the model
+        # ignore CO2 and use SUL as a time proxy.
+        self.co2_cond_loss_scaling = getattr(self, "co2_cond_loss_scaling", 0.0)
         self._cached_sensitivity = 0.0  # last valid sensitivity value
         self.scheduler.set_timesteps(self.sample_steps)
 
@@ -324,7 +330,7 @@ class UNetTrainer:
                 ):
                     continue
 
-                loss, mse_loss, cond_loss, anom_signal, anom_error, sens, scen_disc = self.get_loss(batch, cond, scenario_ids=scenario_ids)
+                loss, mse_loss, cond_loss, anom_signal, anom_error, sens, scen_disc, co2_cond_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
 
                 if self.accelerator.sync_gradients:
                     self.global_step += 1
@@ -338,21 +344,23 @@ class UNetTrainer:
                     avg_loss        = self.accelerator.gather_for_metrics(loss).mean()
                     avg_mse_loss    = self.accelerator.gather_for_metrics(mse_loss).mean()
                     avg_cond_loss   = self.accelerator.gather_for_metrics(cond_loss).mean()
+                    avg_co2_cond_loss = self.accelerator.gather_for_metrics(co2_cond_loss).mean()
                     avg_anom_error  = self.accelerator.gather_for_metrics(anom_error).mean()
                     avg_anom_signal = self.accelerator.gather_for_metrics(anom_signal).mean()
                     avg_sens        = self.accelerator.gather_for_metrics(sens).mean()
                     avg_scen_disc   = self.accelerator.gather_for_metrics(scen_disc).mean()
 
                     log_dict = {
-                        "Training/Loss": avg_loss.detach().item(),
-                        "MSE LOSS":      avg_mse_loss.detach().item(),
-                        "COND LOSS":     avg_cond_loss.detach().item(),
-                        "ANOM ERROR":    avg_anom_error.detach().item(),
-                        "ANOM SIGNAL":   avg_anom_signal.detach().item(),
-                        "SENS":          avg_sens.detach().item(),
-                        "ANOM SKILL":    (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),
-                        "SCEN DISC":     avg_scen_disc.detach().item(),
-                        "COND SCALE":    self.cond_loss_scaling,
+                        "Training/Loss":  avg_loss.detach().item(),
+                        "MSE LOSS":       avg_mse_loss.detach().item(),
+                        "COND LOSS":      avg_cond_loss.detach().item(),
+                        "CO2 COND LOSS":  avg_co2_cond_loss.detach().item(),
+                        "ANOM ERROR":     avg_anom_error.detach().item(),
+                        "ANOM SIGNAL":    avg_anom_signal.detach().item(),
+                        "SENS":           avg_sens.detach().item(),
+                        "ANOM SKILL":     (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),
+                        "SCEN DISC":      avg_scen_disc.detach().item(),
+                        "COND SCALE":     self.cond_loss_scaling,
                     }
 
                     # Per-scenario sample counts — useful for verifying mix is working
@@ -717,6 +725,30 @@ class UNetTrainer:
                 # predictions is exactly what the emission forcing added.
                 # Gradients flow only through pred_x0_cond (null is no_grad).
                 pred_anomaly = pred_x0_cond - pred_x0_null.detach()
+
+                # ── Per-channel CO2 conditioning loss for GHG batches ─────────
+                # For GHG-only experiments (scenario_id=3), additionally force the
+                # model to attribute warming to CO2 specifically by targeting the
+                # CO2-only response (model with SUL nulled) against the GHG anomaly.
+                # Reuses pred_x0_null (already computed) for the GHG subset.
+                # This counteracts CO2-aerosol collinearity learned from ssp370.
+                co2_cond_loss = torch.zeros(1, device=self.device)
+                if self.co2_cond_loss_scaling > 0 and scenario_ids is not None:
+                    ghg_mask = scenario_ids == 3  # GHG scenario is index 3
+                    if ghg_mask.sum() > 0:
+                        ghg_noisy = noisy_samples[ghg_mask]
+                        ghg_t = timesteps[ghg_mask]
+                        # Keep CO2 (ch 0), null out SUL (ch 1)
+                        ghg_cond_co2only = cond_map[ghg_mask].clone()
+                        ghg_cond_co2only[:, 1] = NULL_COND_VALUE
+                        # Forward pass: CO2-only conditioning, gradients flow through
+                        ghg_co2_output = self.model(ghg_noisy, ghg_t, cond_map=ghg_cond_co2only)
+                        pred_x0_co2 = self.get_original_sample(ghg_noisy, ghg_co2_output, ghg_t)
+                        # CO2-only response vs null (reuse already-computed pred_x0_null)
+                        pred_co2_response = pred_x0_co2 - pred_x0_null[ghg_mask].detach()
+                        ghg_true_anomaly = true_anomaly[ghg_mask]
+                        co2_cond_loss = calc_mse_loss(pred_co2_response, ghg_true_anomaly, self._ref_ds.lats)
+
                 del pred_x0_cond, pred_x0_null
 
                 # ── Conditioning loss ─────────────────────────────────────────
@@ -765,20 +797,22 @@ class UNetTrainer:
                 # cond_loss_scaling is active but this is a non-sync accumulation step —
                 # skip the null pass entirely.  Use cached sensitivity from last sync step.
                 cond_loss        = torch.zeros(1, device=self.device)
+                co2_cond_loss    = torch.zeros(1, device=self.device)
                 anom_error       = torch.zeros(1, device=self.device)
                 anom_signal      = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.tensor(self._cached_sensitivity, device=self.device)
                 scen_disc        = torch.zeros(1, device=self.device)
 
             else:
-                cond_loss      = torch.zeros(1, device=self.device)
-                anom_error     = torch.zeros(1, device=self.device)
-                anom_signal    = torch.zeros(1, device=self.device)
+                cond_loss        = torch.zeros(1, device=self.device)
+                co2_cond_loss    = torch.zeros(1, device=self.device)
+                anom_error       = torch.zeros(1, device=self.device)
+                anom_signal      = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.zeros(1, device=self.device)
-                scen_disc      = torch.zeros(1, device=self.device)
+                scen_disc        = torch.zeros(1, device=self.device)
 
             # ── Total loss ────────────────────────────────────────────────────
-            loss = mse_loss + cond_loss * self.cond_loss_scaling
+            loss = mse_loss + cond_loss * self.cond_loss_scaling + co2_cond_loss * self.co2_cond_loss_scaling
 
             # Scale the loss by cosine-weighted latitude
             self.accelerator.backward(loss)
@@ -787,7 +821,7 @@ class UNetTrainer:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss, mse_loss, cond_loss * self.cond_loss_scaling, anom_signal, anom_error, cond_sensitivity, scen_disc
+        return loss, mse_loss, cond_loss * self.cond_loss_scaling, anom_signal, anom_error, cond_sensitivity, scen_disc, co2_cond_loss * self.co2_cond_loss_scaling
 
     @torch.inference_mode()
     def validation_loop(self, sanity_check=False) -> None:
