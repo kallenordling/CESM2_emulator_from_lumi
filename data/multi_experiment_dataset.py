@@ -259,6 +259,7 @@ class MultiExperimentDataLoader:
         stratified: bool = False,
         period_boundaries: tuple = (1950, 2020),
         steps_per_realization: Optional[int] = None,
+        scenario_weights: Optional[list] = None,
         **dataloader_kwargs: Any,
     ):
         self.dataset = dataset
@@ -270,10 +271,36 @@ class MultiExperimentDataLoader:
         self.dataloader_kwargs = dataloader_kwargs
         self.n_exp = dataset.n_experiments
 
-        if mix_scenarios and batch_size % self.n_exp != 0:
-            batch_size = (batch_size // self.n_exp) * self.n_exp
-        self.batch_size = batch_size
-        self.per_exp = batch_size // self.n_exp if mix_scenarios else batch_size
+        if mix_scenarios and scenario_weights is not None:
+            # Convert weights to per-experiment integer sample counts that sum
+            # to batch_size (largest-remainder rounding to avoid drift).
+            weights = np.array(scenario_weights, dtype=float)
+            if len(weights) != self.n_exp:
+                raise ValueError(
+                    f"scenario_weights has {len(weights)} entries but there "
+                    f"are {self.n_exp} experiments."
+                )
+            weights = weights / weights.sum()
+            raw   = weights * batch_size
+            counts = np.floor(raw).astype(int)
+            for idx in np.argsort(-(raw - counts))[:batch_size - counts.sum()]:
+                counts[idx] += 1
+            self.per_exp_list = counts.tolist()
+            self.batch_size   = batch_size
+            self.per_exp      = max(counts)
+            print(
+                "[MULTI] scenario_weights → samples per batch: "
+                + ", ".join(
+                    f"{name}={n}"
+                    for name, n in zip(dataset.scenario_names, self.per_exp_list)
+                )
+            )
+        else:
+            if mix_scenarios and batch_size % self.n_exp != 0:
+                batch_size = (batch_size // self.n_exp) * self.n_exp
+            self.batch_size   = batch_size
+            self.per_exp      = batch_size // self.n_exp if mix_scenarios else batch_size
+            self.per_exp_list = [self.per_exp] * self.n_exp
 
         if stratified:
             print(
@@ -397,25 +424,28 @@ class MultiExperimentDataLoader:
         )
 
     def _generate_mixed_uniform(self, device):
-        """Original uniform-random mixed batches."""
+        """Uniform-random mixed batches, respecting per-experiment sample counts."""
         offsets = self.dataset._index._offsets
         index_pools: list[np.ndarray] = []
         for exp_idx in range(self.n_exp):
             flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
-            shuffled = np.random.permutation(flat_idx)
-            index_pools.append(shuffled)
+            index_pools.append(np.random.permutation(flat_idx))
 
-        n_batches = min(len(pool) for pool in index_pools) // self.per_exp
+        n_batches = min(
+            len(pool) // self.per_exp_list[i]
+            for i, pool in enumerate(index_pools)
+            if self.per_exp_list[i] > 0
+        )
         if self.steps_per_realization is not None:
             n_batches = min(n_batches, self.steps_per_realization)
         if n_batches == 0:
             return
 
         for b in range(n_batches):
-            s, e = b * self.per_exp, (b + 1) * self.per_exp
             window_indices_per_exp = [
-                pool[s:e] - offsets[exp_idx]
-                for exp_idx, pool in enumerate(index_pools)
+                pool[b * self.per_exp_list[i] : (b + 1) * self.per_exp_list[i]]
+                - offsets[i]
+                for i, pool in enumerate(index_pools)
             ]
             yield self._vectorized_fetch(window_indices_per_exp, device)
 
@@ -535,6 +565,7 @@ def build_multi_experiment_loader(
     stratified: bool = False,
     period_boundaries: tuple = (1950, 2020),
     steps_per_realization: Optional[int] = None,
+    scenario_weights: Optional[list] = None,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
     """Convenience factory: build datasets from a list of config dicts.
@@ -637,4 +668,5 @@ def build_multi_experiment_loader(
         stratified=stratified,
         period_boundaries=period_boundaries,
         steps_per_realization=steps_per_realization,
+        scenario_weights=scenario_weights,
     )
