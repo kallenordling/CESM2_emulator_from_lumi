@@ -46,7 +46,7 @@ from models.video_net import UNetModel3D
 
 # ── paths (same as eval_aero.py) ──────────────────────────────────────────────
 PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
-SCRATCH     = "/scratch/project_462001112/emulator_data"
+SCRATCH     = "/scratch/project_462001328/emulator_data"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 DATA_ROOT   = os.path.join(SCRATCH, "training_data/TREFHT")
 EMIS_DIR    = SCRATCH
