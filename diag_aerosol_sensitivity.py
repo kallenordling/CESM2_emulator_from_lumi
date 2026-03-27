@@ -45,7 +45,7 @@ from custom_diffusers.continuous_ddpm import ContinuousDDPM
 from models.video_net import UNetModel3D
 
 # ── paths (same as eval_aero.py) ──────────────────────────────────────────────
-PROJ_ROOT   = "/projappl/project_462001112/CESM2_emulator_from_lumi"
+PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
 SCRATCH     = "/scratch/project_462001112/emulator_data"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 DATA_ROOT   = os.path.join(SCRATCH, "training_data/TREFHT")
@@ -71,8 +71,8 @@ SUL_IDX = 1
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def find_latest_checkpoint(runs_dir: str) -> str:
-    pattern = os.path.join(runs_dir, "run_multi_experiment_*.pt")
-    paths = glob.glob(pattern)
+    paths = [p for p in glob.glob(os.path.join(runs_dir, "*.pt"))
+             if not p.endswith("_best.pt")]
     if not paths:
         raise FileNotFoundError(f"No checkpoints in {runs_dir}")
     def _epoch(p):
