@@ -113,6 +113,16 @@ IG_WINDOWS = {
     "ghg":    [(1920, 1970, "1920–1970"), (1970, 2020, "1970–2020"), (2050, 2100, "2050–2100")],
 }
 
+# Representative output locations for Option-C IG (name, lat°N, lon°E)
+OUTPUT_LOCATIONS = [
+    ("Arctic",     85,   0),
+    ("N.America",  45, 260),
+    ("Europe",     50,  10),
+    ("E.Asia",     35, 120),
+    ("Tropics",     0, 170),
+    ("Antarctic", -70,   0),
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -308,50 +318,69 @@ def area_weighted_gmean(data: np.ndarray, lat: np.ndarray) -> np.ndarray:
     return (data * w).mean(axis=(-2, -1))                # (...,)
 
 
-def compute_ig_spatial_maps(
+def compute_ig_per_output_location(
     model: UNetModel3D,
     scheduler: ContinuousDDPM,
     cond_tensor: torch.Tensor,
     lat: np.ndarray,
+    lon: np.ndarray,
     device: torch.device,
     dtype: torch.dtype,
     years: np.ndarray,
     windows: list,
-    n_ig_steps: int = 30,
-    batch_size: int = 8,
+    output_locations: list = OUTPUT_LOCATIONS,
+    n_ig_steps: int = 20,
+    batch_size: int = 4,
     t_proxy: float = 0.2,
     seed: int = 42,
 ) -> dict:
-    """Compute spatially-resolved Integrated Gradients for CO2 and SUL conditioning.
+    """Compute Integrated Gradients of T at each output location w.r.t. conditioning.
 
-    Differentiates the area-weighted global-mean temperature prediction w.r.t.
-    the conditioning map at each grid point, keeping the full spatial structure.
+    For each output location (lat_o, lon_o), computes IG of the predicted
+    temperature at that specific grid cell w.r.t. CO2 and SUL conditioning maps.
 
-    The resulting maps answer: "which grid points of the conditioning inputs
-    does the model pay most attention to?"
+    The resulting attribution map answers: "which conditioning grid points drive
+    the temperature prediction at this output location?" — i.e., the model's
+    implicit teleconnection from forcing to local temperature.
 
-    Parameters
-    ----------
-    windows : list of (year_start, year_end, label) tuples
-        IG maps are averaged over each window and returned separately.
+    One backward pass per output location per IG step, so cost scales as
+    K × n_ig_steps × T rather than H×W × n_ig_steps × T.
 
     Returns
     -------
-    dict keyed by window label → {"co2": (H, W), "sul": (H, W)} absolute IG maps
+    dict[location_name][window_label] = {
+        "co2": (H, W),    # mean |IG| from CO2 conditioning
+        "sul": (H, W),    # mean |IG| from SUL conditioning
+        "lat_idx": int,
+        "lon_idx": int,
+    }
     """
     _, T_total, H, W = cond_tensor.shape
 
-    w_lat = torch.tensor(np.cos(np.deg2rad(lat)), dtype=dtype, device=device)
-    w_lat = (w_lat / w_lat.mean()).view(H, 1)
+    # Snap output locations to nearest grid cell
+    loc_indices = []
+    for loc_name, lat_o, lon_o in output_locations:
+        lat_idx = int(np.argmin(np.abs(lat - lat_o)))
+        lon_idx = int(np.argmin(np.abs(lon - lon_o)))
+        loc_indices.append((loc_name, lat_idx, lon_idx))
+        print(f"  [IG loc] {loc_name:12s}: grid ({lat_idx:3d},{lon_idx:3d})"
+              f" = ({lat[lat_idx]:+6.1f}°N, {lon[lon_idx]:+7.1f}°E)")
 
-    # Accumulate full (T, H, W) spatial IG maps
-    ig_co2_full = np.zeros((T_total, H, W), dtype=np.float32)
-    ig_sul_full = np.zeros((T_total, H, W), dtype=np.float32)
+    K = len(loc_indices)
+
+    # Running (T, H, W) IG accumulator per location and channel
+    ig_raw = {
+        loc_name: {
+            "co2": np.zeros((T_total, H, W), dtype=np.float32),
+            "sul": np.zeros((T_total, H, W), dtype=np.float32),
+        }
+        for loc_name, _, _ in loc_indices
+    }
 
     rng = torch.Generator(device=device)
     rng.manual_seed(seed)
 
-    for t_start in tqdm(range(0, T_total, batch_size), desc="  IG spatial batches"):
+    for t_start in tqdm(range(0, T_total, batch_size), desc="  IG batches"):
         t_end = min(t_start + batch_size, T_total)
         B = t_end - t_start
 
@@ -364,16 +393,21 @@ def compute_ig_spatial_maps(
         cond_null_b = torch.full_like(cond_actual, NULL_COND)
         delta = cond_actual - cond_null_b    # (B, 2, 1, H, W)
 
-        noise = torch.randn(B, 1, 1, H, W, device=device, dtype=dtype,
-                            generator=rng)
+        noise   = torch.randn(B, 1, 1, H, W, device=device, dtype=dtype, generator=rng)
         t_val   = torch.full((B,), t_proxy, device=device, dtype=dtype)
         log_snr = scheduler.log_snr(t_val)
         x_clean = torch.zeros(B, 1, 1, H, W, device=device, dtype=dtype)
         x_noisy = scheduler.add_noise(x_clean, noise, log_snr).detach()
         log_snr = log_snr.detach()
 
-        sum_grad_co2 = torch.zeros(B, H, W, device=device, dtype=dtype)
-        sum_grad_sul = torch.zeros(B, H, W, device=device, dtype=dtype)
+        # Gradient accumulators: (B, H, W) per location and channel
+        sum_grads = {
+            loc_name: {
+                "co2": torch.zeros(B, H, W, device=device, dtype=dtype),
+                "sul": torch.zeros(B, H, W, device=device, dtype=dtype),
+            }
+            for loc_name, _, _ in loc_indices
+        }
 
         for k in range(1, n_ig_steps + 1):
             alpha = k / n_ig_steps
@@ -381,32 +415,43 @@ def compute_ig_spatial_maps(
 
             v_pred  = model(x_noisy, log_snr, cond_map=cond_k)
             pred_x0 = scheduler.predict_start_from_v(x_noisy, log_snr, v_pred)
+            pred_map = pred_x0.squeeze(1).squeeze(1)    # (B, H, W)
 
-            pred_map = pred_x0.squeeze(1).squeeze(1)          # (B, H, W)
-            T_global = (pred_map * w_lat).mean(dim=(-2, -1))  # (B,)
+            # One backward per output location; retain graph for all but the last
+            for i, (loc_name, lat_idx, lon_idx) in enumerate(loc_indices):
+                T_local = pred_map[:, lat_idx, lon_idx]   # (B,)
+                retain  = (i < K - 1)
+                grads   = torch.autograd.grad(
+                    T_local.sum(), cond_k, retain_graph=retain
+                )[0]    # (B, 2, 1, H, W)
+                sum_grads[loc_name]["co2"] += grads[:, 0, 0]
+                sum_grads[loc_name]["sul"] += grads[:, 1, 0]
 
-            grads = torch.autograd.grad(T_global.sum(), cond_k)[0]  # (B, 2, 1, H, W)
-            sum_grad_co2 += grads[:, 0, 0]   # (B, H, W)
-            sum_grad_sul += grads[:, 1, 0]
+        delta_co2 = delta[:, 0, 0].detach()    # (B, H, W)
+        delta_sul = delta[:, 1, 0].detach()
 
-        # IG = delta × mean_gradient  — keep spatial structure (B, H, W)
-        ig_co2_full[t_start:t_end] = (
-            delta[:, 0, 0].detach() * (sum_grad_co2 / n_ig_steps)
-        ).cpu().numpy()
-        ig_sul_full[t_start:t_end] = (
-            delta[:, 1, 0].detach() * (sum_grad_sul / n_ig_steps)
-        ).cpu().numpy()
+        for loc_name, _, _ in loc_indices:
+            ig_raw[loc_name]["co2"][t_start:t_end] = (
+                delta_co2 * (sum_grads[loc_name]["co2"] / n_ig_steps)
+            ).cpu().numpy()
+            ig_raw[loc_name]["sul"][t_start:t_end] = (
+                delta_sul * (sum_grads[loc_name]["sul"] / n_ig_steps)
+            ).cpu().numpy()
 
-    # Average |IG| over each time window
+    # Average |IG| over time windows
     result = {}
-    for y_start, y_end, label in windows:
-        mask = (years >= y_start) & (years <= y_end)
-        if not mask.any():
-            continue
-        result[label] = {
-            "co2": np.abs(ig_co2_full[mask]).mean(axis=0),   # (H, W)
-            "sul": np.abs(ig_sul_full[mask]).mean(axis=0),
-        }
+    for loc_name, lat_idx, lon_idx in loc_indices:
+        result[loc_name] = {}
+        for y_start, y_end, label in windows:
+            mask = (years >= y_start) & (years <= y_end)
+            if not mask.any():
+                continue
+            result[loc_name][label] = {
+                "co2":     np.abs(ig_raw[loc_name]["co2"][mask]).mean(axis=0),
+                "sul":     np.abs(ig_raw[loc_name]["sul"][mask]).mean(axis=0),
+                "lat_idx": lat_idx,
+                "lon_idx": lon_idx,
+            }
     return result
 
 
@@ -793,14 +838,18 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     print(f"  → saved {out_path}")
 
 
-def plot_ig_spatial_maps(name: str, ig_results: dict, out_path: str):
-    """Plot spatial IG attribution maps for CO2 and SUL per time window.
+def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
+    """Plot spatial IG attribution maps for each output location.
 
-    Rows: CO2, SUL
-    Columns: one per time window
+    One figure per output location, saved as {out_path_prefix}_{loc_name}.png.
 
-    Bright colours indicate grid points where the model's predicted global-mean
-    temperature is most sensitive to the conditioning at that location.
+    Each figure has:
+      Rows: CO2 (row 0), SUL (row 1)
+      Columns: one per time window
+
+    A ★ marker on each panel shows where the output location is.
+    Bright colours indicate which conditioning grid points most influence
+    the predicted temperature at the marked output location.
     """
     try:
         import cartopy.crs as ccrs
@@ -809,75 +858,98 @@ def plot_ig_spatial_maps(name: str, ig_results: dict, out_path: str):
     except ImportError:
         USE_CARTOPY = False
 
-    windows = list(ig_results.keys())
-    if not windows:
-        print(f"  [IG] No windows to plot for {name}, skipping.")
+    if not ig_results:
+        print(f"  [IG] No results to plot for {name}, skipping.")
         return
 
-    n_cols = len(windows)
-    n_rows = 2   # row 0 = CO2, row 1 = SUL
+    for loc_name, window_data in ig_results.items():
+        windows = list(window_data.keys())
+        if not windows:
+            continue
 
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(5 * n_cols, 3.5 * n_rows),
-        subplot_kw={"projection": ccrs.PlateCarree()} if USE_CARTOPY else {},
-        squeeze=False,
-    )
+        n_cols = len(windows)
+        n_rows = 2   # row 0 = CO2, row 1 = SUL
 
-    # Shared colour scale per channel (98th percentile across all windows)
-    vmax_co2 = max(
-        np.percentile(ig_results[w]["co2"], 98) for w in windows
-    )
-    vmax_sul = max(
-        np.percentile(ig_results[w]["sul"], 98) for w in windows
-    )
-
-    def _plot_map(ax, data, vmax, title):
-        if USE_CARTOPY:
-            from cartopy.util import add_cyclic_point
-            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
-        else:
-            data_cyc = np.concatenate([data, data[:, :1]], axis=1)
-            lon_cyc  = np.append(LON, LON[0] + 360.0)
-
-        da = xr.DataArray(
-            data_cyc, dims=["lat", "lon"],
-            coords={"lat": LAT, "lon": lon_cyc},
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(5 * n_cols, 3.5 * n_rows),
+            subplot_kw={"projection": ccrs.PlateCarree()} if USE_CARTOPY else {},
+            squeeze=False,
         )
-        plot_kwargs = dict(
-            ax=ax, cmap="YlOrRd", vmin=0, vmax=vmax,
-            add_colorbar=True,
-            cbar_kwargs={"label": "|IG attr.|", "shrink": 0.75},
+
+        # Shared colour scale per channel (98th percentile across all windows)
+        vmax_co2 = max(
+            np.percentile(window_data[w]["co2"], 98) for w in windows
         )
-        if USE_CARTOPY:
-            plot_kwargs["transform"] = ccrs.PlateCarree()
-        da.plot.pcolormesh(**plot_kwargs)
-        if USE_CARTOPY:
-            ax.add_feature(cfeature.COASTLINE, lw=0.5)
-            gl = ax.gridlines(draw_labels=True, linewidth=0.3,
-                              color="grey", alpha=0.5, linestyle="--")
-            gl.top_labels   = False
-            gl.right_labels = False
-        ax.set_title(title, fontsize=9)
+        vmax_sul = max(
+            np.percentile(window_data[w]["sul"], 98) for w in windows
+        )
+        # Ensure non-zero to avoid degenerate colormaps
+        vmax_co2 = max(vmax_co2, 1e-9)
+        vmax_sul = max(vmax_sul, 1e-9)
 
-    for col, window in enumerate(windows):
-        _plot_map(axes[0, col], ig_results[window]["co2"], vmax_co2,
-                  f"CO2 attribution\n{window}")
-        _plot_map(axes[1, col], ig_results[window]["sul"], vmax_sul,
-                  f"SUL attribution\n{window}")
+        lat_idx = window_data[windows[0]]["lat_idx"]
+        lon_idx = window_data[windows[0]]["lon_idx"]
+        out_lat = float(LAT[lat_idx])
+        out_lon = float(LON[lon_idx])
 
-    axes[0, 0].set_ylabel("CO2", fontsize=10)
-    axes[1, 0].set_ylabel("SUL", fontsize=10)
+        def _plot_map(ax, data, vmax, title):
+            if USE_CARTOPY:
+                from cartopy.util import add_cyclic_point
+                data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
+            else:
+                data_cyc = np.concatenate([data, data[:, :1]], axis=1)
+                lon_cyc  = np.append(LON, LON[0] + 360.0)
 
-    fig.suptitle(
-        f"Spatial IG attribution — {name}\n"
-        "(bright = conditioning at this grid point most influences predicted global-mean T)",
-        fontsize=11,
-    )
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"  → saved {out_path}")
+            da = xr.DataArray(
+                data_cyc, dims=["lat", "lon"],
+                coords={"lat": LAT, "lon": lon_cyc},
+            )
+            plot_kwargs = dict(
+                ax=ax, cmap="YlOrRd", vmin=0, vmax=vmax,
+                add_colorbar=True,
+                cbar_kwargs={"label": "|IG attr.|", "shrink": 0.75},
+            )
+            if USE_CARTOPY:
+                plot_kwargs["transform"] = ccrs.PlateCarree()
+            da.plot.pcolormesh(**plot_kwargs)
+            if USE_CARTOPY:
+                ax.add_feature(cfeature.COASTLINE, lw=0.5)
+                gl = ax.gridlines(draw_labels=True, linewidth=0.3,
+                                  color="grey", alpha=0.5, linestyle="--")
+                gl.top_labels   = False
+                gl.right_labels = False
+            ax.set_title(title, fontsize=9)
+
+            # ★ marker at the output location
+            star_kw = dict(marker="*", color="blue", markersize=12,
+                           markeredgecolor="white", markeredgewidth=0.8,
+                           zorder=10, linestyle="none")
+            if USE_CARTOPY:
+                ax.plot(out_lon, out_lat, transform=ccrs.PlateCarree(), **star_kw)
+            else:
+                ax.plot(out_lon, out_lat, **star_kw)
+
+        for col, window in enumerate(windows):
+            _plot_map(axes[0, col], window_data[window]["co2"], vmax_co2,
+                      f"CO2 → {loc_name}\n{window}")
+            _plot_map(axes[1, col], window_data[window]["sul"], vmax_sul,
+                      f"SUL → {loc_name}\n{window}")
+
+        axes[0, 0].set_ylabel("CO2 attribution", fontsize=10)
+        axes[1, 0].set_ylabel("SUL attribution", fontsize=10)
+
+        fig.suptitle(
+            f"IG attribution → T at {loc_name} ({out_lat:+.1f}°N, {out_lon:.1f}°E)"
+            f" — {name}\n"
+            "(★ = output location; bright = conditioning here drives local temperature)",
+            fontsize=11,
+        )
+        fig.tight_layout()
+        out_path = f"{out_path_prefix}_{loc_name}.png"
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"  → saved {out_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1068,30 +1140,32 @@ def main():
             cesm_anom     = cesm_anom_ens.mean(axis=0)   # ensemble mean
             cesm_years_out = cesm_years_exp
 
-        # -- spatial IG attribution maps -----------------------------------
+        # -- spatial IG attribution maps (per output location) ----------------
         if not args.skip_ig and name in IG_WINDOWS:
-            print(f"  Computing spatial IG maps "
+            print(f"  Computing per-location IG maps "
                   f"(n_ig_steps={args.ig_n_steps}, batch={args.ig_batch_size}) …")
             # Disable model parameter gradients — only cond gradients needed
             for p in model.parameters():
                 p.requires_grad_(False)
-            ig_maps = compute_ig_spatial_maps(
-                model        = model,
-                scheduler    = scheduler,
-                cond_tensor  = cond_tensor,
-                lat          = LAT,
-                device       = device,
-                dtype        = dtype,
-                years        = cond_years,
-                windows      = IG_WINDOWS[name],
-                n_ig_steps   = args.ig_n_steps,
-                batch_size   = args.ig_batch_size,
+            ig_maps = compute_ig_per_output_location(
+                model            = model,
+                scheduler        = scheduler,
+                cond_tensor      = cond_tensor,
+                lat              = LAT,
+                lon              = LON,
+                device           = device,
+                dtype            = dtype,
+                years            = cond_years,
+                windows          = IG_WINDOWS[name],
+                output_locations = OUTPUT_LOCATIONS,
+                n_ig_steps       = args.ig_n_steps,
+                batch_size       = args.ig_batch_size,
             )
             # Re-enable gradients for any subsequent training calls
             for p in model.parameters():
                 p.requires_grad_(True)
-            ig_out = os.path.join(args.output_dir, f"ig_spatial_{name}.png")
-            plot_ig_spatial_maps(name, ig_maps, ig_out)
+            ig_prefix = os.path.join(args.output_dir, f"ig_loc_{name}")
+            plot_ig_per_location(name, ig_maps, ig_prefix)
 
         timeseries_results[name] = dict(
             gen_anom_ens  = gen_anom_ens,
