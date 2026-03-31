@@ -53,25 +53,37 @@ catalog = intake.open_esm_datastore(
 )
 print(catalog)
 
+# ── Load all variables and find common members ────────────────────────────────
+merged_by_var = {}
 for variable in args.variable:
+    print(f"\n[LOAD] {variable}")
+    catalog_subset = catalog.search(variable=variable, frequency='monthly', forcing_variant="cmip6")
+    dsets = catalog_subset.to_dataset_dict(storage_options={'anon': True})
+    historical = dsets['atm.historical.monthly.cmip6'].groupby('time.year').mean()
+    future     = dsets['atm.ssp370.monthly.cmip6'].groupby('time.year').mean()
+    merged_by_var[variable] = xr.concat([historical, future], dim='year')
+
+# Intersect member_id across all variables to guarantee alignment
+common_members = None
+for variable, ds in merged_by_var.items():
+    members = set(ds["member_id"].values)
+    common_members = members if common_members is None else common_members & members
+
+common_members = sorted(common_members)
+print(f"\n[MEMBERS] {len(common_members)} common members across {args.variable}")
+for v, ds in merged_by_var.items():
+    n = len(ds["member_id"].values)
+    print(f"  {v}: {n} available → {len(common_members)} used")
+
+# ── Download each variable for the common member set ─────────────────────────
+for variable, merged in merged_by_var.items():
     print(f"\n{'='*60}")
     print(f"[VARIABLE] {variable}")
     output_dir = os.path.join(args.output_dir, variable)
+    merged = merged.sel(member_id=common_members)
 
-    catalog_subset = catalog.search(variable=variable, frequency='monthly', forcing_variant="cmip6")
-    print(catalog_subset.df)
-
-    dsets = catalog_subset.to_dataset_dict(storage_options={'anon': True})
-
-    historical = dsets['atm.historical.monthly.cmip6'].groupby('time.year').mean()
-    future     = dsets['atm.ssp370.monthly.cmip6'].groupby('time.year').mean()
-    merged     = xr.concat([historical, future], dim='year')
-
-    members = list(merged["member_id"].values)
-    print(f"  {len(members)} members → {output_dir}")
-
+    print(f"  {len(common_members)} members → {output_dir}")
     Parallel(n_jobs=N_JOBS, backend="multiprocessing")(
-        delayed(save_dataset)(merged, m, output_dir, NUM_CHUNKS) for m in members
+        delayed(save_dataset)(merged, m, output_dir, NUM_CHUNKS) for m in common_members
     )
-
-    print(f"  Saved {len(members)} members to {output_dir}")
+    print(f"  Saved {len(common_members)} members to {output_dir}")
