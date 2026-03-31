@@ -23,7 +23,8 @@ echo "[CONTAINER] Using: ${SIF}"
 
 # Override any inherited SINGULARITYENV_PYTHONPATH from --export=ALL
 _VENV_SITE=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
-export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
+_EXTRA_PKGS=/scratch/project_462001328/python_packages
+export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}:${_EXTRA_PKGS}"
 echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
 
 # ── Python / Hydra ────────────────────────────────────────────────────────────
