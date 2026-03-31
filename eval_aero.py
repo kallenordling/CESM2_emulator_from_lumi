@@ -458,6 +458,99 @@ def compute_ig_per_output_location(
     return result
 
 
+def compute_saliency_per_output_location(
+    model: UNetModel3D,
+    scheduler: ContinuousDDPM,
+    cond_tensor: torch.Tensor,
+    lat: np.ndarray,
+    lon: np.ndarray,
+    device: torch.device,
+    dtype: torch.dtype,
+    years: np.ndarray,
+    windows: list,
+    output_locations: list = OUTPUT_LOCATIONS,
+    batch_size: int = 4,
+    t_proxy: float = 0.2,
+    seed: int = 42,
+) -> dict:
+    """Compute saliency maps of T at each output location w.r.t. conditioning.
+
+    Saliency = |∂T(lat_o, lon_o) / ∂cond| evaluated at the actual conditioning
+    (no baseline interpolation). Much faster than IG — one forward + K backward
+    passes per batch — but can saturate in flat regions of the input space.
+
+    Returns same dict structure as compute_ig_per_output_location.
+    """
+    _, T_total, H, W = cond_tensor.shape
+
+    loc_indices = []
+    for loc_name, lat_o, lon_o in output_locations:
+        lat_idx = int(np.argmin(np.abs(lat - lat_o)))
+        lon_idx = int(np.argmin(np.abs(lon - lon_o)))
+        loc_indices.append((loc_name, lat_idx, lon_idx))
+        print(f"  [SAL loc] {loc_name:12s}: grid ({lat_idx:3d},{lon_idx:3d})"
+              f" = ({lat[lat_idx]:+6.1f}°N, {lon[lon_idx]:+7.1f}°E)")
+
+    K = len(loc_indices)
+
+    sal_raw = {
+        loc_name: {
+            "co2": np.zeros((T_total, H, W), dtype=np.float32),
+            "sul": np.zeros((T_total, H, W), dtype=np.float32),
+        }
+        for loc_name, _, _ in loc_indices
+    }
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(seed)
+
+    for t_start in tqdm(range(0, T_total, batch_size), desc="  Saliency batches"):
+        t_end = min(t_start + batch_size, T_total)
+        B = t_end - t_start
+
+        cond_actual = (
+            cond_tensor[:, t_start:t_end]
+            .permute(1, 0, 2, 3)
+            .unsqueeze(2)
+            .to(device=device, dtype=dtype)
+        ).detach().requires_grad_(True)
+
+        noise   = torch.randn(B, 1, 1, H, W, device=device, dtype=dtype, generator=rng)
+        t_val   = torch.full((B,), t_proxy, device=device, dtype=dtype)
+        log_snr = scheduler.log_snr(t_val)
+        x_clean = torch.zeros(B, 1, 1, H, W, device=device, dtype=dtype)
+        x_noisy = scheduler.add_noise(x_clean, noise, log_snr).detach()
+        log_snr = log_snr.detach()
+
+        v_pred   = model(x_noisy, log_snr, cond_map=cond_actual)
+        pred_x0  = scheduler.predict_start_from_v(x_noisy, log_snr, v_pred)
+        pred_map = pred_x0.squeeze(1).squeeze(1)    # (B, H, W)
+
+        for i, (loc_name, lat_idx, lon_idx) in enumerate(loc_indices):
+            T_local = pred_map[:, lat_idx, lon_idx]   # (B,)
+            retain  = (i < K - 1)
+            grads   = torch.autograd.grad(
+                T_local.sum(), cond_actual, retain_graph=retain
+            )[0]    # (B, 2, 1, H, W)
+            sal_raw[loc_name]["co2"][t_start:t_end] = grads[:, 0, 0].detach().abs().cpu().numpy()
+            sal_raw[loc_name]["sul"][t_start:t_end] = grads[:, 1, 0].detach().abs().cpu().numpy()
+
+    result = {}
+    for loc_name, lat_idx, lon_idx in loc_indices:
+        result[loc_name] = {}
+        for y_start, y_end, label in windows:
+            mask = (years >= y_start) & (years <= y_end)
+            if not mask.any():
+                continue
+            result[loc_name][label] = {
+                "co2":     sal_raw[loc_name]["co2"][mask].mean(axis=0),
+                "sul":     sal_raw[loc_name]["sul"][mask].mean(axis=0),
+                "lat_idx": lat_idx,
+                "lon_idx": lon_idx,
+            }
+    return result
+
+
 def compute_baseline(gmean: np.ndarray, years: np.ndarray,
                      start=BASELINE_START, end=BASELINE_END) -> float:
     mask = (years >= start) & (years <= end)
@@ -821,24 +914,19 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     print(f"  → saved {out_path}")
 
 
-def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
-    """Plot spatial IG attribution maps for each output location.
+def _plot_loc_attribution(name: str, results: dict, out_path_prefix: str,
+                          method: str, cbar_label: str):
+    """Shared plot helper for per-location attribution maps (IG or saliency).
 
-    One figure per output location, saved as {out_path_prefix}_{loc_name}.png.
-
-    Each figure has:
-      Rows: CO2 (row 0), SUL (row 1)
-      Columns: one per time window
-
-    A ★ marker on each panel shows where the output location is.
-    Bright colours indicate which conditioning grid points most influence
-    the predicted temperature at the marked output location.
+    One figure per output location saved as {out_path_prefix}_{loc_name}.png.
+    Rows: CO2 (top), SUL (bottom). Columns: one per time window.
+    ★ marks the output location on every panel.
     """
-    if not ig_results:
-        print(f"  [IG] No results to plot for {name}, skipping.")
+    if not results:
+        print(f"  [{method}] No results to plot for {name}, skipping.")
         return
 
-    for loc_name, window_data in ig_results.items():
+    for loc_name, window_data in results.items():
         windows = list(window_data.keys())
         if not windows:
             continue
@@ -879,7 +967,7 @@ def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
                 ax=ax, cmap="YlOrRd", vmin=0, vmax=vmax,
                 transform=ccrs.PlateCarree(),
                 add_colorbar=True,
-                cbar_kwargs={"label": "|IG attr.|", "shrink": 0.75},
+                cbar_kwargs={"label": cbar_label, "shrink": 0.75},
             )
             ax.add_feature(cfeature.COASTLINE, lw=0.5)
             ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
@@ -901,11 +989,11 @@ def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
             _plot_map(axes[1, col], window_data[window]["sul"], vmax_sul,
                       f"SUL → {loc_name}\n{window}")
 
-        axes[0, 0].set_ylabel("CO2 attribution", fontsize=10)
-        axes[1, 0].set_ylabel("SUL attribution", fontsize=10)
+        axes[0, 0].set_ylabel("CO2", fontsize=10)
+        axes[1, 0].set_ylabel("SUL", fontsize=10)
 
         fig.suptitle(
-            f"IG attribution → T at {loc_name} ({out_lat:+.1f}°N, {out_lon:.1f}°E)"
+            f"{method} → T at {loc_name} ({out_lat:+.1f}°N, {out_lon:.1f}°E)"
             f" — {name}\n"
             "(★ = output location; bright = conditioning here drives local temperature)",
             fontsize=11,
@@ -915,6 +1003,18 @@ def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
         print(f"  → saved {out_path}")
+
+
+def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
+    """Plot IG attribution maps per output location."""
+    _plot_loc_attribution(name, ig_results, out_path_prefix,
+                          method="Integrated Gradients", cbar_label="|IG attr.|")
+
+
+def plot_saliency_per_location(name: str, sal_results: dict, out_path_prefix: str):
+    """Plot saliency maps per output location."""
+    _plot_loc_attribution(name, sal_results, out_path_prefix,
+                          method="Saliency", cbar_label="|∂T/∂cond|")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -934,8 +1034,12 @@ def main():
                         help="IG interpolation steps (more = more accurate, slower)")
     parser.add_argument("--ig-batch-size", type=int, default=8,
                         help="Years per GPU batch for IG (keep small to avoid OOM)")
-    parser.add_argument("--skip-ig",       action="store_true",
+    parser.add_argument("--skip-ig",            action="store_true",
                         help="Skip spatial IG attribution maps (saves time/memory)")
+    parser.add_argument("--skip-saliency",      action="store_true",
+                        help="Skip saliency maps (saves time/memory)")
+    parser.add_argument("--saliency-batch-size", type=int, default=8,
+                        help="Years per GPU batch for saliency (default: 8)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1131,6 +1235,30 @@ def main():
                 p.requires_grad_(True)
             ig_prefix = os.path.join(args.output_dir, f"ig_loc_{name}")
             plot_ig_per_location(name, ig_maps, ig_prefix)
+
+        # -- saliency maps (per output location) ------------------------------
+        if not args.skip_saliency and name in IG_WINDOWS:
+            print(f"  Computing per-location saliency maps "
+                  f"(batch={args.saliency_batch_size}) …")
+            for p in model.parameters():
+                p.requires_grad_(False)
+            sal_maps = compute_saliency_per_output_location(
+                model            = model,
+                scheduler        = scheduler,
+                cond_tensor      = cond_tensor,
+                lat              = LAT,
+                lon              = LON,
+                device           = device,
+                dtype            = dtype,
+                years            = cond_years,
+                windows          = IG_WINDOWS[name],
+                output_locations = OUTPUT_LOCATIONS,
+                batch_size       = args.saliency_batch_size,
+            )
+            for p in model.parameters():
+                p.requires_grad_(True)
+            sal_prefix = os.path.join(args.output_dir, f"saliency_loc_{name}")
+            plot_saliency_per_location(name, sal_maps, sal_prefix)
 
         timeseries_results[name] = dict(
             gen_anom_ens  = gen_anom_ens,
