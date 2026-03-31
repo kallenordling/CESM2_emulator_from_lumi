@@ -26,6 +26,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.util import add_cyclic_point
 from scipy import stats
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
@@ -725,13 +728,6 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
           significant (Welch t-test p < 0.05 across ensemble members),
           i.e. not explained by natural climate variability.
     """
-    try:
-        import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
-        USE_CARTOPY = True
-    except ImportError:
-        USE_CARTOPY = False
-
     has_cesm = (cesm_data is not None) and (cesm_years is not None)
     n_cols = len(map_years)
     n_rows = 3 if has_cesm else 1
@@ -742,7 +738,7 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(5 * n_cols, 3.5 * n_rows),
-        subplot_kw={"projection": ccrs.PlateCarree()} if USE_CARTOPY else {},
+        subplot_kw={"projection": ccrs.PlateCarree()},
         squeeze=False,
     )
 
@@ -753,34 +749,24 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     norm_diff = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_diff, vmax=vmax_diff)
 
     def _plot_panel(ax, data, norm, title):
-        # Add a cyclic longitude column so pcolormesh closes the wrap at 0°/360°
-        if USE_CARTOPY:
-            from cartopy.util import add_cyclic_point
-            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
-        else:
-            data_cyc = np.concatenate([data, data[:, :1]], axis=1)
-            lon_cyc  = np.append(LON, LON[0] + 360.0)
-
+        data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
         da = xr.DataArray(
             data_cyc, dims=["lat", "lon"],
             coords={"lat": LAT, "lon": lon_cyc},
             attrs={"units": "°C"},
         )
-        plot_kwargs = dict(
+        da.plot.pcolormesh(
             ax=ax, cmap=cmap, norm=norm,
+            transform=ccrs.PlateCarree(),
             add_colorbar=True,
             cbar_kwargs={"label": "°C", "shrink": 0.75},
         )
-        if USE_CARTOPY:
-            plot_kwargs["transform"] = ccrs.PlateCarree()
-        da.plot.pcolormesh(**plot_kwargs)
-        if USE_CARTOPY:
-            ax.add_feature(cfeature.COASTLINE, lw=0.5)
-            ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
-            gl = ax.gridlines(draw_labels=True, linewidth=0.3,
-                              color="grey", alpha=0.5, linestyle="--")
-            gl.top_labels = False
-            gl.right_labels = False
+        ax.add_feature(cfeature.COASTLINE, lw=0.5)
+        ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
+        gl = ax.gridlines(draw_labels=True, linewidth=0.3,
+                          color="grey", alpha=0.5, linestyle="--")
+        gl.top_labels   = False
+        gl.right_labels = False
         ax.set_title(title, fontsize=9)
         # Global mean annotation in bottom-right corner
         gmean = float(area_weighted_gmean(data[np.newaxis], LAT)[0])
@@ -822,11 +808,8 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                 sig_lons = LON[lon_idx[sig_mask]]
                 ax_diff = axes[2, col]
                 plot_kw = dict(color="k", s=0.3, alpha=0.5, linewidths=0, rasterized=True)
-                if USE_CARTOPY:
-                    ax_diff.scatter(sig_lons, sig_lats, transform=ccrs.PlateCarree(),
-                                    zorder=5, **plot_kw)
-                else:
-                    ax_diff.scatter(sig_lons, sig_lats, zorder=5, **plot_kw)
+                ax_diff.scatter(sig_lons, sig_lats, transform=ccrs.PlateCarree(),
+                                zorder=5, **plot_kw)
 
     for row, label in enumerate(row_labels):
         axes[row, 0].set_ylabel(label, fontsize=10)
@@ -851,13 +834,6 @@ def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
     Bright colours indicate which conditioning grid points most influence
     the predicted temperature at the marked output location.
     """
-    try:
-        import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
-        USE_CARTOPY = True
-    except ImportError:
-        USE_CARTOPY = False
-
     if not ig_results:
         print(f"  [IG] No results to plot for {name}, skipping.")
         return
@@ -873,7 +849,7 @@ def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
         fig, axes = plt.subplots(
             n_rows, n_cols,
             figsize=(5 * n_cols, 3.5 * n_rows),
-            subplot_kw={"projection": ccrs.PlateCarree()} if USE_CARTOPY else {},
+            subplot_kw={"projection": ccrs.PlateCarree()},
             squeeze=False,
         )
 
@@ -894,41 +870,30 @@ def plot_ig_per_location(name: str, ig_results: dict, out_path_prefix: str):
         out_lon = float(LON[lon_idx])
 
         def _plot_map(ax, data, vmax, title):
-            if USE_CARTOPY:
-                from cartopy.util import add_cyclic_point
-                data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
-            else:
-                data_cyc = np.concatenate([data, data[:, :1]], axis=1)
-                lon_cyc  = np.append(LON, LON[0] + 360.0)
-
+            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
             da = xr.DataArray(
                 data_cyc, dims=["lat", "lon"],
                 coords={"lat": LAT, "lon": lon_cyc},
             )
-            plot_kwargs = dict(
+            da.plot.pcolormesh(
                 ax=ax, cmap="YlOrRd", vmin=0, vmax=vmax,
+                transform=ccrs.PlateCarree(),
                 add_colorbar=True,
                 cbar_kwargs={"label": "|IG attr.|", "shrink": 0.75},
             )
-            if USE_CARTOPY:
-                plot_kwargs["transform"] = ccrs.PlateCarree()
-            da.plot.pcolormesh(**plot_kwargs)
-            if USE_CARTOPY:
-                ax.add_feature(cfeature.COASTLINE, lw=0.5)
-                gl = ax.gridlines(draw_labels=True, linewidth=0.3,
-                                  color="grey", alpha=0.5, linestyle="--")
-                gl.top_labels   = False
-                gl.right_labels = False
+            ax.add_feature(cfeature.COASTLINE, lw=0.5)
+            ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
+            gl = ax.gridlines(draw_labels=True, linewidth=0.3,
+                              color="grey", alpha=0.5, linestyle="--")
+            gl.top_labels   = False
+            gl.right_labels = False
             ax.set_title(title, fontsize=9)
 
             # ★ marker at the output location
-            star_kw = dict(marker="*", color="blue", markersize=12,
-                           markeredgecolor="white", markeredgewidth=0.8,
-                           zorder=10, linestyle="none")
-            if USE_CARTOPY:
-                ax.plot(out_lon, out_lat, transform=ccrs.PlateCarree(), **star_kw)
-            else:
-                ax.plot(out_lon, out_lat, **star_kw)
+            ax.plot(out_lon, out_lat, transform=ccrs.PlateCarree(),
+                    marker="*", color="blue", markersize=12,
+                    markeredgecolor="white", markeredgewidth=0.8,
+                    zorder=10, linestyle="none")
 
         for col, window in enumerate(windows):
             _plot_map(axes[0, col], window_data[window]["co2"], vmax_co2,
