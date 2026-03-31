@@ -11,17 +11,15 @@ from joblib import Parallel, delayed
 NUM_CHUNKS = 40
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--variable",   default="TREFHT",
-                    help="CESM2-LE variable to download (e.g. TREFHT, PRECT)")
+parser.add_argument("--variable",   nargs="+", default=["TREFHT", "PRECT"],
+                    help="CESM2-LE variable(s) to download (default: TREFHT PRECT)")
 parser.add_argument("--output-dir", default="/scratch/project_462001328/emulator_data/training_data",
                     help="Root output directory; data saved to <output-dir>/<variable>/")
 parser.add_argument("--n-jobs",     type=int, default=4,
                     help="Parallel save workers")
 args = parser.parse_args()
 
-VARIABLE   = args.variable
-OUTPUT_DIR = os.path.join(args.output_dir, VARIABLE)
-N_JOBS     = args.n_jobs
+N_JOBS = args.n_jobs
 
 
 def save_dataset(dataset: xr.Dataset, realization: str, save_dir: str, num_chunks):
@@ -55,22 +53,25 @@ catalog = intake.open_esm_datastore(
 )
 print(catalog)
 
-catalog_subset = catalog.search(variable=VARIABLE, frequency='monthly', forcing_variant="cmip6")
-print(catalog_subset.df)
+for variable in args.variable:
+    print(f"\n{'='*60}")
+    print(f"[VARIABLE] {variable}")
+    output_dir = os.path.join(args.output_dir, variable)
 
-dsets = catalog_subset.to_dataset_dict(storage_options={'anon': True})
-print(dsets)
+    catalog_subset = catalog.search(variable=variable, frequency='monthly', forcing_variant="cmip6")
+    print(catalog_subset.df)
 
-historical = dsets[f'atm.historical.monthly.cmip6'].groupby('time.year').mean()
-future     = dsets[f'atm.ssp370.monthly.cmip6'].groupby('time.year').mean()
-merged     = xr.concat([historical, future], dim='year')
-print(merged)
+    dsets = catalog_subset.to_dataset_dict(storage_options={'anon': True})
 
-members = list(merged["member_id"].values)
-print(f"Downloading {VARIABLE} for {len(members)} members → {OUTPUT_DIR}")
+    historical = dsets['atm.historical.monthly.cmip6'].groupby('time.year').mean()
+    future     = dsets['atm.ssp370.monthly.cmip6'].groupby('time.year').mean()
+    merged     = xr.concat([historical, future], dim='year')
 
-results = Parallel(n_jobs=N_JOBS, backend="multiprocessing")(
-    delayed(save_dataset)(merged, m, OUTPUT_DIR, NUM_CHUNKS) for m in members
-)
+    members = list(merged["member_id"].values)
+    print(f"  {len(members)} members → {output_dir}")
 
-print(f"Saved {len(members)} members to {OUTPUT_DIR}")
+    Parallel(n_jobs=N_JOBS, backend="multiprocessing")(
+        delayed(save_dataset)(merged, m, output_dir, NUM_CHUNKS) for m in members
+    )
+
+    print(f"  Saved {len(members)} members to {output_dir}")
