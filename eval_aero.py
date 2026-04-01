@@ -108,6 +108,11 @@ LON  = None   # set from first conditioning file in main()
 
 NULL_COND = -1.0   # CFG null value (pre-industrial baseline under normalisation)
 
+# Per-channel anti-guidance scales (< 1.0 reduces overcounting, 1.0 = no change).
+# Set both to 1.0 to disable and use direct conditioning (original behaviour).
+GUIDANCE_CO2 = 1.0
+GUIDANCE_SUL = 1.0
+
 # Time windows for spatial IG maps, keyed by experiment name
 IG_WINDOWS = {
     "hist":   [(1920, 1960, "1920–1960"), (1960, 1990, "1960–1990"), (1990, 2014, "1990–2014")],
@@ -219,15 +224,24 @@ def generate_timeseries(
     sample_steps: int,
     batch_size: int = 16,
     seed: int | None = None,
+    guidance_co2: float = 1.0,
+    guidance_sul: float = 1.0,
 ) -> np.ndarray:
     """Diffusion sampling for every year in cond_tensor.
 
     Args:
         cond_tensor: (n_vars, T, H, W) normalised conditioning on CPU
         seed: optional RNG seed for reproducible ensemble members
+        guidance_co2: per-channel CFG scale for CO2 (< 1.0 = anti-guidance)
+        guidance_sul: per-channel CFG scale for SUL (< 1.0 = anti-guidance)
+            formula: pred = pred_null + w_co2*(pred_co2 - pred_null)
+                                      + w_sul*(pred_sul - pred_null)
+            Both 1.0 → direct conditioning (original behaviour, 1 forward pass).
     Returns:
         numpy array (T, H, W) in *normalised* model output space
     """
+    use_cfg = (guidance_co2 != 1.0) or (guidance_sul != 1.0)
+
     if seed is not None:
         torch.manual_seed(seed)
     _, T, H, W = cond_tensor.shape
@@ -242,10 +256,25 @@ def generate_timeseries(
         cond_b = chunk.permute(1, 0, 2, 3).unsqueeze(2).to(device=device, dtype=dtype)
         gen    = torch.randn(B, 1, 1, H, W, device=device, dtype=dtype)
 
+        if use_cfg:
+            cond_co2_only = cond_b.clone()
+            cond_co2_only[:, 1] = NULL_COND          # SUL nulled
+            cond_sul_only = cond_b.clone()
+            cond_sul_only[:, 0] = NULL_COND          # CO2 nulled
+            cond_null = torch.full_like(cond_b, NULL_COND)
+
         with torch.no_grad():
             for step_idx, t_idx in enumerate(scheduler.timesteps):
                 t = scheduler.log_snr(steps[t_idx]).expand(B).to(dtype)
-                pred = model(gen, t, cond_map=cond_b)
+                if use_cfg:
+                    pred_co2  = model(gen, t, cond_map=cond_co2_only)
+                    pred_sul  = model(gen, t, cond_map=cond_sul_only)
+                    pred_null = model(gen, t, cond_map=cond_null)
+                    pred = (pred_null
+                            + guidance_co2 * (pred_co2 - pred_null)
+                            + guidance_sul * (pred_sul - pred_null))
+                else:
+                    pred = model(gen, t, cond_map=cond_b)
                 gen  = scheduler.step(pred, timestep=t_idx, sample=gen).prev_sample
 
         results.append(gen.squeeze(1).squeeze(1).cpu().float())   # (B, H, W)
@@ -1120,6 +1149,7 @@ def main():
             gen_norm = generate_timeseries(
                 model, scheduler, cond_tensor,
                 device, dtype, args.sample_steps, args.batch_size, seed=m,
+                guidance_co2=GUIDANCE_CO2, guidance_sul=GUIDANCE_SUL,
             )
             members.append(gen_norm * 21.0 + 4.5)   # denormalise → °C
 
