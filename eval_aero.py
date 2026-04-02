@@ -1067,6 +1067,12 @@ def main():
                         help="Skip saliency maps (saves time/memory)")
     parser.add_argument("--saliency-batch-size", type=int, default=8,
                         help="Years per GPU batch for saliency (default: 8)")
+    parser.add_argument("--guidance-co2", type=float, default=GUIDANCE_CO2,
+                        help="Per-channel CFG scale for CO2 (default: %(default)s). "
+                             "< 1.0 reduces CO2 warming contribution; enables 3-pass CFG.")
+    parser.add_argument("--guidance-sul", type=float, default=GUIDANCE_SUL,
+                        help="Per-channel CFG scale for SUL (default: %(default)s). "
+                             "> 1.0 amplifies aerosol cooling; enables 3-pass CFG.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1147,7 +1153,7 @@ def main():
             gen_norm = generate_timeseries(
                 model, scheduler, cond_tensor,
                 device, dtype, args.sample_steps, args.batch_size, seed=m,
-                guidance_co2=GUIDANCE_CO2, guidance_sul=GUIDANCE_SUL,
+                guidance_co2=args.guidance_co2, guidance_sul=args.guidance_sul,
             )
             members.append(gen_norm * 21.0 + 4.5)   # denormalise → °C
 

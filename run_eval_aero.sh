@@ -49,6 +49,10 @@ fi
 # Fall back to defaults for manual submission.
 CHECKPOINT="${CHECKPOINT:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
+# Per-channel CFG scales: < 1.0 reduces CO2 warming, > 1.0 amplifies aerosol cooling.
+# Set to 1.0 (default) to disable CFG and use direct conditioning (single forward pass).
+GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
+GUIDANCE_SUL="${GUIDANCE_SUL:-1.0}"
 
 if [ -n "${CHECKPOINT}" ]; then
     singularity exec ${SIF} bash -c "
@@ -57,7 +61,9 @@ if [ -n "${CHECKPOINT}" ]; then
             --checkpoint  '${CHECKPOINT}' \
             --output-dir  '${OUTPUT_DIR}' \
             --sample-steps 100 \
-            --batch-size 16
+            --batch-size 16 \
+            --guidance-co2 ${GUIDANCE_CO2} \
+            --guidance-sul ${GUIDANCE_SUL}
     "
 else
     singularity exec ${SIF} bash -c "
@@ -66,6 +72,8 @@ else
             --runs-dir  /projappl/project_462001328/CESM2_emulator_from_lumi/runs \
             --output-dir '${OUTPUT_DIR}' \
             --sample-steps 100 \
-            --batch-size 16
+            --batch-size 16 \
+            --guidance-co2 ${GUIDANCE_CO2} \
+            --guidance-sul ${GUIDANCE_SUL}
     "
 fi
