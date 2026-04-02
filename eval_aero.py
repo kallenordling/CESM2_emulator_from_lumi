@@ -224,6 +224,7 @@ def generate_timeseries(
     seed: int | None = None,
     guidance_co2: float = 1.0,
     guidance_sul: float = 1.0,
+    force_cfg: bool = False,
 ) -> np.ndarray:
     """Diffusion sampling for every year in cond_tensor.
 
@@ -238,7 +239,7 @@ def generate_timeseries(
     Returns:
         numpy array (T, H, W) in *normalised* model output space
     """
-    use_cfg = (guidance_co2 != 1.0) or (guidance_sul != 1.0)
+    use_cfg = force_cfg or (guidance_co2 != 1.0) or (guidance_sul != 1.0)
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -1105,6 +1106,10 @@ def main():
     parser.add_argument("--guidance-sul", type=float, default=GUIDANCE_SUL,
                         help="Per-channel CFG scale for SUL (default: %(default)s). "
                              "> 1.0 amplifies aerosol cooling; enables 3-pass CFG.")
+    parser.add_argument("--force-cfg", action="store_true",
+                        help="Always use the 3-pass CFG decomposition even when both "
+                             "guidance scales are 1.0.  Useful to isolate the bias from "
+                             "the additive decomposition vs the guidance scale values.")
     args = parser.parse_args()
     if args.skip_xai:
         args.skip_ig       = True
@@ -1189,6 +1194,7 @@ def main():
                 model, scheduler, cond_tensor,
                 device, dtype, args.sample_steps, args.batch_size, seed=m,
                 guidance_co2=args.guidance_co2, guidance_sul=args.guidance_sul,
+                force_cfg=args.force_cfg,
             )
             members.append(gen_norm * 21.0 + 4.5)   # denormalise → °C
 

@@ -55,9 +55,14 @@ GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
 GUIDANCE_SUL="${GUIDANCE_SUL:-1.0}"
 # Set SKIP_XAI=1 to skip all XAI figures (IG + saliency) — useful for fast bias sweeps.
 SKIP_XAI="${SKIP_XAI:-0}"
+# Set FORCE_CFG=1 to use 3-pass CFG decomposition even at guidance scales 1.0/1.0.
+# Useful to isolate whether the additive decomposition itself introduces bias.
+FORCE_CFG="${FORCE_CFG:-0}"
 
 _XAI_FLAG=""
 [ "${SKIP_XAI}" = "1" ] && _XAI_FLAG="--skip-xai"
+_CFG_FLAG=""
+[ "${FORCE_CFG}" = "1" ] && _CFG_FLAG="--force-cfg"
 
 if [ -n "${CHECKPOINT}" ]; then
     singularity exec ${SIF} bash -c "
@@ -69,7 +74,7 @@ if [ -n "${CHECKPOINT}" ]; then
             --batch-size 16 \
             --guidance-co2 ${GUIDANCE_CO2} \
             --guidance-sul ${GUIDANCE_SUL} \
-            ${_XAI_FLAG}
+            ${_XAI_FLAG} ${_CFG_FLAG}
     "
 else
     singularity exec ${SIF} bash -c "
@@ -81,6 +86,6 @@ else
             --batch-size 16 \
             --guidance-co2 ${GUIDANCE_CO2} \
             --guidance-sul ${GUIDANCE_SUL} \
-            ${_XAI_FLAG}
+            ${_XAI_FLAG} ${_CFG_FLAG}
     "
 fi
