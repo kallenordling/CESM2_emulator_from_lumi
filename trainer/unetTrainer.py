@@ -1018,8 +1018,10 @@ class UNetTrainer:
             except Exception as e:
                 print(f"[WARN] Could not load EMA: {e}")
 
-        # Restore optimizer (optional)
-        if "Optimizer" in checkpoint:
+        # Restore optimizer (optional; skip if reset_optimizer=True to clear Adam momentum)
+        if getattr(self, "reset_optimizer", False):
+            print("[INFO] reset_optimizer=True — skipping optimizer state restore (fresh Adam momentum)")
+        elif "Optimizer" in checkpoint:
             try:
                 self.optimizer.load_state_dict(checkpoint["Optimizer"])
             except Exception as e:
