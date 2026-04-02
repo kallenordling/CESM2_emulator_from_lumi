@@ -946,8 +946,8 @@ def _plot_loc_attribution(name: str, results: dict, out_path_prefix: str,
     """Shared plot helper for per-location attribution maps (IG or saliency).
 
     One figure per output location saved as {out_path_prefix}_{loc_name}.png.
-    Rows: CO2 (top), SUL (bottom). Columns: one per time window.
-    ★ marks the output location on every panel.
+    Rows: CO2, SUL, raw difference (|CO2|-|SUL|), normalised ratio.
+    Columns: one per time window.  ★ marks the output location on every panel.
     """
     if not results:
         print(f"  [{method}] No results to plot for {name}, skipping.")
@@ -959,7 +959,7 @@ def _plot_loc_attribution(name: str, results: dict, out_path_prefix: str,
             continue
 
         n_cols = len(windows)
-        n_rows = 2   # row 0 = CO2, row 1 = SUL
+        n_rows = 4   # CO2 | SUL | raw diff | normalised ratio
 
         fig, axes = plt.subplots(
             n_rows, n_cols,
@@ -975,54 +975,84 @@ def _plot_loc_attribution(name: str, results: dict, out_path_prefix: str,
         vmax_sul = max(
             np.percentile(window_data[w]["sul"], 98) for w in windows
         )
-        # Ensure non-zero to avoid degenerate colormaps
         vmax_co2 = max(vmax_co2, 1e-9)
         vmax_sul = max(vmax_sul, 1e-9)
+
+        # Shared symmetric colour scale for raw difference
+        diffs = [window_data[w]["co2"] - window_data[w]["sul"] for w in windows]
+        vmax_diff = max(np.percentile(np.abs(d), 98) for d in diffs)
+        vmax_diff = max(vmax_diff, 1e-9)
 
         lat_idx = window_data[windows[0]]["lat_idx"]
         lon_idx = window_data[windows[0]]["lon_idx"]
         out_lat = float(LAT[lat_idx])
         out_lon = float(LON[lon_idx])
 
-        def _plot_map(ax, data, vmax, title):
-            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
-            da = xr.DataArray(
-                data_cyc, dims=["lat", "lon"],
-                coords={"lat": LAT, "lon": lon_cyc},
-            )
-            da.plot.pcolormesh(
-                ax=ax, cmap="YlOrRd", vmin=0, vmax=vmax,
-                transform=ccrs.PlateCarree(),
-                add_colorbar=True,
-                cbar_kwargs={"label": cbar_label, "shrink": 0.75},
-            )
-            ax.add_feature(cfeature.COASTLINE, lw=0.5)
-            ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
-            gl = ax.gridlines(draw_labels=True, linewidth=0.3,
-                              color="grey", alpha=0.5, linestyle="--")
-            gl.top_labels   = False
-            gl.right_labels = False
-            ax.set_title(title, fontsize=9)
-
-            # ★ marker at the output location
+        def _star(ax):
             ax.plot(out_lon, out_lat, transform=ccrs.PlateCarree(),
                     marker="*", color="blue", markersize=12,
                     markeredgecolor="white", markeredgewidth=0.8,
                     zorder=10, linestyle="none")
 
-        for col, window in enumerate(windows):
-            _plot_map(axes[0, col], window_data[window]["co2"], vmax_co2,
-                      f"CO2 → {loc_name}\n{window}")
-            _plot_map(axes[1, col], window_data[window]["sul"], vmax_sul,
-                      f"SUL → {loc_name}\n{window}")
+        def _gridlines(ax):
+            gl = ax.gridlines(draw_labels=True, linewidth=0.3,
+                              color="grey", alpha=0.5, linestyle="--")
+            gl.top_labels   = False
+            gl.right_labels = False
 
-        axes[0, 0].set_ylabel("CO2", fontsize=10)
-        axes[1, 0].set_ylabel("SUL", fontsize=10)
+        def _plot_map(ax, data, vmax, title):
+            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
+            da = xr.DataArray(data_cyc, dims=["lat", "lon"],
+                              coords={"lat": LAT, "lon": lon_cyc})
+            da.plot.pcolormesh(ax=ax, cmap="YlOrRd", vmin=0, vmax=vmax,
+                               transform=ccrs.PlateCarree(), add_colorbar=True,
+                               cbar_kwargs={"label": cbar_label, "shrink": 0.75})
+            ax.add_feature(cfeature.COASTLINE, lw=0.5)
+            ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
+            _gridlines(ax)
+            ax.set_title(title, fontsize=9)
+            _star(ax)
+
+        def _plot_div(ax, data, vmax, title, cbar_lbl):
+            data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
+            da = xr.DataArray(data_cyc, dims=["lat", "lon"],
+                              coords={"lat": LAT, "lon": lon_cyc})
+            da.plot.pcolormesh(ax=ax, cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+                               transform=ccrs.PlateCarree(), add_colorbar=True,
+                               cbar_kwargs={"label": cbar_lbl, "shrink": 0.75})
+            ax.add_feature(cfeature.COASTLINE, lw=0.5)
+            ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
+            _gridlines(ax)
+            ax.set_title(title, fontsize=9)
+            _star(ax)
+
+        for col, window in enumerate(windows):
+            co2 = window_data[window]["co2"]
+            sul = window_data[window]["sul"]
+            raw_diff  = co2 - sul
+            denom     = co2 + sul
+            norm_ratio = np.where(denom > 1e-12, raw_diff / denom, 0.0)
+
+            _plot_map(axes[0, col], co2, vmax_co2,
+                      f"CO2 → {loc_name}\n{window}")
+            _plot_map(axes[1, col], sul, vmax_sul,
+                      f"SUL → {loc_name}\n{window}")
+            _plot_div(axes[2, col], raw_diff, vmax_diff,
+                      f"|CO2|−|SUL| → {loc_name}\n{window}",
+                      f"Δ{cbar_label}  (red=CO2 dom.)")
+            _plot_div(axes[3, col], norm_ratio, 1.0,
+                      f"(|CO2|−|SUL|)/(|CO2|+|SUL|) → {loc_name}\n{window}",
+                      "ratio  (red=CO2, blue=SUL)")
+
+        axes[0, 0].set_ylabel("CO2",         fontsize=10)
+        axes[1, 0].set_ylabel("SUL",         fontsize=10)
+        axes[2, 0].set_ylabel("Raw diff",    fontsize=10)
+        axes[3, 0].set_ylabel("Norm. ratio", fontsize=10)
 
         fig.suptitle(
             f"{method} → T at {loc_name} ({out_lat:+.1f}°N, {out_lon:.1f}°E)"
             f" — {name}\n"
-            "(★ = output location; bright = conditioning here drives local temperature)",
+            "(★ = output location; red = CO2 dominates, blue = SUL dominates)",
             fontsize=11,
         )
         fig.tight_layout()
