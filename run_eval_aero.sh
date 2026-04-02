@@ -53,6 +53,11 @@ OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
 # Set to 1.0 (default) to disable CFG and use direct conditioning (single forward pass).
 GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
 GUIDANCE_SUL="${GUIDANCE_SUL:-1.0}"
+# Set SKIP_XAI=1 to skip all XAI figures (IG + saliency) — useful for fast bias sweeps.
+SKIP_XAI="${SKIP_XAI:-0}"
+
+_XAI_FLAG=""
+[ "${SKIP_XAI}" = "1" ] && _XAI_FLAG="--skip-xai"
 
 if [ -n "${CHECKPOINT}" ]; then
     singularity exec ${SIF} bash -c "
@@ -63,7 +68,8 @@ if [ -n "${CHECKPOINT}" ]; then
             --sample-steps 100 \
             --batch-size 16 \
             --guidance-co2 ${GUIDANCE_CO2} \
-            --guidance-sul ${GUIDANCE_SUL}
+            --guidance-sul ${GUIDANCE_SUL} \
+            ${_XAI_FLAG}
     "
 else
     singularity exec ${SIF} bash -c "
@@ -74,6 +80,7 @@ else
             --sample-steps 100 \
             --batch-size 16 \
             --guidance-co2 ${GUIDANCE_CO2} \
-            --guidance-sul ${GUIDANCE_SUL}
+            --guidance-sul ${GUIDANCE_SUL} \
+            ${_XAI_FLAG}
     "
 fi
