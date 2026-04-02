@@ -49,9 +49,10 @@ trainer:
     lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.1
-    cfg_co2_drop_prob: 0.1
-    cfg_sul_drop_prob: 0.3   # 3× SUL dropout → more CO2-only training batches
-    co2_cond_loss_scaling: 0.4  # extra conditioning loss for GHG CO2 channel
+    cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
+    cfg_sul_drop_prob: 0.3      # 3× SUL dropout → more CO2-only training batches
+    co2_cond_loss_scaling: 0.1  # reduced from 0.4 — CO2 response was too strong (0.6° warm bias in SSP370)
+    reset_optimizer: true       # reset Adam state so old CO2-loss momentum doesn't persist
     eval_script: run_eval_aero.sh
 
   optimizer:
