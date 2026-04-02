@@ -1095,6 +1095,8 @@ def main():
                         help="Skip spatial IG attribution maps (saves time/memory)")
     parser.add_argument("--skip-saliency",      action="store_true",
                         help="Skip saliency maps (saves time/memory)")
+    parser.add_argument("--skip-xai",           action="store_true",
+                        help="Skip all XAI figures (IG + saliency); implies --skip-ig and --skip-saliency")
     parser.add_argument("--saliency-batch-size", type=int, default=8,
                         help="Years per GPU batch for saliency (default: 8)")
     parser.add_argument("--guidance-co2", type=float, default=GUIDANCE_CO2,
@@ -1104,6 +1106,9 @@ def main():
                         help="Per-channel CFG scale for SUL (default: %(default)s). "
                              "> 1.0 amplifies aerosol cooling; enables 3-pass CFG.")
     args = parser.parse_args()
+    if args.skip_xai:
+        args.skip_ig       = True
+        args.skip_saliency = True
 
     os.makedirs(args.output_dir, exist_ok=True)
 
