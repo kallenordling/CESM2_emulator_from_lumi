@@ -78,7 +78,7 @@ def calc_mse_loss(model_output, target, lats):
     latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
 
     latitude_rad = torch.deg2rad(latitude)
-    latitude_weight = torch.cos(latitude_rad).clamp(min=0.1)
+    latitude_weight = torch.cos(latitude_rad).clamp(min=0.2)
 
     # Weight the loss
     # print(spatial_loss.shape,latitude_weight.shape)
@@ -92,7 +92,7 @@ def calc_mse_loss_precomputed_sq(sq_tensor, lats):
     """Lat-weighted mean of an already-squared tensor.
     Avoids allocating a zeros_like tensor for the null-anomaly baseline loss."""
     latitude = torch.as_tensor(lats.values, dtype=sq_tensor.dtype, device=sq_tensor.device)
-    latitude_weight = torch.cos(torch.deg2rad(latitude)).clamp(min=0.1)
+    latitude_weight = torch.cos(torch.deg2rad(latitude)).clamp(min=0.2)
     return torch.einsum('...yx,y->...yx', sq_tensor, latitude_weight).mean()
 
 
