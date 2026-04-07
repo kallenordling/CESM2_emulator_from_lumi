@@ -51,7 +51,7 @@ trainer:
     cfg_drop_prob: 0.1
     cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
     cfg_sul_drop_prob: 0.3      # 3× SUL dropout → more CO2-only training batches
-    co2_cond_loss_scaling: 0.2  # tuned: 0.4 over-pushed high-CO2 end (warm bias SSP370), 0.1 under-calibrated low-CO2 end (cold bias 1900)
+    co2_cond_loss_scaling: 0.0  # disabled: cond_loss on GHG batches already calibrates CO2 response implicitly
     reset_optimizer: true       # reset Adam state so old CO2-loss momentum doesn't persist
     eval_script: run_eval_aero.sh
 
