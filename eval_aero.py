@@ -822,6 +822,52 @@ def plot_timeseries(results: dict, out_path: str):
     print(f"  → saved {out_path}")
 
 
+def save_csv(results: dict, out_path: str):
+    """Save global-mean anomaly and bias to a CSV file.
+
+    Columns: experiment, year, model_anom_degC, cesm_anom_degC, bias_degC
+    bias = model_anom - cesm_anom on common years; NaN where CESM2 unavailable.
+    """
+    import csv
+    rows = []
+    for name, d in results.items():
+        gen_anom_mean = d["gen_anom_ens"].mean(axis=0)   # (T,)
+        gen_years     = d["gen_years"]
+
+        if d.get("cesm_anom") is not None:
+            cesm_anom_mean = d["cesm_anom"]
+            cesm_years     = d["cesm_years"]
+            common, idx_gen, idx_cs = np.intersect1d(
+                gen_years, cesm_years, return_indices=True
+            )
+            cesm_lookup = {int(yr): float(cesm_anom_mean[i])
+                           for yr, i in zip(common, idx_cs)}
+        else:
+            cesm_lookup = {}
+
+        for i, yr in enumerate(gen_years):
+            yr = int(yr)
+            model_anom = float(gen_anom_mean[i])
+            cesm_anom  = cesm_lookup.get(yr, float("nan"))
+            bias       = model_anom - cesm_anom if not np.isnan(cesm_anom) else float("nan")
+            rows.append({
+                "experiment":     name,
+                "year":           yr,
+                "model_anom_degC": round(model_anom, 4),
+                "cesm_anom_degC":  round(cesm_anom, 4) if not np.isnan(cesm_anom) else "",
+                "bias_degC":       round(bias, 4)       if not np.isnan(bias)      else "",
+            })
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["experiment", "year", "model_anom_degC",
+                           "cesm_anom_degC", "bias_degC"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"  → saved {out_path}")
+
+
 def _nearest_year(years: np.ndarray, target: int) -> int:
     """Return the year in `years` closest to `target`."""
     idx = np.argmin(np.abs(years - target))
@@ -1346,9 +1392,12 @@ def main():
 
     # ── combined time series plot ──────────────────────────────────────────
     if timeseries_results:
-        ts_out = os.path.join(args.output_dir, "global_mean_anomaly.png")
+        ts_out  = os.path.join(args.output_dir, "global_mean_anomaly.png")
+        csv_out = os.path.join(args.output_dir, "global_mean_anomaly.csv")
         print(f"\n[PLOT] Time series → {ts_out}")
         plot_timeseries(timeseries_results, ts_out)
+        print(f"[CSV]  Global anomaly + bias → {csv_out}")
+        save_csv(timeseries_results, csv_out)
 
     print("\n[DONE] All outputs saved to:", args.output_dir)
 
