@@ -389,9 +389,9 @@ class UNetTrainer:
                     f"({epoch_secs:.0f}s)  steps: {step+1}"
                 )
 
-            # ── Held-out validation at end of epoch ───────────────────────
-            # Run every epoch; eval script is only spawned when a new best is found.
-            self.eval_held_out(epoch)
+            # ── Held-out validation every val_every epochs ───────────────
+            if epoch % self.val_every == 0:
+                self.eval_held_out(epoch)
             torch.cuda.empty_cache()
 
     @torch.no_grad()
@@ -503,7 +503,8 @@ class UNetTrainer:
             "VAL/ANOM_SIGNAL": avg_sig,
         }
         self.accelerator.log(log_dict, step=self.global_step)
-        self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
+        if self.accelerator.is_main_process:
+            self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
 
         # ── Auto-save best checkpoint & trigger evaluation ────────────────
         # Guard against degenerate epoch-0 skill=1.0 (avg_sig≈0 during warm-up)
