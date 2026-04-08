@@ -10,7 +10,7 @@ data_config: config_data.yaml
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 2
     device_placement: True
     sync_batchnorm: False
 
