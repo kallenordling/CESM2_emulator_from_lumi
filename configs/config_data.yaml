@@ -21,7 +21,7 @@ n_components_cond: null
 # ── Loader settings ──────────────────────────────────────────
 batch_size: 12          # total windows per batch
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
-steps_per_realization: 500  # fewer realization switches = less Lustre I/O stalling GPUs
+steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
 # ── Per-scenario sampling weights ────────────────────────────
 # Upweight aaer and ghg (single-forcing experiments) to give the model

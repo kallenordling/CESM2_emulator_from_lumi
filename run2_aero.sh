@@ -61,7 +61,7 @@ mkdir -p "${PERSISTENT_CACHE}"
 export MIOPEN_USER_DB_PATH=/tmp/miopen_${SLURM_JOB_ID}
 export MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen_${SLURM_JOB_ID}
 export HIP_CACHE_PATH=/tmp/hip_${SLURM_JOB_ID}
-export MIOPEN_FIND_ENFORCE=2
+export MIOPEN_FIND_ENFORCE=1
 
 # Seed each node's local cache from the persistent store, then train locally.
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
