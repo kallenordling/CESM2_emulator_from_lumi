@@ -26,12 +26,13 @@ steps_per_realization: 500  # fewer realization switches = less Lustre I/O stall
 # ── Per-scenario sampling weights ────────────────────────────
 # Upweight aaer and ghg (single-forcing experiments) to give the model
 # more gradient signal to disentangle CO2 vs aerosol responses.
-# With batch_size=12 and weights [1,1,2,2] → hist:2, ssp370:2, aaer:4, ghg:4
+# With batch_size=12 and weights [1,2,2,2] → hist:2, ssp370:4, aaer:4, ghg:4
+# ssp370 upweighted to 2× to give more gradient signal at high cumulative CO2 where over-response is worst
 scenario_weights:
   - 1  # hist
-  - 1  # ssp370
-  - 2  # aaer  (2× — only 9 members, CO2-aerosol collinearity fix)
-  - 2  # ghg   (2× — only 9 members, CO2-aerosol collinearity fix)
+  - 2  # ssp370 (2× — high cumulative CO2 regime, worst over-response; only 86 years vs hist 165)
+  - 2  # aaer   (2× — only 9 members, CO2-aerosol collinearity fix)
+  - 2  # ghg    (2× — only 9 members, CO2-aerosol collinearity fix)
 
 # ── Per-experiment configs ────────────────────────────────────
 experiment_configs:
