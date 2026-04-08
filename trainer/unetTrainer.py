@@ -177,9 +177,11 @@ class UNetTrainer:
         # (co2_target_fraction) of the MSE loss in expectation.  EMAs of the raw
         # (unscaled) loss values are used; they are saved/restored with checkpoints.
         self._adaptive_loss_scaling = getattr(self, "adaptive_loss_scaling", False)
-        self._co2_target_fraction   = getattr(self, "co2_target_fraction",   0.10)
+        self._co2_target_fraction  = getattr(self, "co2_target_fraction",  0.10)
+        self._cond_target_fraction = getattr(self, "cond_target_fraction", 0.30)
         self._ema_mse  = None   # EMA of mse_loss magnitude
         self._ema_co2  = None   # EMA of unscaled co2_cond_loss magnitude
+        self._ema_cond = None   # EMA of unscaled cond_loss magnitude
         self._ema_decay = 0.99  # ~100 sync-step half-life — slow, stable adjustments
         self.scheduler.set_timesteps(self.sample_steps)
 
@@ -523,6 +525,7 @@ class UNetTrainer:
                         "co2_cond_loss_scaling": self.co2_cond_loss_scaling,
                         "_ema_mse":              self._ema_mse,
                         "_ema_co2":              self._ema_co2,
+                        "_ema_cond":             self._ema_cond,
                         "best_val_skill":        val_skill,
                         "best_epoch":            epoch,
                     },
@@ -581,13 +584,16 @@ class UNetTrainer:
             )
 
     def _update_loss_emas(self) -> None:
-        """Update exponential moving averages of unscaled mse and co2_cond loss."""
+        """Update exponential moving averages of unscaled mse, cond, and co2_cond loss."""
         d = self._ema_decay
-        mse_val = getattr(self, "_last_raw_mse", 0.0)
-        co2_val = getattr(self, "_last_raw_co2", 0.0)
+        mse_val  = getattr(self, "_last_raw_mse",  0.0)
+        co2_val  = getattr(self, "_last_raw_co2",  0.0)
+        cond_val = getattr(self, "_last_raw_cond", 0.0)
         self._ema_mse = mse_val if self._ema_mse is None else d * self._ema_mse + (1 - d) * mse_val
         if co2_val > 1e-8:
             self._ema_co2 = co2_val if self._ema_co2 is None else d * self._ema_co2 + (1 - d) * co2_val
+        if cond_val > 1e-8:
+            self._ema_cond = cond_val if self._ema_cond is None else d * self._ema_cond + (1 - d) * cond_val
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
@@ -613,13 +619,23 @@ class UNetTrainer:
         progress = min(ramp_epoch / self.cond_ramp_epochs, 1.0)  # clamp at 1.0 after ramp
         self.cond_loss_scaling = self.cond_max_scaling * progress
 
-        # ── Adaptive co2_cond_loss_scaling ────────────────────────────────────
+        # ── Adaptive scalings (both cond and co2_cond) ───────────────────────
         if not self._adaptive_loss_scaling:
             return
-        if self._ema_mse is None or self._ema_co2 is None or self._ema_co2 < 1e-8:
+        if self._ema_mse is None:
             return
-        target = self._co2_target_fraction * self._ema_mse
-        self.co2_cond_loss_scaling = float(max(0.001, min(0.5, target / self._ema_co2)))
+
+        # co2_cond_loss: free range [0.001, 0.5]
+        if self._ema_co2 is not None and self._ema_co2 > 1e-8:
+            target = self._co2_target_fraction * self._ema_mse
+            self.co2_cond_loss_scaling = float(max(0.001, min(0.5, target / self._ema_co2)))
+
+        # cond_loss: only adapt once ramped to max; bounded [0.1, cond_max_scaling]
+        # to keep scenario separation intact and prevent the instability seen at >0.4
+        if self.cond_loss_scaling >= self.cond_max_scaling:
+            if self._ema_cond is not None and self._ema_cond > 1e-8:
+                target = self._cond_target_fraction * self._ema_mse
+                self.cond_loss_scaling = float(max(0.1, min(self.cond_max_scaling, target / self._ema_cond)))
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         if isinstance(self.scheduler, ContinuousDDPM):
@@ -844,8 +860,9 @@ class UNetTrainer:
                 scen_disc        = torch.zeros(1, device=self.device)
 
             # Cache raw unscaled loss values for adaptive scaling EMA (before multiply)
-            self._last_raw_mse = mse_loss.detach().item()
-            self._last_raw_co2 = co2_cond_loss.detach().item()
+            self._last_raw_mse  = mse_loss.detach().item()
+            self._last_raw_co2  = co2_cond_loss.detach().item()
+            self._last_raw_cond = cond_loss.detach().item()
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = mse_loss + cond_loss * self.cond_loss_scaling + co2_cond_loss * self.co2_cond_loss_scaling
@@ -928,6 +945,7 @@ class UNetTrainer:
                 "co2_cond_loss_scaling": self.co2_cond_loss_scaling,
                 "_ema_mse":              self._ema_mse,
                 "_ema_co2":              self._ema_co2,
+                "_ema_cond":             self._ema_cond,
             }
 
             # If the directory doesn't exist already create it
@@ -1077,7 +1095,8 @@ class UNetTrainer:
         self.cond_loss_scaling     = checkpoint.get("cond_loss_scaling", 0.0)
         self.co2_cond_loss_scaling = checkpoint.get("co2_cond_loss_scaling", self.co2_cond_loss_scaling)
         self._ema_mse = checkpoint.get("_ema_mse", None)
-        self._ema_co2 = checkpoint.get("_ema_co2", None)
+        self._ema_co2  = checkpoint.get("_ema_co2",  None)
+        self._ema_cond = checkpoint.get("_ema_cond", None)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"co2_cond_loss_scaling={self.co2_cond_loss_scaling:.4f}")
 
