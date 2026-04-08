@@ -51,7 +51,9 @@ trainer:
     cfg_drop_prob: 0.1
     cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
     cfg_sul_drop_prob: 0.3      # 3× SUL dropout → more CO2-only training batches
-    co2_cond_loss_scaling: 0.03  # small amplitude calibration signal; 0.4 was too strong, 0.0 left slope unconstrained
+    co2_cond_loss_scaling: 0.03  # initial value; overridden by adaptive scaling once EMAs warm up
+    adaptive_loss_scaling: true  # auto-tune co2_cond_loss_scaling to keep CO2 loss at co2_target_fraction of MSE
+    co2_target_fraction: 0.10    # CO2 conditioning loss target = 10% of MSE loss
     reset_optimizer: true       # reset Adam state so old CO2-loss momentum doesn't persist
     eval_script: run_eval_aero.sh
 
