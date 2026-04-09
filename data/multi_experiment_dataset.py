@@ -39,7 +39,9 @@ Typical usage
 
 from __future__ import annotations
 
+import queue
 import random
+import threading
 from typing import Any, Optional
 
 import numpy as np
@@ -260,6 +262,7 @@ class MultiExperimentDataLoader:
         period_boundaries: tuple = (1950, 2020),
         steps_per_realization: Optional[int] = None,
         scenario_weights: Optional[list] = None,
+        prefetch_batches: int = 2,
         **dataloader_kwargs: Any,
     ):
         self.dataset = dataset
@@ -270,6 +273,7 @@ class MultiExperimentDataLoader:
         self.steps_per_realization = steps_per_realization
         self.dataloader_kwargs = dataloader_kwargs
         self.n_exp = dataset.n_experiments
+        self.prefetch_batches = prefetch_batches
 
         if mix_scenarios and scenario_weights is not None:
             # Convert weights to per-experiment integer sample counts that sum
@@ -334,13 +338,23 @@ class MultiExperimentDataLoader:
         x:            torch.Tensor  [B, V, T, H, W]
         cond:         torch.Tensor  [B, C, T, H, W]
         scenario_ids: torch.Tensor  [B]  (long)
+
+        When ``prefetch_batches > 0`` a background thread assembles the next
+        batch on CPU while the GPU processes the current one, then the main
+        thread transfers to GPU with ``non_blocking=True``.
         """
+        if self.prefetch_batches > 0:
+            yield from self._prefetch_generate()
+        else:
+            yield from self._generate_epoch()
+
+    def _generate_epoch(self):
+        """Core epoch loop — loads realizations and yields batches to device."""
         plans = self._all_realization_plans()
-        # Max realizations across experiments; shorter lists are cycled.
         max_r = max(len(p) for p in plans)
+        device = self.accelerator.device
 
         for r_step in range(max_r):
-            # Load one realization per experiment for this step
             for exp_idx, plan in enumerate(plans):
                 realization = plan[r_step % len(plan)]
                 self.dataset.load_realization(exp_idx, realization)
@@ -349,6 +363,61 @@ class MultiExperimentDataLoader:
                 yield from self._generate_mixed()
             else:
                 yield from self._generate_sequential()
+
+    def _prefetch_generate(self):
+        """Wraps _generate_epoch with a background-thread prefetch queue.
+
+        The producer thread assembles batches on CPU (tensor indexing only,
+        no CUDA calls).  The main thread pops CPU batches from the queue and
+        transfers to GPU with non_blocking=True, overlapping the next batch
+        assembly with the current GPU forward/backward pass.
+        """
+        device = self.accelerator.device
+        q: queue.Queue = queue.Queue(maxsize=self.prefetch_batches)
+        _sentinel = object()
+
+        def _producer():
+            try:
+                plans = self._all_realization_plans()
+                max_r = max(len(p) for p in plans)
+                for r_step in range(max_r):
+                    for exp_idx, plan in enumerate(plans):
+                        self.dataset.load_realization(exp_idx, plan[r_step % len(plan)])
+                    # Assemble batches on CPU, no GPU transfer yet
+                    gen = (
+                        self._generate_mixed_cpu()
+                        if self.mix_scenarios
+                        else self._generate_sequential()
+                    )
+                    for batch in gen:
+                        q.put(batch)
+            except Exception as e:
+                q.put(e)
+            finally:
+                q.put(_sentinel)
+
+        t = threading.Thread(target=_producer, daemon=True)
+        t.start()
+
+        while True:
+            item = q.get()
+            if item is _sentinel:
+                break
+            if isinstance(item, Exception):
+                raise item
+            x, cond, ids = item
+            yield (
+                x.to(device, non_blocking=True),
+                cond.to(device, non_blocking=True),
+                ids.to(device, non_blocking=True),
+            )
+
+    def _generate_mixed_cpu(self):
+        """Like _generate_mixed but returns CPU tensors (for prefetch thread)."""
+        if self.stratified:
+            yield from self._generate_mixed_stratified(device=None, to_device=False)
+        else:
+            yield from self._generate_mixed_uniform(device=None, to_device=False)
 
     # ------------------------------------------------------------------
 
@@ -381,6 +450,7 @@ class MultiExperimentDataLoader:
         window_indices_per_exp: list[np.ndarray],
         device,
         shuffle: bool = True,
+        to_device: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Assemble a batch via vectorized tensor indexing (no Python loop per sample).
 
@@ -417,13 +487,16 @@ class MultiExperimentDataLoader:
             perm = torch.randperm(x_cat.shape[0])
             x_cat, cond_cat, ids_cat = x_cat[perm], cond_cat[perm], ids_cat[perm]
 
+        if not to_device:
+            return x_cat, cond_cat, ids_cat
+
         return (
             x_cat.to(device, non_blocking=True),
             cond_cat.to(device, non_blocking=True),
             ids_cat.to(device, non_blocking=True),
         )
 
-    def _generate_mixed_uniform(self, device):
+    def _generate_mixed_uniform(self, device, to_device: bool = True):
         """Uniform-random mixed batches, respecting per-experiment sample counts."""
         offsets = self.dataset._index._offsets
         index_pools: list[np.ndarray] = []
@@ -447,9 +520,9 @@ class MultiExperimentDataLoader:
                 - offsets[i]
                 for i, pool in enumerate(index_pools)
             ]
-            yield self._vectorized_fetch(window_indices_per_exp, device)
+            yield self._vectorized_fetch(window_indices_per_exp, device, to_device=to_device)
 
-    def _generate_mixed_stratified(self, device):
+    def _generate_mixed_stratified(self, device, to_device: bool = True):
         """Period-stratified mixed batches.
 
         For each experiment, build a StratifiedPeriodSampler and get its
@@ -466,7 +539,7 @@ class MultiExperimentDataLoader:
             per_exp = (per_exp // 3) * 3
             if per_exp == 0:
                 print("[MULTI] WARNING: per_exp < 3, falling back to uniform sampling")
-                yield from self._generate_mixed_uniform(device)
+                yield from self._generate_mixed_uniform(device, to_device=to_device)
                 return
 
         per_period_per_exp = per_exp // 3  # samples per (period, experiment) slot
@@ -486,7 +559,7 @@ class MultiExperimentDataLoader:
         # Check all experiments have all three periods
         if any(s._hist_idx is None for s in samplers):
             print("[MULTI] WARNING: some experiments missing a period — falling back to uniform")
-            yield from self._generate_mixed_uniform(device)
+            yield from self._generate_mixed_uniform(device, to_device=to_device)
             return
 
         # Offset arrays: sampler indices are local (window_idx), need flat
@@ -509,7 +582,7 @@ class MultiExperimentDataLoader:
 
         if n_batches == 0:
             print("[MULTI] WARNING: not enough stratified windows — falling back to uniform")
-            yield from self._generate_mixed_uniform(device)
+            yield from self._generate_mixed_uniform(device, to_device=to_device)
             return
 
         # Pre-draw shuffled indices for all experiments and periods
@@ -524,7 +597,7 @@ class MultiExperimentDataLoader:
                 np.concatenate([h_pools[exp_idx][sl], p_pools[exp_idx][sl], f_pools[exp_idx][sl]])
                 for exp_idx in range(self.n_exp)
             ]
-            yield self._vectorized_fetch(window_indices_per_exp, device)
+            yield self._vectorized_fetch(window_indices_per_exp, device, to_device=to_device)
 
     # ------------------------------------------------------------------
 
@@ -566,6 +639,7 @@ def build_multi_experiment_loader(
     period_boundaries: tuple = (1950, 2020),
     steps_per_realization: Optional[int] = None,
     scenario_weights: Optional[list] = None,
+    prefetch_batches: int = 2,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
     """Convenience factory: build datasets from a list of config dicts.
@@ -669,4 +743,5 @@ def build_multi_experiment_loader(
         period_boundaries=period_boundaries,
         steps_per_realization=steps_per_realization,
         scenario_weights=scenario_weights,
+        prefetch_batches=prefetch_batches,
     )

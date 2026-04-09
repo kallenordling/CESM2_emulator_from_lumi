@@ -312,43 +312,50 @@ def pca_denoise_dataset(
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
     """
-    Load all EMISSIONS_PATHS and return the combined (global) min/max for
-    CO2 and SUL so that normalization covers the full range of all experiments.
+    Load all EMISSIONS_PATHS and return the combined 5th–95th percentile range
+    for CO2 and SUL so that normalization covers the typical spatial range of
+    all experiments without being dominated by extreme emission hotspots.
+    Values outside [lo, hi] are clipped to [-1, 1] in normalize().
     """
-    combined = {}  # var -> (min, max)
+    all_vals = {}  # var -> list of flat arrays
     for path in EMISSIONS_PATHS:
         ds_emis = xr.open_dataset(path)
         for var in ["CO2", "SO2", "SUL", "sul"]:
             if var not in ds_emis.data_vars:
                 continue
-            lo = float(ds_emis[var].min())
-            hi = float(ds_emis[var].max())
-            if var in combined:
-                combined[var] = (min(combined[var][0], lo), max(combined[var][1], hi))
-            else:
-                combined[var] = (lo, hi)
+            all_vals.setdefault(var, []).append(ds_emis[var].values.flatten())
         ds_emis.close()
+    combined = {}
+    for var, arrays in all_vals.items():
+        flat = np.concatenate(arrays)
+        combined[var] = (float(np.percentile(flat, 5)), float(np.percentile(flat, 95)))
     return combined
 
 
 def normalize(ds: xr.DataArray) -> xr.DataArray:
-    """Normalizes a data array"""
+    """Normalizes a data array.
+
+    CO2 and SUL use min-max scaling derived from the 5th–95th percentile of
+    the reference scenarios (ssp370 + hist).  The 5th percentile maps to -1,
+    the 95th to +1; values outside that range are clipped to [-1, 1].
+    This preserves spatial structure (higher emissions → higher value) while
+    preventing extreme hotspot gridpoints from collapsing most of the range
+    toward -1.
+    """
 
     if ds.name in ["CO2", "SUL"]:
         minmax = _get_emissions_minmax()
         min_val, max_val = minmax[ds.name]
 
-        # Center and scale similar to temperature
-        mean_val = (min_val + max_val) / 2
         range_val = max_val - min_val
-
         if range_val == 0:
             norm = xr.zeros_like(ds)
         else:
-            # Scale to roughly [-1, 1] range
+            mean_val = (min_val + max_val) / 2
             norm = (ds - mean_val) / (range_val / 2)
 
-        return norm.fillna(0)
+        # Clip to [-1, 1]: values beyond the 5–95th pct range are saturated
+        return norm.clip(-1, 1).fillna(-1)
 
     # Other variables use predefined normalization functions
     norm = NORM_FN[ds.name](ds)
