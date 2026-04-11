@@ -213,6 +213,14 @@ def fit_pca_denoise(
     T, H, W = data.shape
     flat = data.reshape(T, H * W).astype(np.float64)  # PCA needs float64
 
+    # Guard: constant field (e.g. SUL=0 in GHG-only scenario) has zero
+    # variance — sklearn PCA divides by singular values → NaN in components.
+    # Return the channel unchanged and fit a 1-component PCA just to produce
+    # a valid object that apply_pca_denoise can use without crashing.
+    if flat.std() < 1e-8:
+        pca = PCA(n_components=1, whiten=False).fit(flat)
+        return data.astype(np.float32), pca
+
     n_components = min(n_components, T, H * W)
     pca = PCA(n_components=n_components, whiten=False)
     scores = pca.fit_transform(flat)           # (T, n_components)
