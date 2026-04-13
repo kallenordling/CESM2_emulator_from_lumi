@@ -58,6 +58,8 @@ RUN_XAI="${RUN_XAI:-0}"
 # Set FORCE_CFG=1 to use 3-pass CFG decomposition even at guidance scales 1.0/1.0.
 # Useful to isolate whether the additive decomposition itself introduces bias.
 FORCE_CFG="${FORCE_CFG:-0}"
+# Number of diffusion ensemble members to generate per experiment.
+MEMBERS="${members:-${MEMBERS:-1}}"
 
 _XAI_FLAG=""
 [ "${RUN_XAI}" = "1" ] && _XAI_FLAG="--run-xai"
@@ -74,6 +76,7 @@ if [ -n "${CHECKPOINT}" ]; then
             --batch-size 16 \
             --guidance-co2 ${GUIDANCE_CO2} \
             --guidance-sul ${GUIDANCE_SUL} \
+            --members ${MEMBERS} \
             ${_XAI_FLAG} ${_CFG_FLAG}
     "
 else
@@ -86,6 +89,7 @@ else
             --batch-size 16 \
             --guidance-co2 ${GUIDANCE_CO2} \
             --guidance-sul ${GUIDANCE_SUL} \
+            --members ${MEMBERS} \
             ${_XAI_FLAG} ${_CFG_FLAG}
     "
 fi
