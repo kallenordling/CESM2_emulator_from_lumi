@@ -349,6 +349,212 @@ def area_weighted_gmean(data: np.ndarray, lat: np.ndarray) -> np.ndarray:
     return (data * w).mean(axis=(-2, -1))                # (...,)
 
 
+def load_co2_global_annual(cond_file: str, time_dim: str, lat: np.ndarray) -> tuple:
+    """Load raw (un-normalised) CO2 field and return area-weighted global mean per year.
+
+    Returns
+    -------
+    years      : np.ndarray (T,)  integer years
+    co2_annual : np.ndarray (T,)  area-weighted global mean CO2 in native file units
+    """
+    ds = xr.open_dataset(cond_file)
+    if "CO2" not in ds:
+        ds.close()
+        return None, None
+    co2 = ds["CO2"].values.astype(np.float64)   # (T, H, W)
+    years = extract_years(ds[time_dim].values)
+    ds.close()
+    co2_annual = area_weighted_gmean(co2, lat)   # (T,)
+    return years, co2_annual
+
+
+def plot_tcre(results: dict, out_path: str):
+    """Plot ΔT vs cumulative CO2 (TCRE diagram) for hist and ssp370.
+
+    X-axis : cumulative CO2 (area-weighted global mean of raw CO2 field,
+             cumsummed from the start of the hist record).
+    Y-axis : global-mean temperature anomaly re 1850–1900.
+
+    Solid lines  = model ensemble mean  (shaded spread when N > 1).
+    Dashed lines = CESM2 ensemble mean  (shaded spread when N > 1).
+    Linear regression slope annotated for both model and CESM2.
+    """
+    TCRE_SCENARIOS = {"hist", "ssp370"}
+
+    # ── build concatenated CO2 + ΔT for hist→ssp370 ──────────────────────
+    def _concat(results, key_years, key_ens):
+        """Concatenate hist then ssp370 arrays along the time axis."""
+        parts_y, parts_e = [], []
+        for sc in ("hist", "ssp370"):
+            if sc not in results or results[sc].get(key_ens) is None:
+                continue
+            parts_y.append(results[sc][key_years])
+            parts_e.append(results[sc][key_ens])
+        if not parts_y:
+            return None, None
+        return np.concatenate(parts_y), np.concatenate(parts_e, axis=-1)
+
+    # Check we have what we need
+    have_co2 = any(
+        results.get(sc, {}).get("co2_annual") is not None
+        for sc in TCRE_SCENARIOS
+    )
+    if not have_co2:
+        print("[TCRE] No CO2 data in results — skipping TCRE plot.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=False)
+    ax_main, ax_bias = axes
+
+    # ── assemble combined hist+ssp370 time series ─────────────────────────
+    # CO2: concatenate hist and ssp370 annual series
+    co2_years_parts, co2_annual_parts = [], []
+    for sc in ("hist", "ssp370"):
+        d = results.get(sc, {})
+        if d.get("co2_annual") is not None:
+            co2_years_parts.append(d["co2_years"])
+            co2_annual_parts.append(d["co2_annual"])
+
+    if not co2_years_parts:
+        print("[TCRE] No CO2 annual data — skipping.")
+        plt.close(fig)
+        return
+
+    co2_all_years  = np.concatenate(co2_years_parts)
+    co2_all_annual = np.concatenate(co2_annual_parts)
+    # Cumulate from first available year
+    co2_cumulative = np.cumsum(co2_all_annual)   # (T_all,)
+
+    # build a year→cumco2 lookup
+    co2_lookup = dict(zip(co2_all_years.astype(int), co2_cumulative))
+
+    def get_cumco2(years):
+        return np.array([co2_lookup.get(int(y), np.nan) for y in years])
+
+    # ── per-scenario plot ─────────────────────────────────────────────────
+    cesm_slope_all, model_slope_all = [], []
+
+    for sc in ("hist", "ssp370"):
+        d = results.get(sc)
+        if d is None:
+            continue
+        c = d["color"]
+        gen_ens  = d["gen_anom_ens"]          # (N_gen, T)
+        gen_years = d["gen_years"]
+        gen_mean = gen_ens.mean(axis=0)        # (T,)
+        N_gen    = gen_ens.shape[0]
+
+        cumco2 = get_cumco2(gen_years)
+        valid  = ~np.isnan(cumco2)
+
+        if N_gen == 1:
+            ax_main.plot(cumco2[valid], gen_mean[valid], color=c, lw=1.8,
+                         label=f"{sc} model")
+        else:
+            lo = gen_ens[:, valid].min(axis=0)
+            hi = gen_ens[:, valid].max(axis=0)
+            ax_main.fill_between(cumco2[valid], lo, hi, color=c, alpha=0.18)
+            ax_main.plot(cumco2[valid], gen_mean[valid], color=c, lw=1.8,
+                         label=f"{sc} model (N={N_gen})")
+
+        # regression
+        x_v, y_v = cumco2[valid], gen_mean[valid]
+        if len(x_v) > 2:
+            slope, intercept = np.polyfit(x_v, y_v, 1)
+            model_slope_all.append((sc, slope))
+
+        if d.get("cesm_anom") is not None:
+            cesm_ens   = d["cesm_anom_ens"]      # (N_cesm, T)
+            cesm_mean  = d["cesm_anom"]           # (T,)
+            cesm_years = d["cesm_years"]
+            N_cesm     = cesm_ens.shape[0]
+
+            cumco2_c = get_cumco2(cesm_years)
+            valid_c  = ~np.isnan(cumco2_c)
+
+            if N_cesm == 1:
+                ax_main.plot(cumco2_c[valid_c], cesm_mean[valid_c],
+                             color=c, lw=1.8, ls="--", alpha=0.8,
+                             label=f"{sc} CESM2")
+            else:
+                lo_c = cesm_ens[:, valid_c].min(axis=0)
+                hi_c = cesm_ens[:, valid_c].max(axis=0)
+                ax_main.fill_between(cumco2_c[valid_c], lo_c, hi_c,
+                                     color=c, alpha=0.10, hatch="///")
+                ax_main.plot(cumco2_c[valid_c], cesm_mean[valid_c],
+                             color=c, lw=1.8, ls="--", alpha=0.8,
+                             label=f"{sc} CESM2 (N={N_cesm})")
+
+            xc, yc = cumco2_c[valid_c], cesm_mean[valid_c]
+            if len(xc) > 2:
+                slope_c, _ = np.polyfit(xc, yc, 1)
+                cesm_slope_all.append((sc, slope_c))
+
+            # bias panel: model − CESM2 on common years
+            common_y, ig, ic = np.intersect1d(gen_years, cesm_years,
+                                               return_indices=True)
+            cumco2_common = get_cumco2(common_y)
+            valid_b = ~np.isnan(cumco2_common)
+            diff = gen_mean[ig] - cesm_mean[ic]
+            ax_bias.plot(cumco2_common[valid_b], diff[valid_b],
+                         color=c, lw=1.5, label=f"{sc}")
+            if N_gen > 1:
+                dlo = gen_ens[:, ig][:, valid_b].min(axis=0) - cesm_mean[ic][valid_b]
+                dhi = gen_ens[:, ig][:, valid_b].max(axis=0) - cesm_mean[ic][valid_b]
+                ax_bias.fill_between(cumco2_common[valid_b], dlo, dhi,
+                                     color=c, alpha=0.15)
+
+    # ── regression summary in legend ──────────────────────────────────────
+    # Add overall regression line (hist+ssp370 combined) for model + CESM2
+    def _combined_regression(key_ens, key_years):
+        xs, ys = [], []
+        for sc in ("hist", "ssp370"):
+            d = results.get(sc)
+            if d is None or d.get(key_ens) is None:
+                continue
+            yr = d[key_years]
+            en = d[key_ens].mean(axis=0)
+            cc = get_cumco2(yr)
+            v  = ~np.isnan(cc)
+            xs.append(cc[v]);  ys.append(en[v])
+        if not xs:
+            return None, None
+        xs = np.concatenate(xs);  ys = np.concatenate(ys)
+        return np.polyfit(xs, ys, 1)
+
+    m_slope, m_int = _combined_regression("gen_anom_ens", "gen_years")
+    c_slope, c_int = _combined_regression("cesm_anom_ens", "cesm_years")
+
+    x_range = np.array([co2_cumulative.min(), co2_cumulative.max()])
+    if m_slope is not None:
+        ax_main.plot(x_range, m_slope * x_range + m_int,
+                     color="k", lw=1.2, ls="-",
+                     label=f"Model fit  slope={m_slope:.4f} °C/unit")
+    if c_slope is not None:
+        ax_main.plot(x_range, c_slope * x_range + c_int,
+                     color="k", lw=1.2, ls="--",
+                     label=f"CESM2 fit   slope={c_slope:.4f} °C/unit")
+
+    ax_main.axhline(0, color="k", lw=0.6, ls=":")
+    ax_main.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
+    ax_main.set_ylabel("Global-mean TREFHT anomaly re 1850–1900 (°C)")
+    ax_main.set_title("TCRE — ΔT vs cumulative CO₂  (hist + ssp370)")
+    ax_main.legend(fontsize=7, ncol=2)
+    ax_main.grid(True, alpha=0.25)
+
+    ax_bias.axhline(0, color="k", lw=0.9)
+    ax_bias.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
+    ax_bias.set_ylabel("Bias: model − CESM2 (°C)")
+    ax_bias.set_title("TCRE bias")
+    ax_bias.legend(fontsize=8)
+    ax_bias.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"  → saved {out_path}")
+
+
 def compute_ig_per_output_location(
     model: UNetModel3D,
     scheduler: ContinuousDDPM,
@@ -1397,6 +1603,13 @@ def main():
             sal_prefix = os.path.join(args.output_dir, f"saliency_loc_{name}")
             plot_saliency_per_location(name, sal_maps, sal_prefix)
 
+        # -- raw CO2 for TCRE plot (hist and ssp370 only) --------------------
+        co2_years_raw = co2_annual_raw = None
+        if name in ("hist", "ssp370") and LAT is not None:
+            co2_years_raw, co2_annual_raw = load_co2_global_annual(
+                exp["cond_file"], exp["time_dim"], LAT
+            )
+
         timeseries_results[name] = dict(
             gen_anom_ens  = gen_anom_ens,
             gen_years     = cond_years,
@@ -1404,6 +1617,8 @@ def main():
             cesm_anom     = cesm_anom,
             cesm_years    = cesm_years_out,
             color         = exp["color"],
+            co2_years     = co2_years_raw,
+            co2_annual    = co2_annual_raw,
         )
 
     # ── combined time series plot ──────────────────────────────────────────
@@ -1414,6 +1629,10 @@ def main():
         plot_timeseries(timeseries_results, ts_out)
         print(f"[CSV]  Global anomaly + bias → {csv_out}")
         save_csv(timeseries_results, csv_out)
+
+        tcre_out = os.path.join(args.output_dir, "tcre.png")
+        print(f"[PLOT] TCRE → {tcre_out}")
+        plot_tcre(timeseries_results, tcre_out)
 
     print("\n[DONE] All outputs saved to:", args.output_dir)
 
