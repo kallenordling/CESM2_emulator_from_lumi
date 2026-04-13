@@ -96,6 +96,15 @@ EXPERIMENTS = [
 
 BASELINE_START = 1850
 BASELINE_END   = 1900
+
+# Two training members used as an internal-variability reference.
+# Their ΔT difference is shown as a grey band on bias panels so the
+# reader can judge whether model bias is within natural variability.
+# Must NOT overlap with the held-out validation member (LE2-1231.001).
+REF_REALIZATIONS = {
+    "hist":   ["LE2-1011.001", "LE2-1021.002"],
+    "ssp370": ["LE2-1011.001", "LE2-1021.002"],
+}
 SAMPLE_STEPS   = 100          # fewer steps than training → faster inference
 BATCH_SIZE     = 16           # years per GPU batch
 N_ENSEMBLE     = 1            # diffusion samples per experiment
@@ -541,6 +550,22 @@ def plot_tcre(results: dict, out_path: str):
     ax_main.set_title("TCRE — ΔT vs cumulative CO₂  (hist + ssp370)")
     ax_main.legend(fontsize=7, ncol=2)
     ax_main.grid(True, alpha=0.25)
+
+    # grey ±|member diff| band on TCRE bias panel (internal variability reference)
+    ref_band_drawn_tcre = False
+    for sc in ("hist", "ssp370"):
+        d = results.get(sc)
+        if d is None or d.get("ref_diff") is None or d.get("ref_years") is None:
+            continue
+        ry  = d["ref_years"]
+        rd  = np.abs(d["ref_diff"])
+        cc  = get_cumco2(ry)
+        v   = ~np.isnan(cc)
+        if v.any():
+            label = "±|member diff| (nat. var.)" if not ref_band_drawn_tcre else None
+            ax_bias.fill_between(cc[v], -rd[v], rd[v], color="grey", alpha=0.20,
+                                 zorder=0, label=label)
+            ref_band_drawn_tcre = True
 
     ax_bias.axhline(0, color="k", lw=0.9)
     ax_bias.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
@@ -997,6 +1022,17 @@ def plot_timeseries(results: dict, out_path: str):
                 diff_lo = gen_anom_ens[:, idx_gen].min(axis=0) - cesm_anom_mean[idx_cs]
                 diff_hi = gen_anom_ens[:, idx_gen].max(axis=0) - cesm_anom_mean[idx_cs]
                 ax_bot.fill_between(common, diff_lo, diff_hi, alpha=0.15, color=c)
+
+    # grey ±|member diff| band on bias panel (internal variability reference)
+    ref_band_drawn = False
+    for name, d in results.items():
+        if d.get("ref_diff") is not None and d.get("ref_years") is not None:
+            rd = np.abs(d["ref_diff"])
+            ry = d["ref_years"]
+            label = "±|member diff| (nat. var.)" if not ref_band_drawn else None
+            ax_bot.fill_between(ry, -rd, rd, color="grey", alpha=0.20,
+                                zorder=0, label=label)
+            ref_band_drawn = True
 
     n_gen_label = gen_anom_ens.shape[0] if results else 1
     ax_top.axhline(0, color="k", lw=0.6, ls=":")
@@ -1610,6 +1646,26 @@ def main():
                 exp["cond_file"], exp["time_dim"], LAT
             )
 
+        # -- internal-variability reference (hist / ssp370 only) ------------
+        # Load two training members and compute their ΔT difference so that
+        # the bias panels can show a ±|member-diff| grey band for context.
+        ref_diff = ref_years_out = None
+        if name in REF_REALIZATIONS and LAT is not None:
+            try:
+                ref_y, ref_ens = load_cesm2_ensemble(
+                    exp["data_dir"], REF_REALIZATIONS[name], exp["time_dim"]
+                )
+                ref_anom_ens = np.stack(
+                    [area_weighted_gmean(ref_ens[m], LAT) - bl_scalar
+                     for m in range(ref_ens.shape[0])],
+                    axis=0,
+                )  # (2, T)
+                ref_diff     = ref_anom_ens[0] - ref_anom_ens[1]   # (T,)
+                ref_years_out = ref_y
+                print(f"  [REF] internal-variability diff  rms={np.sqrt((ref_diff**2).mean()):.3f}°C")
+            except Exception as exc:
+                print(f"  [REF] could not load reference members: {exc}")
+
         timeseries_results[name] = dict(
             gen_anom_ens  = gen_anom_ens,
             gen_years     = cond_years,
@@ -1619,6 +1675,8 @@ def main():
             color         = exp["color"],
             co2_years     = co2_years_raw,
             co2_annual    = co2_annual_raw,
+            ref_diff      = ref_diff,
+            ref_years     = ref_years_out,
         )
 
     # ── combined time series plot ──────────────────────────────────────────
