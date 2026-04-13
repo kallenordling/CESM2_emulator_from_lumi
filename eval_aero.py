@@ -489,7 +489,10 @@ def plot_tcre(results: dict, out_path: str):
                 lo_c = cesm_ens[:, valid_c].min(axis=0)
                 hi_c = cesm_ens[:, valid_c].max(axis=0)
                 ax_main.fill_between(cumco2_c[valid_c], lo_c, hi_c,
-                                     color=c, alpha=0.10, hatch="///")
+                                     facecolor=c, alpha=0.10, lw=0)
+                ax_main.fill_between(cumco2_c[valid_c], lo_c, hi_c,
+                                     facecolor="none", hatch="///",
+                                     edgecolor=c, alpha=0.4, lw=0)
                 ax_main.plot(cumco2_c[valid_c], cesm_mean[valid_c],
                              color=c, lw=1.8, ls="--", alpha=0.8,
                              label=f"{sc} CESM2 (N={N_cesm})")
@@ -1006,7 +1009,10 @@ def plot_timeseries(results: dict, out_path: str):
                 cesm_lo = cesm_anom_ens.min(axis=0)
                 cesm_hi = cesm_anom_ens.max(axis=0)
                 ax_top.fill_between(cesm_years, cesm_lo, cesm_hi,
-                                    color=c, alpha=0.10, hatch="///")
+                                    facecolor=c, alpha=0.10, lw=0)
+                ax_top.fill_between(cesm_years, cesm_lo, cesm_hi,
+                                    facecolor="none", hatch="///",
+                                    edgecolor=c, alpha=0.4, lw=0)
                 ax_top.plot(cesm_years, cesm_anom_mean, color=c, lw=2.0,
                             ls="--", alpha=0.8,
                             label=f"{name} (CESM2 mean ± spread, N={N_cesm})")
