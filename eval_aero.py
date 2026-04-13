@@ -747,64 +747,60 @@ def plot_timeseries(results: dict, out_path: str):
         c = d["color"]
         gen_anom_ens  = d["gen_anom_ens"]            # (N_ENS, T)
         gen_anom_mean = gen_anom_ens.mean(axis=0)    # (T,)
+        gen_years     = d["gen_years"]
+        N_gen = gen_anom_ens.shape[0]
 
-        # individual ensemble members — thin, semi-transparent
-        for m in range(gen_anom_ens.shape[0]):
-            da_m = xr.DataArray(
-                gen_anom_ens[m], dims=["year"],
-                coords={"year": d["gen_years"]},
-            )
-            da_m.plot.line(ax=ax_top, color=c, lw=0.7, alpha=0.35)
-
-        # ensemble mean — thick solid line with legend entry
-        da_mean = xr.DataArray(
-            gen_anom_mean, dims=["year"],
-            coords={"year": d["gen_years"]},
-            attrs={"long_name": "TREFHT anomaly", "units": "°C"},
-        )
-        da_mean.plot.line(ax=ax_top, color=c, lw=2.0, label=f"{name} (model mean)")
+        if N_gen == 1:
+            # Single member — just draw the line, no spread
+            ax_top.plot(gen_years, gen_anom_mean, color=c, lw=2.0,
+                        label=f"{name} (model)")
+        else:
+            # Multiple members — shaded min/max spread + mean
+            gen_lo = gen_anom_ens.min(axis=0)
+            gen_hi = gen_anom_ens.max(axis=0)
+            ax_top.fill_between(gen_years, gen_lo, gen_hi, color=c, alpha=0.18)
+            ax_top.plot(gen_years, gen_anom_mean, color=c, lw=2.0,
+                        label=f"{name} (model mean ± spread, N={N_gen})")
 
         if d.get("cesm_anom") is not None:
-            cesm_anom_ens = d["cesm_anom_ens"]           # (N_CESM, T)
-            cesm_anom_mean = d["cesm_anom"]               # (T,)
+            cesm_anom_ens  = d["cesm_anom_ens"]    # (N_CESM, T)
+            cesm_anom_mean = d["cesm_anom"]          # (T,)
+            cesm_years     = d["cesm_years"]
+            N_cesm = cesm_anom_ens.shape[0]
 
-            # individual CESM2 members — thin dashed, semi-transparent
-            for m in range(cesm_anom_ens.shape[0]):
-                da_cm = xr.DataArray(
-                    cesm_anom_ens[m], dims=["year"],
-                    coords={"year": d["cesm_years"]},
-                )
-                da_cm.plot.line(ax=ax_top, color=c, lw=0.7, ls="--", alpha=0.35)
-
-            # CESM2 ensemble mean — thick dashed with legend entry
-            da_cesm = xr.DataArray(
-                cesm_anom_mean, dims=["year"],
-                coords={"year": d["cesm_years"]},
-                attrs={"long_name": "TREFHT anomaly", "units": "°C"},
-            )
-            da_cesm.plot.line(ax=ax_top, color=c, lw=2.0, ls="--", alpha=0.8,
-                              label=f"{name} (CESM2 ens. mean)")
+            if N_cesm == 1:
+                ax_top.plot(cesm_years, cesm_anom_mean, color=c, lw=2.0,
+                            ls="--", alpha=0.8, label=f"{name} (CESM2)")
+            else:
+                cesm_lo = cesm_anom_ens.min(axis=0)
+                cesm_hi = cesm_anom_ens.max(axis=0)
+                ax_top.fill_between(cesm_years, cesm_lo, cesm_hi,
+                                    color=c, alpha=0.10, hatch="///")
+                ax_top.plot(cesm_years, cesm_anom_mean, color=c, lw=2.0,
+                            ls="--", alpha=0.8,
+                            label=f"{name} (CESM2 mean ± spread, N={N_cesm})")
 
             common, idx_gen, idx_cs = np.intersect1d(
-                d["gen_years"], d["cesm_years"], return_indices=True
+                gen_years, cesm_years, return_indices=True
             )
             # bias: model ensemble mean vs CESM2 ensemble mean
             diff_mean = gen_anom_mean[idx_gen] - cesm_anom_mean[idx_cs]
-            da_diff = xr.DataArray(
-                diff_mean, dims=["year"], coords={"year": common},
-                attrs={"long_name": "Model − CESM2", "units": "°C"},
-            )
-            da_diff.plot.line(ax=ax_bot, color=c, lw=1.5, label=name)
+            ax_bot.plot(common, diff_mean, color=c, lw=1.5, label=name)
             # shade model spread around bias
-            diff_min = gen_anom_ens[:, idx_gen].min(axis=0) - cesm_anom_mean[idx_cs]
-            diff_max = gen_anom_ens[:, idx_gen].max(axis=0) - cesm_anom_mean[idx_cs]
-            ax_bot.fill_between(common, diff_min, diff_max, alpha=0.12, color=c)
+            if N_gen > 1:
+                diff_lo = gen_anom_ens[:, idx_gen].min(axis=0) - cesm_anom_mean[idx_cs]
+                diff_hi = gen_anom_ens[:, idx_gen].max(axis=0) - cesm_anom_mean[idx_cs]
+                ax_bot.fill_between(common, diff_lo, diff_hi, alpha=0.15, color=c)
 
+    n_gen_label = gen_anom_ens.shape[0] if results else 1
     ax_top.axhline(0, color="k", lw=0.6, ls=":")
     ax_top.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline period")
     ax_top.set_xlabel("")
     ax_top.set_ylabel("TREFHT anomaly (°C)")
-    ax_top.set_title("Global-mean temperature anomaly vs 1850–1900\n(model solid, CESM2 dashed — both 5-member ensembles)")
+    ax_top.set_title(
+        f"Global-mean temperature anomaly vs 1850–1900  "
+        f"(model solid, CESM2 dashed — {n_gen_label}-member ensemble)"
+    )
     ax_top.legend(fontsize=8, ncol=2)
     ax_top.grid(True, alpha=0.25)
 
@@ -812,7 +808,10 @@ def plot_timeseries(results: dict, out_path: str):
     ax_bot.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12)
     ax_bot.set_xlabel("Year")
     ax_bot.set_ylabel("Bias: model − CESM2 (°C)")
-    ax_bot.set_title("Model bias relative to CESM2 single member")
+    ax_bot.set_title(
+        "Model bias relative to CESM2 ensemble mean"
+        + (" (shaded = model min/max spread)" if n_gen_label > 1 else "")
+    )
     ax_bot.legend(fontsize=8, ncol=2)
     ax_bot.grid(True, alpha=0.25)
 
@@ -1156,7 +1155,24 @@ def main():
                         help="Always use the 3-pass CFG decomposition even when both "
                              "guidance scales are 1.0.  Useful to isolate the bias from "
                              "the additive decomposition vs the guidance scale values.")
+    parser.add_argument("--members", type=int, default=N_ENSEMBLE,
+                        help="Number of diffusion ensemble members to generate per "
+                             "experiment (default: %(default)s).  More members give "
+                             "a better estimate of model spread but take longer.")
+    parser.add_argument("--export", default=None,
+                        help="SLURM-style key=value pairs, e.g. 'members=10'.  "
+                             "Parsed for 'members=N'; --members takes precedence.")
     args = parser.parse_args()
+
+    # Parse --export="members=N" if --members was not set explicitly
+    if args.export:
+        for token in args.export.split(","):
+            token = token.strip()
+            if token.startswith("members="):
+                try:
+                    args.members = int(token.split("=", 1)[1])
+                except ValueError:
+                    pass
     if args.run_xai:
         args.skip_ig       = False
         args.skip_saliency = False
@@ -1229,13 +1245,13 @@ def main():
         print(f"  Conditioning: {cond_years[0]}–{cond_years[-1]}"
               f"  shape={tuple(cond_tensor.shape)}")
 
-        # -- generation: ensemble of N_ENSEMBLE members ----------------------
-        print(f"  Generating ensemble of {N_ENSEMBLE} members "
+        # -- generation: ensemble of args.members members --------------------
+        print(f"  Generating ensemble of {args.members} members "
               f"({len(cond_years)} years each, "
               f"batch={args.batch_size}, steps={args.sample_steps}) …")
         members = []
-        for m in range(N_ENSEMBLE):
-            print(f"    member {m + 1}/{N_ENSEMBLE} …")
+        for m in range(args.members):
+            print(f"    member {m + 1}/{args.members} …")
             gen_norm = generate_timeseries(
                 model, scheduler, cond_tensor,
                 device, dtype, args.sample_steps, args.batch_size, seed=m,
