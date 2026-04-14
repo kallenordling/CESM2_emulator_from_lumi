@@ -1440,11 +1440,13 @@ def main():
     pca_cond   = pca_state.get("cond")   if pca_state else None
     pca_target = pca_state.get("target") if pca_state else None
 
-    # n_components from the first ClimateDataset (config_data.yaml value)
-    N_COMP_COND = [3, 5] if pca_cond else None
-
-    # ── build scheduler ────────────────────────────────────────────────────
+    # Read n_components_cond from config_data.yaml so eval uses the same
+    # number of EOFs the model was trained with (currently [30, 10]).
     cfg = OmegaConf.load(CONFIG_PATH)
+    data_cfg = OmegaConf.load("configs/config_data.yaml")
+    _nc = data_cfg.get("n_components_cond", None)
+    N_COMP_COND = OmegaConf.to_container(_nc, resolve=True) if (pca_cond and _nc is not None) else None
+    print(f"[PCA] n_components_cond={N_COMP_COND}")
     scheduler: ContinuousDDPM = instantiate(cfg.scheduler)
 
     # ── compute hist baseline map (H, W) for anomaly reference ─────────────
