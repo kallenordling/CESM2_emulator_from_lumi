@@ -53,8 +53,10 @@ OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
 # Set to 1.0 (default) to disable CFG and use direct conditioning (single forward pass).
 GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
 GUIDANCE_SUL="${GUIDANCE_SUL:-1.0}"
-# Set RUN_XAI=1 to run XAI figures (IG + saliency) — off by default (slow).
+# Set RUN_XAI=1 (or SKIP_XAI=0) to run XAI figures (IG + saliency) — off by default (slow).
 RUN_XAI="${RUN_XAI:-0}"
+# SKIP_XAI=0 is equivalent to RUN_XAI=1 (inverted alias for convenience)
+[ "${SKIP_XAI:-1}" = "0" ] && RUN_XAI="1"
 # Set FORCE_CFG=1 to use 3-pass CFG decomposition even at guidance scales 1.0/1.0.
 # Useful to isolate whether the additive decomposition itself introduces bias.
 FORCE_CFG="${FORCE_CFG:-0}"
