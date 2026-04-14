@@ -1581,7 +1581,7 @@ def main():
         # (N_ENS, T) — one global-mean anomaly time series per member
         gen_anom_ens = np.stack(
             [area_weighted_gmean(gen_ensemble[m], LAT) - bl_scalar
-             for m in range(N_ENSEMBLE)],
+             for m in range(gen_ensemble.shape[0])],
             axis=0,
         )
 
