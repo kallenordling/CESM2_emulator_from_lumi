@@ -1435,6 +1435,12 @@ def main():
     parser.add_argument("--export", default=None,
                         help="SLURM-style key=value pairs, e.g. 'members=10'.  "
                              "Parsed for 'members=N'; --members takes precedence.")
+    parser.add_argument("--experiments", nargs="+", default=None,
+                        metavar="NAME",
+                        help="Only run these experiments by name (e.g. ssp126). "
+                             "Default: all of "
+                             f"{[e['name'] for e in EXPERIMENTS]}. "
+                             "Baseline is still taken from hist CESM2 ensemble.")
     args = parser.parse_args()
 
     # Parse --export="members=N" if --members was not set explicitly
@@ -1495,7 +1501,18 @@ def main():
     # ── loop over experiments ───────────────────────────────────────────────
     timeseries_results = {}
 
-    for exp in EXPERIMENTS:
+    if args.experiments:
+        wanted = set(args.experiments)
+        unknown = wanted - {e["name"] for e in EXPERIMENTS}
+        if unknown:
+            sys.exit(f"ERROR: unknown experiment name(s): {sorted(unknown)}. "
+                     f"Known: {[e['name'] for e in EXPERIMENTS]}")
+        experiments_to_run = [e for e in EXPERIMENTS if e["name"] in wanted]
+        print(f"\n[FILTER] Running only: {[e['name'] for e in experiments_to_run]}")
+    else:
+        experiments_to_run = EXPERIMENTS
+
+    for exp in experiments_to_run:
         name = exp["name"]
         print(f"\n{'='*60}")
         print(f"[EXP] {name}")
@@ -1716,7 +1733,11 @@ def main():
         )
 
     # ── combined time series plot ──────────────────────────────────────────
-    if timeseries_results:
+    # Skip combined plots when --experiments filter is in effect; otherwise
+    # we'd overwrite an existing global_mean_anomaly.png with only the
+    # filtered subset. Use replot_eval.py afterwards to regenerate combined
+    # plots from all TREFHT_*.nc files in output_dir.
+    if timeseries_results and not args.experiments:
         ts_out  = os.path.join(args.output_dir, "global_mean_anomaly.png")
         csv_out = os.path.join(args.output_dir, "global_mean_anomaly.csv")
         print(f"\n[PLOT] Time series → {ts_out}")
