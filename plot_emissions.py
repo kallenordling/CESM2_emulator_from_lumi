@@ -14,12 +14,17 @@ EMIS_DIR = "/scratch/project_462001328/emulator_data"
 EXPERIMENTS = {
     "hist":   f"{EMIS_DIR}/emissions_hist_timefixed.nc",
     "ssp370": f"{EMIS_DIR}/emissions_ssp370_timefixed.nc",
+    "ssp126": f"{EMIS_DIR}/emissions_co2_so2_regridded_ssp126.nc",
     "aaer":   f"{EMIS_DIR}/emissions_aero_only_timefixed.nc",
     "ghg":    f"{EMIS_DIR}/emissions_ghg_only_timefixed.nc",
 }
-COLORS     = {"hist": "#1f77b4", "ssp370": "#d62728", "aaer": "#ff7f0e", "ghg": "#2ca02c"}
-LINESTYLE  = {"hist": "-",       "ssp370": "--",       "aaer": "-.",      "ghg": ":"}
+COLORS     = {"hist": "#1f77b4", "ssp370": "#d62728", "ssp126": "#9467bd",
+              "aaer": "#ff7f0e", "ghg": "#2ca02c"}
+LINESTYLE  = {"hist": "-",       "ssp370": "--",       "ssp126": "-",
+              "aaer": "-.",      "ghg": ":"}
 COND_VARS  = ["CO2", "SUL"]
+# Alternate variable names to try when the primary name is missing.
+VAR_ALIASES = {"SUL": ["SO2", "sul"], "CO2": ["co2"]}
 
 
 def gmean_ts(da, time_dim):
@@ -47,13 +52,17 @@ for vi, var in enumerate(COND_VARS):
         ax = axes[vi, ei]
         try:
             ds = xr.open_dataset(cond_file)
-            if var not in ds:
+            resolved_var = var if var in ds else next(
+                (alias for alias in VAR_ALIASES.get(var, []) if alias in ds),
+                None,
+            )
+            if resolved_var is None:
                 ax.text(0.5, 0.5, f"{var}\nnot in file",
                         ha="center", va="center", transform=ax.transAxes, fontsize=9)
                 ax.set_title(f"{exp_name}", fontsize=10)
                 ds.close()
                 continue
-            da = ds[var]
+            da = ds[resolved_var]
             time_dim = [d for d in da.dims if d not in ("lat", "lon")][0]
             years = extract_years(ds[time_dim].values)
             ts    = gmean_ts(da, time_dim)
@@ -61,7 +70,8 @@ for vi, var in enumerate(COND_VARS):
             ax.plot(years, ts,
                     color=COLORS[exp_name], lw=1.8,
                     linestyle=LINESTYLE[exp_name], label=exp_name)
-            ax.set_title(f"{exp_name}  —  {var}", fontsize=10)
+            title_var = var if resolved_var == var else f"{var} (as {resolved_var})"
+            ax.set_title(f"{exp_name}  —  {title_var}", fontsize=10)
             ax.set_xlabel("Year", fontsize=8)
             ax.set_ylabel(var, fontsize=8)
             ax.tick_params(labelsize=7)
