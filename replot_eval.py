@@ -51,6 +51,12 @@ EXPERIMENT_META = {
         "cond_file": "emissions_ssp370_timefixed.nc",
         "time_dim":  "time",
     },
+    "ssp126": {
+        "map_years": [2015, 2050, 2100],
+        "color":     "#9467bd",
+        "cond_file": "emissions_co2_so2_regridded_ssp126.nc",
+        "time_dim":  "year",
+    },
     "aaer":   {
         "map_years": [1900, 2000, 2050],
         "color":     "#ff7f0e",
