@@ -84,11 +84,10 @@ EXPERIMENTS = [
     ),
     dict(
         name         = "ssp126",
-        # CMIP6 CESM2 ssp126 tas fetched via download_cmip6_cesm2.py.
-        # Layout: <SCRATCH>/cmip6/ssp126/tas/<member>/*.nc (monthly tas in K).
-        data_dir     = os.path.join(SCRATCH, "cmip6", "ssp126", "tas"),
+        # Pre-regridded CESM2 ssp126 monthly tas (K), single member r4i1p1f1.
+        data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126.nc"),
         cond_file    = os.path.join(EMIS_DIR, "emissions_co2_so2_regridded_ssp126.nc"),
-        realizations = ["r4i1p1f1"],  # only member with files on ESGF (r1/r2 metadata-only)
+        realizations = ["r4i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
         map_years    = [2015, 2050, 2100],
@@ -318,8 +317,14 @@ def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str,
     """Load CESM2 `target_var` for one realization, return (years, data_celsius array).
 
     data_celsius shape: (T, lat, lon)
+
+    If `data_dir` is a direct .nc file path, it is opened as-is and `realization`
+    is ignored (useful for pre-regridded single-member files).
     """
-    path = os.path.join(data_dir, realization, "*.nc")
+    if os.path.isfile(data_dir):
+        path = data_dir
+    else:
+        path = os.path.join(data_dir, realization, "*.nc")
     ds = xr.open_mfdataset(path, combine="by_coords",
                            chunks={time_dim: 50})[target_var]
 
