@@ -1584,7 +1584,17 @@ def main():
             print(f"  CESM2: {cesm_years_exp[0]}–{cesm_years_exp[-1]}"
                   f"  ({cesm_ens_exp.shape[0]} members)")
         except Exception as e:
-            print(f"  CESM2 data not loaded: {e}")
+            import traceback
+            print(f"  [WARN] CESM2 data NOT loaded for {name!r} "
+                  f"(data_dir={exp['data_dir']}): {type(e).__name__}: {e}")
+            traceback.print_exc()
+            # If user asked for this experiment explicitly, fail loudly instead
+            # of silently producing a TREFHT_<name>.nc with no CESM2 reference.
+            if args.experiments and name in args.experiments:
+                raise RuntimeError(
+                    f"CESM2 load failed for explicit experiment {name!r}; "
+                    f"refusing to write NetCDF without reference data"
+                ) from e
 
         # -- save NetCDF ---------------------------------------------------
         if baseline_map is not None:
