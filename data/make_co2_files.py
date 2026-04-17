@@ -26,6 +26,7 @@ OUTPUT_DIR = "/scratch/project_462001328/emulator_data/"
 if exp == "hist":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
     ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-11-25_gn_*.nc")
+    
 if  exp =="ssp370":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
     ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
@@ -86,7 +87,7 @@ def rename_to_co2(ds):
 
 
 # ── 1. AIR-anthro: open & sum along level ────────────────────────────────────
-print("Opening AIR-anthro files...")
+print("Opening AIR-anthro files...",AIR_PATTERN)
 air_files = sorted(glob.glob(AIR_PATTERN))
 assert len(air_files) > 0, f"No AIR-anthro files found matching:\n  {AIR_PATTERN}"
 print(f"  Found {len(air_files)} files")
