@@ -83,6 +83,15 @@ EXPERIMENTS = [
         color        = "#d62728",
     ),
     dict(
+        name         = "ssp126",
+        data_dir     = os.path.join(DATA_ROOT, "ssp126"),  # CESM2 members not present → skipped
+        cond_file    = os.path.join(EMIS_DIR, "emissions_co2_so2_regridded_ssp126.nc"),
+        realizations = [],
+        time_dim     = "year",
+        map_years    = [2015, 2050, 2100],
+        color        = "#9467bd",
+    ),
+    dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
         cond_file    = os.path.join(EMIS_DIR, "emissions_aero_only_timefixed.nc"),
@@ -134,6 +143,7 @@ GUIDANCE_SUL = 1.0
 IG_WINDOWS = {
     "hist":   [(1920, 1960, "1920–1960"), (1960, 1990, "1960–1990"), (1990, 2014, "1990–2014")],
     "ssp370": [(2020, 2050, "2020–2050"), (2050, 2080, "2050–2080"), (2080, 2100, "2080–2100")],
+    "ssp126": [(2020, 2050, "2020–2050"), (2050, 2080, "2050–2080"), (2080, 2100, "2080–2100")],
     "aaer":   [(1920, 1960, "1920–1960"), (1960, 1990, "1960–1990"), (1990, 2100, "1990–2100")],
     "ghg":    [(1920, 1970, "1920–1970"), (1970, 2020, "1970–2020"), (2050, 2100, "2050–2100")],
 }
