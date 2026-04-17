@@ -84,10 +84,13 @@ EXPERIMENTS = [
     ),
     dict(
         name         = "ssp126",
-        data_dir     = os.path.join(DATA_ROOT, "ssp126"),  # CESM2 members not present → skipped
+        # CMIP6 CESM2 ssp126 tas fetched via download_cmip6_cesm2.py.
+        # Layout: <SCRATCH>/cmip6/ssp126/tas/<member>/*.nc (monthly tas in K).
+        data_dir     = os.path.join(SCRATCH, "cmip6", "ssp126", "tas"),
         cond_file    = os.path.join(EMIS_DIR, "emissions_co2_so2_regridded_ssp126.nc"),
-        realizations = [],
-        time_dim     = "year",
+        realizations = ["r4i1p1f1"],  # only member with files on ESGF (r1/r2 metadata-only)
+        time_dim     = "time",
+        target_var   = "tas",
         map_years    = [2015, 2050, 2100],
         color        = "#9467bd",
     ),
@@ -310,14 +313,15 @@ def generate_timeseries(
     return torch.cat(results, dim=0).numpy()   # (T, H, W)
 
 
-def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str) -> tuple:
-    """Load CESM2 TREFHT for one realization, return (years, data_celsius array).
+def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str,
+                              target_var: str = TARGET_VAR) -> tuple:
+    """Load CESM2 `target_var` for one realization, return (years, data_celsius array).
 
     data_celsius shape: (T, lat, lon)
     """
     path = os.path.join(data_dir, realization, "*.nc")
     ds = xr.open_mfdataset(path, combine="by_coords",
-                           chunks={time_dim: 50})[TARGET_VAR]
+                           chunks={time_dim: 50})[target_var]
 
     # Convert K → °C
     ds = ds - 273.15
@@ -341,8 +345,9 @@ def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str) -> 
     return years, data
 
 
-def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str) -> tuple:
-    """Load CESM2 TREFHT for multiple realizations.
+def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str,
+                         target_var: str = TARGET_VAR) -> tuple:
+    """Load CESM2 `target_var` for multiple realizations.
 
     Returns:
         years           : np.ndarray (T,) — years from first successfully loaded member
@@ -352,7 +357,7 @@ def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str) -> tup
     common_years = None
     for real in realizations:
         try:
-            yrs, data = load_cesm2_annual_single(data_dir, real, time_dim)
+            yrs, data = load_cesm2_annual_single(data_dir, real, time_dim, target_var)
             if common_years is None:
                 common_years = yrs
                 members.append(data)
@@ -1474,7 +1479,8 @@ def main():
     hist_exp = next(e for e in EXPERIMENTS if e["name"] == "hist")
     try:
         cesm_hist_years, cesm_hist_ens = load_cesm2_ensemble(
-            hist_exp["data_dir"], hist_exp["realizations"], hist_exp["time_dim"]
+            hist_exp["data_dir"], hist_exp["realizations"], hist_exp["time_dim"],
+            hist_exp.get("target_var", TARGET_VAR),
         )
         cesm_hist_data = cesm_hist_ens.mean(axis=0)   # ensemble mean (T, H, W)
         mask_bl = (cesm_hist_years >= BASELINE_START) & (cesm_hist_years <= BASELINE_END)
@@ -1549,7 +1555,8 @@ def main():
         cesm_years_exp, cesm_data_exp, cesm_ens_exp = None, None, None
         try:
             cesm_years_exp, cesm_ens_exp = load_cesm2_ensemble(
-                exp["data_dir"], exp["realizations"], exp["time_dim"]
+                exp["data_dir"], exp["realizations"], exp["time_dim"],
+                exp.get("target_var", TARGET_VAR),
             )
             cesm_data_exp = cesm_ens_exp.mean(axis=0)   # (T, H, W) ensemble mean
             print(f"  CESM2: {cesm_years_exp[0]}–{cesm_years_exp[-1]}"
@@ -1681,7 +1688,8 @@ def main():
         if name in REF_REALIZATIONS and LAT is not None:
             try:
                 ref_y, ref_ens = load_cesm2_ensemble(
-                    exp["data_dir"], REF_REALIZATIONS[name], exp["time_dim"]
+                    exp["data_dir"], REF_REALIZATIONS[name], exp["time_dim"],
+                    exp.get("target_var", TARGET_VAR),
                 )
                 ref_anom_ens = np.stack(
                     [area_weighted_gmean(ref_ens[m], LAT) - bl_scalar
