@@ -26,7 +26,7 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-OUTDIR = "cmip6_tas_snw"
+OUTDIR = "/scratch/project_462001328/emulator_data/"
 EXPERIMENT = "historical"  # default; override with --experiment
 
 # Default models/members if --models is not given.
