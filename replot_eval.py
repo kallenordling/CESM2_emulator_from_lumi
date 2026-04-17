@@ -56,6 +56,10 @@ EXPERIMENT_META = {
         "color":     "#9467bd",
         "cond_file": "emissions_co2_so2_regridded_ssp126.nc",
         "time_dim":  "year",
+        # Flat CESM2 reference file under <emis_dir>; used when the eval NetCDF
+        # has no TREFHT_cesm_* vars. Monthly tas in K, single member.
+        "cesm_file": "cmip6/CESM2_ssp126.nc",
+        "cesm_var":  "tas",
     },
     "aaer":   {
         "map_years": [1900, 2000, 2050],
@@ -96,6 +100,27 @@ def extract_years(time_values) -> np.ndarray:
         return np.array([int(str(t)[:4]) for t in time_values])
     except Exception:
         return time_values.astype(int)
+
+
+def load_cesm2_from_flat_file(path: str, var: str = "tas") -> tuple:
+    """Load a flat CMIP6-style monthly file (K) and return
+    (years, (1, T, H, W) °C ensemble with one member)."""
+    if not os.path.exists(path):
+        return None, None
+    ds = xr.open_dataset(path)
+    if var not in ds:
+        ds.close()
+        return None, None
+    da = ds[var] - 273.15
+    try:
+        da = da.resample(time="YE").mean()
+    except Exception:
+        pass
+    da = da.load()
+    years = extract_years(da.time.values)
+    data  = da.values.astype(np.float32)            # (T, lat, lon)
+    ds.close()
+    return years, data[np.newaxis]                  # (1, T, H, W)
 
 
 def load_co2_global_annual(cond_file: str, time_dim: str, lat: np.ndarray):
@@ -609,6 +634,19 @@ def main():
         print(f"\n[{name}] Loading {nc_path} …")
         lat, lon, gen_years, gen_ensemble, baseline_map, cesm_years, cesm_ensemble = \
             load_experiment_nc(nc_path)
+
+        # Fallback: if the eval NetCDF has no CESM2 data, try loading a flat
+        # reference file specified in EXPERIMENT_META (e.g. CESM2_ssp126.nc).
+        if cesm_ensemble is None and meta.get("cesm_file"):
+            flat_path = os.path.join(args.emis_dir, meta["cesm_file"])
+            cesm_years, cesm_ensemble = load_cesm2_from_flat_file(
+                flat_path, meta.get("cesm_var", "tas"),
+            )
+            if cesm_ensemble is not None:
+                print(f"  CESM2 loaded from {flat_path} "
+                      f"({cesm_years[0]}–{cesm_years[-1]}, 1 member)")
+            else:
+                print(f"  CESM2 fallback not found: {flat_path}")
 
         n_model = gen_ensemble.shape[0]
         n_cesm  = cesm_ensemble.shape[0] if cesm_ensemble is not None else 0
