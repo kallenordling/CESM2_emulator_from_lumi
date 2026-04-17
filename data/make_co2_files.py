@@ -20,8 +20,8 @@ parser.add_argument("exp", help="Experiment name, e.g. hist or ssp370")
 args = parser.parse_args()
 
 exp = args.exp# ── Configure paths ──────────────────────────────────────────────────────────# ── Configure paths ──────────────────────────────────────────────────────────
-INPUT_DIR = "/scratch/project_462001112/emulator_data/emission_data/inputs4mips/"
-OUTPUT_DIR = "/scratch/project_462001112/emulator_data/"
+INPUT_DIR = "/scratch/project_462001328/emulator_data/emission_data/inputs4mips/"
+OUTPUT_DIR = "/scratch/project_462001328/emulator_data/"
 
 if exp == "hist":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
@@ -29,6 +29,10 @@ if exp == "hist":
 if  exp =="ssp370":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
     ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
+    
+if  exp =="ssp126":
+    AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc")
+    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "CO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc")    
 R_EARTH = 6.371e6  # Earth radius in meters
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 KG_PER_GT = 1e12  # 1 Gt = 1e12 kg
