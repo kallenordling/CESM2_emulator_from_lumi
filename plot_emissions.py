@@ -14,7 +14,7 @@ EMIS_DIR = "/scratch/project_462001328/emulator_data"
 EXPERIMENTS = {
     "hist":   f"{EMIS_DIR}/emissions_hist_timefixed.nc",
     "ssp370": f"{EMIS_DIR}/emissions_ssp370_timefixed.nc",
-    "ssp126": f"{EMIS_DIR}/emissions_co2_so2_regridded_ssp126.nc",
+    "ssp126": f"{EMIS_DIR}/emissions_ssp126_only_timefixed.nc",
     "aaer":   f"{EMIS_DIR}/emissions_aero_only_timefixed.nc",
     "ghg":    f"{EMIS_DIR}/emissions_ghg_only_timefixed.nc",
 }
