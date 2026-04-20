@@ -29,7 +29,7 @@ EXPERIMENTS = [
     ("ssp370", f"{EMIS_DIR}/emissions_ssp370_timefixed.nc",         True,  "#d62728", "-"),
     ("aaer",   f"{EMIS_DIR}/emissions_aero_only_timefixed.nc",      True,  "#ff7f0e", "-"),
     ("ghg",    f"{EMIS_DIR}/emissions_ghg_only_timefixed.nc",       True,  "#2ca02c", "-"),
-    ("ssp126", f"{EMIS_DIR}/emissions_co2_so2_regridded_ssp126.nc", False, "#9467bd", "--"),
+    ("ssp126", f"{EMIS_DIR}/emissions_ssp126_only_timefixed.nc",     False, "#9467bd", "--"),
 ]
 COND_VARS   = ["CO2", "SUL"]
 VAR_ALIASES = {"SUL": ["SO2", "sul"], "CO2": ["co2"]}
