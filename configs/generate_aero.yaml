@@ -7,7 +7,9 @@ scheduler:
       - 0
       - null
       
-data_dir: /scratch/project_462001328/emulator_data/ 
+data_dir: /scratch/project_462001328/emulator_data/
+n_components_target: null
+n_components_cond: [30, 10]
 save_dir: ./
 guidance_scale: 1.0   # Joint CFG scale (both channels). Ignored when guidance_co2/sul are set.
 guidance_co2: null    # Per-channel CFG scale for CO2 (set to float, e.g. 1.5, to enable)
