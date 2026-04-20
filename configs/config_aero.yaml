@@ -52,9 +52,15 @@ trainer:
     cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
     cfg_sul_drop_prob: 0.3      # 3× SUL dropout → more CO2-only training batches
     co2_cond_loss_scaling: 0.03  # initial value; overridden by adaptive scaling once EMAs warm up
-    adaptive_loss_scaling: true  # auto-tune both cond scalings to fixed fractions of MSE loss
+    adaptive_loss_scaling: true  # auto-tune all cond scalings to fixed fractions of MSE loss
     co2_target_fraction: 0.10    # CO2 conditioning loss target = 10% of MSE loss
     cond_target_fraction: 0.30   # general conditioning loss target = 30% of MSE loss (bounded [0.1, 0.4])
+    # ── TCRE regularization (physics prior) ──────────────────────────────
+    # Penalizes scenario-averaged gmean(ΔT_from_CO2) deviating from a linear
+    # TCRE relation fit on GHG training data. Applied to hist + ssp370 + ghg.
+    # Adds ~25-33% training overhead (extra CO2-only forward pass for that subset).
+    tcre_loss_scaling: 0.01      # initial value; adaptive scaling overrides once EMA warms
+    tcre_target_fraction: 0.05   # TCRE loss target = 5% of MSE loss (bounded [0.001, 0.5])
     reset_optimizer: true       # reset Adam state so old CO2-loss momentum doesn't persist
     eval_script: run_eval_aero.sh
 
