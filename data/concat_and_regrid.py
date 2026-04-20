@@ -19,7 +19,7 @@ import numpy as np
 # ── Args ─────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Concat hist+SSP emissions and regrid to target grid")
 parser.add_argument("--target", required=True, help="Path to a target NetCDF file to extract the grid from")
-parser.add_argument("--data_dir", default="/mnt/lumi_sc/emulator_data/",
+parser.add_argument("--data_dir", default="/mnt/lumi_sc2/emulator_data/",
                     help="Directory containing the CO2/SO2 files")
 parser.add_argument("--output_dir", default=None,
                     help="Output directory (default: same as --data_dir)")
@@ -131,6 +131,17 @@ def process_scenario(scenario: str) -> None:
     ds_regridded = ds_regridded.compute().sel(year=slice(1850, 2100))
     ds_regridded.to_netcdf(output_file)
     print(f"Saved: {output_file}")
+
+    # ── 7. SSP-only file (2015–2100, dim renamed year→time) ──────────────────
+    # Cumulative values preserved — same integration from 1850, just clipped
+    # in year range. Dim renamed so eval_aero.py's time_dim="time" works.
+    ssp_only = (
+        ds_regridded.sel(year=slice(2015, 2100))
+                    .rename({"year": "time"})
+    )
+    ssp_only_file = os.path.join(OUTPUT_DIR, f"emissions_{scenario}_only_timefixed.nc")
+    ssp_only.to_netcdf(ssp_only_file)
+    print(f"Saved: {ssp_only_file}  ({ssp_only.dims['time']} years, 2015–2100)")
 
 
 for scenario in SCENARIOS:
