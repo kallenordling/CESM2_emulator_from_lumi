@@ -124,7 +124,12 @@ def load_cesm2_from_flat_file(path: str, var: str = "tas") -> tuple:
 
 
 def load_co2_global_annual(cond_file: str, time_dim: str, lat: np.ndarray):
-    """Load area-weighted global-mean CO2 per year from an emissions file."""
+    """Load the global annual CO2 total (GtCO2/yr) from an emissions file.
+
+    Cond files store CO2 with units "Gt CO2 / year / gridpoint"; summing over
+    (lat, lon) gives the global annual total. Cumulative sum over time then
+    yields cumulative GtCO2 emissions for the TCRE axis.
+    """
     if not os.path.exists(cond_file):
         return None, None
     ds = xr.open_dataset(cond_file)
@@ -134,7 +139,7 @@ def load_co2_global_annual(cond_file: str, time_dim: str, lat: np.ndarray):
     co2 = ds["CO2"].values.astype(np.float64)
     years = extract_years(ds[time_dim].values)
     ds.close()
-    return years, area_weighted_gmean(co2, lat)
+    return years, co2.sum(axis=(-2, -1))
 
 
 # ── NetCDF loader ──────────────────────────────────────────────────────────────
@@ -332,7 +337,7 @@ def plot_tcre(results: dict, out_path: str):
                      label=f"CESM2 fit   slope={c_slope:.4f} °C/unit")
 
     ax_main.axhline(0, color="k", lw=0.6, ls=":")
-    ax_main.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
+    ax_main.set_xlabel("Cumulative CO₂ emissions (GtCO₂)")
     ax_main.set_ylabel("Global-mean TREFHT anomaly re 1850–1900 (°C)")
     ax_main.set_title("TCRE — ΔT vs cumulative CO₂  (hist + ssp370)")
     ax_main.legend(fontsize=7, ncol=2)
@@ -354,7 +359,7 @@ def plot_tcre(results: dict, out_path: str):
             ref_band_drawn_tcre = True
 
     ax_bias.axhline(0, color="k", lw=0.9)
-    ax_bias.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
+    ax_bias.set_xlabel("Cumulative CO₂ emissions (GtCO₂)")
     ax_bias.set_ylabel("Bias: model − CESM2 (°C)")
     ax_bias.set_title("TCRE bias")
     ax_bias.legend(fontsize=8)

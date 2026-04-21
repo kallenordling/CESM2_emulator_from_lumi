@@ -605,10 +605,47 @@ class UNetTrainer:
                 f"  [EVAL] Trigger written → {trigger_path}\n"
                 f"         (run watch_eval_triggers.sh outside container to auto-submit)"
             )
+
+            # Report the most recent completed eval's TCRE bias table into the
+            # training log so the user can track model/CESM2 TCRE drift per
+            # checkpoint without digging through separate eval logs. The eval
+            # job we just triggered hasn't run yet, so this shows the PREVIOUS
+            # milestone's TCRE — one-behind, which is fine.
+            self._report_latest_tcre(os.path.dirname(output_dir), current_epoch=epoch)
         except Exception as e:
             self.accelerator.print(
                 f"  [EVAL] WARNING: could not write eval trigger for epoch {epoch}: {e}"
             )
+
+    def _report_latest_tcre(self, eval_root: str, current_epoch: int) -> None:
+        """Print the newest `tcre_summary.json` found under eval_root to the log."""
+        import json, glob
+        try:
+            candidates = sorted(glob.glob(os.path.join(eval_root, "best_ep*", "tcre_summary.json")))
+            if not candidates:
+                return
+            latest = candidates[-1]
+            # extract epoch from the parent dir name (e.g. best_ep0930)
+            parent = os.path.basename(os.path.dirname(latest))
+            ep_str = parent.replace("best_ep", "").lstrip("0") or "0"
+            with open(latest) as f:
+                s = json.load(f)
+            lines = [f"  [TCRE] latest eval (ep{ep_str}, triggered at ep{current_epoch}):"]
+            for sc, v in s.get("per_scenario", {}).items():
+                lines.append(
+                    f"    {sc:12s} model={v['model_slope']:.4f}  "
+                    f"CESM2={v['cesm_slope']:.4f}  ratio={v['ratio']:.3f}  "
+                    f"bias={v['bias_pct']:+.1f}%"
+                )
+            for sc, v in s.get("combined", {}).items():
+                lines.append(
+                    f"    {sc:12s} model={v['model_slope']:.4f}  "
+                    f"CESM2={v['cesm_slope']:.4f}  ratio={v['ratio']:.3f}  "
+                    f"bias={v['bias_pct']:+.1f}%"
+                )
+            self.accelerator.print("\n".join(lines))
+        except Exception as e:
+            self.accelerator.print(f"  [TCRE] WARNING: failed to load latest tcre_summary: {e}")
 
     def _update_loss_emas(self) -> None:
         """Update exponential moving averages of unscaled mse, cond, co2_cond, tcre loss."""
