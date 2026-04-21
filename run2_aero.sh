@@ -49,6 +49,8 @@ export PYTHONNOUSERSITE=1
 export ACCELERATE_USE_FSDP=0
 export HSA_ENABLE_SDMA=0
 export PYTORCH_ALLOC_CONF=expandable_segments:True
+export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_COMPILE=0  # ROCm Triton missing cluster_dims — inductor crash
 
 # ── MIOpen / HIP kernel cache ─────────────────────────────────────────────────

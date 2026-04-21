@@ -19,7 +19,7 @@ n_components_target: null
 n_components_cond: [30, 10]   # [CO2, SUL]: 10 SUL EOFs remove shipping-lane artefacts
 
 # ── Loader settings ──────────────────────────────────────────
-batch_size: 12          # total windows per batch
+batch_size: 8           # total windows per batch; lowered from 12 to fit TCRE extra forward pass
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
 steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
