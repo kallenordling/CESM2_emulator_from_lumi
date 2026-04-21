@@ -391,21 +391,27 @@ def area_weighted_gmean(data: np.ndarray, lat: np.ndarray) -> np.ndarray:
 
 
 def load_co2_global_annual(cond_file: str, time_dim: str, lat: np.ndarray) -> tuple:
-    """Load raw (un-normalised) CO2 field and return area-weighted global mean per year.
+    """Load raw (un-normalised) CO2 field and return the global annual total.
+
+    The cond files store CO2 with units "Gt CO2 / year / gridpoint" — each
+    gridcell already holds its own contribution, so the correct global total
+    is a plain sum over (lat, lon), not an area-weighted mean. Cumulative
+    sum over time then yields cumulative GtCO2, which is the physical axis
+    used in TCRE diagrams.
 
     Returns
     -------
     years      : np.ndarray (T,)  integer years
-    co2_annual : np.ndarray (T,)  area-weighted global mean CO2 in native file units
+    co2_annual : np.ndarray (T,)  global annual CO2 emissions (Gt CO2 / year)
     """
     ds = xr.open_dataset(cond_file)
     if "CO2" not in ds:
         ds.close()
         return None, None
-    co2 = ds["CO2"].values.astype(np.float64)   # (T, H, W)
+    co2 = ds["CO2"].values.astype(np.float64)   # (T, H, W), GtCO2/yr/gridpoint
     years = extract_years(ds[time_dim].values)
     ds.close()
-    co2_annual = area_weighted_gmean(co2, lat)   # (T,)
+    co2_annual = co2.sum(axis=(-2, -1))          # (T,) GtCO2/yr globally
     return years, co2_annual
 
 
@@ -575,7 +581,7 @@ def plot_tcre(results: dict, out_path: str):
                   f"(model {m_slope:.4f}, CESM2 {c_slope:.4f})")
 
     ax_main.axhline(0, color="k", lw=0.6, ls=":")
-    ax_main.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
+    ax_main.set_xlabel("Cumulative CO₂ emissions (GtCO₂)")
     ax_main.set_ylabel("Global-mean TREFHT anomaly re 1850–1900 (°C)")
     proj_title = " + ".join(PROJECTIONS)
     ax_main.set_title(f"TCRE — ΔT vs cumulative CO₂  (hist + {proj_title})")
@@ -599,7 +605,7 @@ def plot_tcre(results: dict, out_path: str):
             ref_band_drawn_tcre = True
 
     ax_bias.axhline(0, color="k", lw=0.9)
-    ax_bias.set_xlabel("Cumulative CO₂ (area-weighted global mean, native units)")
+    ax_bias.set_xlabel("Cumulative CO₂ emissions (GtCO₂)")
     ax_bias.set_ylabel("Bias: model − CESM2 (°C)")
     ax_bias.set_title("TCRE bias")
     ax_bias.legend(fontsize=8)
@@ -609,6 +615,80 @@ def plot_tcre(results: dict, out_path: str):
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  → saved {out_path}")
+
+    # ── Structured summary: per-scenario + combined slopes, for training log ──
+    def _standalone_regression(sc, key_ens, key_years):
+        d = results.get(sc)
+        if d is None or d.get(key_ens) is None:
+            return None, None, 0
+        yr = d[key_years]
+        en = d[key_ens].mean(axis=0)
+        lookup_key = sc if sc in lookups else (PROJECTIONS[0] if PROJECTIONS else None)
+        if lookup_key is None:
+            return None, None, 0
+        cc = get_cumco2(yr, lookup_key)
+        v  = ~np.isnan(cc)
+        if v.sum() < 5:
+            return None, None, 0
+        a, b = np.polyfit(cc[v], en[v], 1)
+        return float(a), float(b), int(v.sum())
+
+    # Build a standalone ghg cumulative-CO2 lookup if ghg data are present,
+    # so its TCRE slope is computed against its own cumCO2 trajectory.
+    if "ghg" in results and results["ghg"].get("co2_annual") is not None:
+        d = results["ghg"]
+        gy = np.asarray(d["co2_years"]).astype(int)
+        gc = np.asarray(d["co2_annual"])
+        order = np.argsort(gy)
+        gy, gc = gy[order], gc[order]
+        lookups["ghg"] = dict(zip(gy, np.cumsum(gc)))
+
+    summary = {"per_scenario": {}, "combined": {}}
+    for sc in ("hist", "ssp370", "ssp126", "ghg"):
+        if sc not in results:
+            continue
+        ms, _, n_m = _standalone_regression(sc, "gen_anom_ens", "gen_years")
+        cs, _, n_c = _standalone_regression(sc, "cesm_anom_ens", "cesm_years")
+        if ms is None or cs is None or cs == 0:
+            continue
+        summary["per_scenario"][sc] = {
+            "model_slope": ms,
+            "cesm_slope":  cs,
+            "ratio":       ms / cs,
+            "bias_pct":    100.0 * (ms / cs - 1.0),
+            "n_points":    max(n_m, n_c),
+        }
+    for proj in PROJECTIONS:
+        ms, _ = _combined_regression(proj, "gen_anom_ens", "gen_years")
+        cs, _ = _combined_regression(proj, "cesm_anom_ens", "cesm_years")
+        if ms is None or cs is None or cs == 0:
+            continue
+        summary["combined"][f"hist+{proj}"] = {
+            "model_slope": float(ms),
+            "cesm_slope":  float(cs),
+            "ratio":       float(ms / cs),
+            "bias_pct":    float(100.0 * (ms / cs - 1.0)),
+        }
+
+    # Grep-friendly block for log scraping by the trainer
+    print("[TCRE SUMMARY]")
+    for sc, s in summary["per_scenario"].items():
+        print(f"  [TCRE] {sc:12s} model={s['model_slope']:.4f}  "
+              f"CESM2={s['cesm_slope']:.4f}  ratio={s['ratio']:.3f}  "
+              f"bias={s['bias_pct']:+.1f}%  N={s['n_points']}")
+    for sc, s in summary["combined"].items():
+        print(f"  [TCRE] {sc:12s} model={s['model_slope']:.4f}  "
+              f"CESM2={s['cesm_slope']:.4f}  ratio={s['ratio']:.3f}  "
+              f"bias={s['bias_pct']:+.1f}%")
+
+    try:
+        import json
+        summary_path = os.path.join(os.path.dirname(out_path), "tcre_summary.json")
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"  → saved {summary_path}")
+    except Exception as e:
+        print(f"  [TCRE] WARNING: failed to write tcre_summary.json: {e}")
 
 
 def compute_ig_per_output_location(
