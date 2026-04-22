@@ -179,13 +179,16 @@ class UNetTrainer:
         self._ema_decay = 0.99  # ~100 sync-step half-life — slow, stable adjustments
 
         # ── TCRE regularization ──────────────────────────────────────────────
-        # Penalize the model's CO2-only global-mean response for deviating from
-        # a linear TCRE relation precomputed from GHG training data:
-        #     gmean(ΔT_norm_from_CO2) ≈ tcre_slope * gmean(cumCO2_norm) + tcre_intercept
-        # Applied to scenario_ids in {hist, ssp370, ghg} (all except aaer).
+        # Penalize the model's *per-scenario* forced-response slope for deviating
+        # from a linear relation precomputed from CESM2 ensemble-mean training
+        # data, separately for each of {hist, ssp370, ghg} (aaer excluded):
+        #     gmean(ΔT_norm) ≈ tcre_slopes[sid] * gmean(cumCO2_norm) + tcre_intercepts[sid]
+        # The model slope is the batch OLS slope of dT_gmean vs co2_gmean on the
+        # rows of that scenario, using pred_anomaly = pred_x0_cond − pred_x0_null
+        # (no dedicated CO2-only forward pass).
         self.tcre_loss_scaling = getattr(self, "tcre_loss_scaling", 0.0)
-        self.tcre_slope     = None  # filled by _precompute_tcre_slope(); may be overwritten by checkpoint
-        self.tcre_intercept = None
+        self.tcre_slopes     = {}  # {scenario_id: float}; filled by _precompute_tcre_slope()
+        self.tcre_intercepts = {}
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -275,11 +278,11 @@ class UNetTrainer:
         # Prepare everything for GPU training
         self.prepare()
 
-        # Precompute TCRE target slope from GHG training data (needs ghg samples
-        # where SUL=0 so the full response is CO2-only).  Checkpoint may
-        # override via loaded tcre_slope/intercept — done above in self.load(),
-        # but we still compute if not restored so new runs get a valid target.
-        if self.tcre_loss_scaling > 0 and self.tcre_slope is None:
+        # Precompute per-scenario TCRE target slopes from CESM2 training data.
+        # Checkpoint may override via loaded tcre_slopes/tcre_intercepts — done
+        # above in self.load(); we still compute if not restored so new runs
+        # get valid targets.
+        if self.tcre_loss_scaling > 0 and not self.tcre_slopes:
             self._precompute_tcre_slope()
 
     def save_hyperparameters(self, cfg: DictConfig) -> None:
@@ -374,8 +377,13 @@ class UNetTrainer:
                         "SCEN DISC":      avg_scen_disc.detach().item(),
                         "COND SCALE":     self.cond_loss_scaling,
                         "TCRE SCALE":     self.tcre_loss_scaling,
-                        "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
                     }
+                    # Per-scenario TCRE target slopes (static once precomputed)
+                    if self.tcre_slopes:
+                        names = getattr(self.train_set, "scenario_names", None)
+                        for sid, s in self.tcre_slopes.items():
+                            key = (names[sid] if names and sid < len(names) else f"sid{sid}")
+                            log_dict[f"TCRE SLOPE/{key}"] = s
 
                     # Per-scenario sample counts — useful for verifying mix is working
                     if scenario_ids is not None and self.accelerator.is_main_process:
@@ -517,8 +525,8 @@ class UNetTrainer:
                         "Global Step":        self.global_step,
                         "cond_loss_scaling":  self.cond_loss_scaling,
                         "tcre_loss_scaling":  self.tcre_loss_scaling,
-                        "tcre_slope":         self.tcre_slope,
-                        "tcre_intercept":     self.tcre_intercept,
+                        "tcre_slopes":        self.tcre_slopes,
+                        "tcre_intercepts":    self.tcre_intercepts,
                         "_ema_mse":           self._ema_mse,
                         "_ema_cond":          self._ema_cond,
                         "_ema_tcre":          self._ema_tcre,
@@ -670,92 +678,86 @@ class UNetTrainer:
             self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
 
     def _precompute_tcre_slope(self) -> None:
-        """Fit slope+intercept of gmean(ΔT_norm) vs gmean(cumCO2_norm) from GHG.
+        """Fit per-scenario slopes+intercepts of gmean(ΔT_norm) vs gmean(cumCO2_norm).
 
-        Uses the GHG dataset where SUL ≈ 0, so the full ΔT is CO2-driven.  The
-        fitted coefficients are then used to provide a TCRE target for any
-        scenario (hist / ssp370 / ghg) conditioning CO2 value.
+        One (slope, intercept) pair per scenario in {hist, ssp370, ghg}.  These
+        are the CESM2 reference slopes that the model's forced-response slope
+        (taken from pred_anomaly = pred_x0_cond - pred_x0_null) must match,
+        separately within each scenario's batch subset.  aaer has no CO2
+        variation and is excluded.
 
-        Runs on the main process only, then broadcasts via torch scalar.  If
-        it fails (no GHG scenario, can't load realization), disables the TCRE
-        loss rather than raising.
+        Runs on the main process only.  If a scenario can't be loaded its slot
+        is left out of the dict; if no scenarios succeed, TCRE is disabled.
         """
+        self.tcre_slopes     = {}   # {scenario_id: float}
+        self.tcre_intercepts = {}   # {scenario_id: float}
+
         if not self._multi:
             print("[TRAINER] _precompute_tcre_slope: single-experiment mode — skipping TCRE")
             self.tcre_loss_scaling = 0.0
             return
 
         scenario_names = self.train_set.scenario_names
-        if "ghg" not in scenario_names:
-            print(f"[TRAINER] _precompute_tcre_slope: no 'ghg' scenario in {scenario_names} — skipping TCRE")
-            self.tcre_loss_scaling = 0.0
-            return
 
-        ghg_idx = scenario_names.index("ghg")
-        ghg_ds  = self.train_set.datasets[ghg_idx]
-
-        # Load the first GHG realization if nothing is loaded yet.
-        if ghg_ds.tensor_data is None or ghg_ds.tensor_data_cond is None:
-            try:
-                first_real = list(ghg_ds.realizations)[0]
-                print(f"[TRAINER] _precompute_tcre_slope: loading ghg realization '{first_real}'")
-                ghg_ds.load_data(first_real)
-            except Exception as e:
-                print(f"[TRAINER] _precompute_tcre_slope: failed to load ghg realization: {e} — skipping TCRE")
-                self.tcre_loss_scaling = 0.0
-                return
-
-        # tensor_data shape: (n_vars_target, T, H, W) — here n_vars_target=1 (TREFHT)
-        # tensor_data_cond shape: (n_vars_cond, T, H, W) — channel 0 = CO2
-        t_data = ghg_ds.tensor_data
-        c_data = ghg_ds.tensor_data_cond
-        if t_data is None or c_data is None:
-            print("[TRAINER] _precompute_tcre_slope: tensor_data not available — skipping TCRE")
-            self.tcre_loss_scaling = 0.0
-            return
-
-        # Build area weights (cosine-latitude, clamped — same as training loss)
+        # Area weights (cosine-latitude, clamped) — same as training loss
         lats = torch.as_tensor(self._ref_ds.lats.values, dtype=torch.float32)
         w_lat = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-        w_lat = w_lat / w_lat.mean()  # normalise so weighted-mean of ones = 1
-        w_lat = w_lat.view(1, -1, 1)  # (1, H, 1), broadcast over T and W
+        w_lat = w_lat / w_lat.mean()
+        w_lat = w_lat.view(1, -1, 1)  # (1, H, 1)
 
-        # Climatology baseline (broadcast to (n_vars, 1, H, W) if present)
+        # Climatology baseline (shared across scenarios)
         if self.climatology is not None:
-            # self.climatology is (1, C, 1, H, W) on device; move to cpu & squeeze
             clim = self.climatology.detach().to("cpu").squeeze(0).squeeze(1)  # (C, H, W)
         else:
-            clim = torch.zeros(t_data.shape[0], t_data.shape[2], t_data.shape[3])
-
-        t_trefht = t_data[0]        # (T, H, W) — first target variable
-        clim_t   = clim[0]           # (H, W)
-
-        # ΔT per timestep (T, H, W)
-        dT = t_trefht - clim_t.unsqueeze(0)
-        dT_gmean = (dT * w_lat).mean(dim=(1, 2))        # (T,)
-
-        # cumCO2 per timestep (T,). Channel 0 = CO2, already spatially broadcast
-        # in normalization so gmean is well-defined.
-        co2 = c_data[0]                                   # (T, H, W)
-        co2_gmean = (co2 * w_lat).mean(dim=(1, 2))        # (T,)
-
-        x = co2_gmean.to(torch.float64).numpy()
-        y = dT_gmean.to(torch.float64).numpy()
-
-        if x.size < 3 or float(x.max() - x.min()) < 1e-6:
-            print("[TRAINER] _precompute_tcre_slope: degenerate CO2 range — skipping TCRE")
-            self.tcre_loss_scaling = 0.0
-            return
+            clim = None
 
         import numpy as _np
-        slope, intercept = _np.polyfit(x, y, 1)
-        self.tcre_slope     = float(slope)
-        self.tcre_intercept = float(intercept)
-        print(
-            f"[TRAINER] TCRE precompute (ghg): slope={self.tcre_slope:.4f} "
-            f"intercept={self.tcre_intercept:.4f}  "
-            f"(CO2_norm: [{x.min():.3f}, {x.max():.3f}], ΔT_norm: [{y.min():.3f}, {y.max():.3f}])"
-        )
+        for name in ("hist", "ssp370", "ghg"):
+            if name not in scenario_names:
+                continue
+            sid = scenario_names.index(name)
+            ds  = self.train_set.datasets[sid]
+
+            # Load first realization if nothing is loaded yet
+            if ds.tensor_data is None or ds.tensor_data_cond is None:
+                try:
+                    first_real = list(ds.realizations)[0]
+                    print(f"[TRAINER] _precompute_tcre_slope: loading {name} realization '{first_real}'")
+                    ds.load_data(first_real)
+                except Exception as e:
+                    print(f"[TRAINER] _precompute_tcre_slope: failed to load {name}: {e}")
+                    continue
+
+            t_data = ds.tensor_data
+            c_data = ds.tensor_data_cond
+            if t_data is None or c_data is None:
+                continue
+
+            clim_t = (clim[0] if clim is not None
+                      else torch.zeros(t_data.shape[2], t_data.shape[3]))
+
+            dT = t_data[0] - clim_t.unsqueeze(0)                     # (T, H, W)
+            dT_gmean  = (dT * w_lat).mean(dim=(1, 2))                # (T,)
+            co2_gmean = (c_data[0] * w_lat).mean(dim=(1, 2))         # (T,)
+
+            x = co2_gmean.to(torch.float64).numpy()
+            y = dT_gmean.to(torch.float64).numpy()
+            if x.size < 3 or float(x.max() - x.min()) < 1e-6:
+                print(f"[TRAINER] _precompute_tcre_slope: degenerate CO2 range for {name}")
+                continue
+
+            slope, intercept = _np.polyfit(x, y, 1)
+            self.tcre_slopes[sid]     = float(slope)
+            self.tcre_intercepts[sid] = float(intercept)
+            print(
+                f"[TRAINER] TCRE precompute [{name} sid={sid}]: slope={slope:.4f} "
+                f"intercept={intercept:.4f}  "
+                f"(CO2_norm: [{x.min():.3f}, {x.max():.3f}], ΔT_norm: [{y.min():.3f}, {y.max():.3f}])"
+            )
+
+        if not self.tcre_slopes:
+            print("[TRAINER] _precompute_tcre_slope: no usable scenarios — disabling TCRE")
+            self.tcre_loss_scaling = 0.0
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         if isinstance(self.scheduler, ContinuousDDPM):
@@ -894,68 +896,61 @@ class UNetTrainer:
                 # Gradients flow only through pred_x0_cond (null is no_grad).
                 pred_anomaly = pred_x0_cond - pred_x0_null.detach()
 
-                # ── CO2-only forward pass for TCRE slope-match ────────────────
-                # For every scenario except aaer (idx 2), compute the model's
-                # CO2-only response (model with SUL nulled) minus the null output.
-                # Feeds the TCRE slope-match regularizer: global-mean linearity
-                # vs precomputed TCRE slope penalizes scenario-averaged ΔT from
-                # CO2 deviating from the TCRE relation fit on GHG.
+                # ── Per-scenario TCRE slope-match on pred_anomaly ─────────────
+                # For each scenario in {hist, ssp370, ghg}, fit the batch-OLS
+                # slope of gmean(pred_anomaly) vs gmean(cumCO2) across the rows
+                # of that scenario, and penalize deviation from the CESM2
+                # per-scenario slope precomputed in _precompute_tcre_slope().
+                # This is the *total forced response* slope (CO2+SUL), which
+                # matches the quantity shown in the eval TCRE figure — no
+                # dedicated CO2-only forward pass needed.
                 tcre_loss = torch.zeros(1, device=self.device)
-                want_co2only = (
+                want_tcre = (
                     self.tcre_loss_scaling > 0
-                    and self.tcre_slope is not None
+                    and bool(self.tcre_slopes)
                     and scenario_ids is not None
                 )
-                if want_co2only:
-                    tcre_mask = scenario_ids != 2  # exclude aaer (no CO2 variation)
-                    if tcre_mask.sum() > 0:
-                        co_noisy = noisy_samples[tcre_mask]
-                        co_t     = timesteps[tcre_mask]
-                        # Keep CO2 (ch 0), null out SUL (ch 1)
-                        co_cond  = cond_map[tcre_mask].clone()
-                        co_cond[:, 1] = NULL_COND_VALUE
-                        co2_output = self.model(co_noisy, co_t, cond_map=co_cond)
-                        pred_x0_co2only = self.get_original_sample(co_noisy, co2_output, co_t)
-                        # CO2-only response vs null (reuse already-computed pred_x0_null)
-                        pred_co2_response = pred_x0_co2only - pred_x0_null[tcre_mask].detach()
+                if want_tcre:
+                    lats = torch.as_tensor(
+                        self._ref_ds.lats.values,
+                        dtype=pred_anomaly.dtype,
+                        device=pred_anomaly.device,
+                    )
+                    w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+                    w = w / w.mean()                        # (H,)
+                    w_b = w.view(1, 1, 1, -1, 1)            # broadcast (B,C,T,H,W)
 
-                        # Slope-match between the model's CO2-only
-                        # (co2_gmean, dT_gmean) regression slope across the batch
-                        # and the precomputed TCRE slope, plus a light pointwise
-                        # anchor on the intercept. A pure pointwise form lets a
-                        # uniform ΔT offset hide a slope bias; matching the slope
-                        # directly targets the over-response that the pointwise
-                        # term was not pulling back strongly enough.
-                        lats = torch.as_tensor(
-                            self._ref_ds.lats.values,
-                            dtype=pred_co2_response.dtype,
-                            device=pred_co2_response.device,
-                        )
-                        w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-                        w = w / w.mean()                         # (H,)
-                        w_b = w.view(1, 1, 1, -1, 1)             # broadcast over B,C,T,W_lon
-                        # pred_co2_response: (B', C, T, H, W) → (B',)
-                        dT_gmean = (pred_co2_response * w_b).mean(dim=(1, 2, 3, 4))
-                        co2_in   = cond_map[tcre_mask][:, 0:1]   # (B', 1, T, H, W)
-                        co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))  # (B',)
+                    # Per-sample global means (B,)
+                    dT_gmean  = (pred_anomaly * w_b).mean(dim=(1, 2, 3, 4))
+                    co2_in    = cond_map[:, 0:1]            # (B, 1, T, H, W)
+                    co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))
 
-                        # Slope via OLS (closed form). Guarded when the batch CO2
-                        # range is too narrow to identify a slope.
-                        x_c = co2_gmean - co2_gmean.mean()
-                        y_c = dT_gmean  - dT_gmean.mean()
+                    per_scen_terms = []
+                    for sid, slope_ref in self.tcre_slopes.items():
+                        sid_mask = scenario_ids == sid
+                        if sid_mask.sum() < 3:
+                            continue
+                        x = co2_gmean[sid_mask]
+                        y = dT_gmean[sid_mask]
+                        x_c = x - x.mean()
+                        y_c = y - y.mean()
                         xx  = (x_c * x_c).sum()
-                        if co2_gmean.numel() >= 3 and xx > 1e-6:
+                        if xx > 1e-6:
                             slope_model = (x_c * y_c).sum() / xx
-                            slope_loss  = (slope_model - self.tcre_slope) ** 2
+                            slope_loss  = (slope_model - slope_ref) ** 2
                         else:
-                            slope_loss = torch.zeros((), device=pred_co2_response.device)
+                            slope_loss = torch.zeros((), device=pred_anomaly.device)
 
-                        # Intercept anchor: pointwise deviation from the
-                        # precomputed line. Downweighted so slope dominates.
-                        target_dT   = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
-                        anchor_loss = ((dT_gmean - target_dT) ** 2).mean()
+                        # Light anchor on the scenario's target line so a uniform
+                        # ΔT offset can't hide a slope bias.
+                        intercept_ref = self.tcre_intercepts.get(sid, 0.0)
+                        target_dT   = slope_ref * x + intercept_ref
+                        anchor_loss = ((y - target_dT) ** 2).mean()
 
-                        tcre_loss = slope_loss + 0.1 * anchor_loss
+                        per_scen_terms.append(slope_loss + 0.1 * anchor_loss)
+
+                    if per_scen_terms:
+                        tcre_loss = torch.stack(per_scen_terms).mean()
 
                 del pred_x0_cond, pred_x0_null
 
@@ -1104,8 +1099,8 @@ class UNetTrainer:
                 "Global Step": self.global_step,
                 "cond_loss_scaling":  self.cond_loss_scaling,
                 "tcre_loss_scaling":  self.tcre_loss_scaling,
-                "tcre_slope":         self.tcre_slope,
-                "tcre_intercept":     self.tcre_intercept,
+                "tcre_slopes":        self.tcre_slopes,
+                "tcre_intercepts":    self.tcre_intercepts,
                 "_ema_mse":           self._ema_mse,
                 "_ema_cond":          self._ema_cond,
                 "_ema_tcre":          self._ema_tcre,
@@ -1257,14 +1252,14 @@ class UNetTrainer:
         # Restore conditioning scale so resume doesn't restart warmup from 0
         self.cond_loss_scaling = checkpoint.get("cond_loss_scaling", 0.0)
         self.tcre_loss_scaling = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
-        self.tcre_slope        = checkpoint.get("tcre_slope",     self.tcre_slope)
-        self.tcre_intercept    = checkpoint.get("tcre_intercept", self.tcre_intercept)
+        self.tcre_slopes       = checkpoint.get("tcre_slopes",     self.tcre_slopes)
+        self.tcre_intercepts   = checkpoint.get("tcre_intercepts", self.tcre_intercepts)
         self._ema_mse  = checkpoint.get("_ema_mse",  None)
         self._ema_cond = checkpoint.get("_ema_cond", None)
         self._ema_tcre = checkpoint.get("_ema_tcre", None)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
-              f"tcre_slope={self.tcre_slope}")
+              f"tcre_slopes={self.tcre_slopes}")
 
         # Restore best val MSE so a resumed run doesn't overwrite a better checkpoint
         if "best_val_mse" in checkpoint:
