@@ -975,11 +975,13 @@ class UNetTrainer:
                                     self._ref_ds.lats,
                                 )
 
-                        # (b) tcre_loss: area-weighted global mean of CO2-only ΔT
-                        # vs tcre_slope * gmean(cumCO2_norm) + tcre_intercept.
-                        # Weights are pre-normalized so w.mean()==1 — same convention
-                        # as calc_mse_loss — so (x * w).mean() approximates a lat-
-                        # weighted mean once averaged over other dims.
+                        # (b) tcre_loss: slope-match between the model's CO2-only
+                        # (co2_gmean, dT_gmean) regression slope across the batch
+                        # and the precomputed TCRE slope, plus a light pointwise
+                        # anchor on the intercept. A pure pointwise form lets a
+                        # uniform ΔT offset hide a slope bias; matching the slope
+                        # directly targets the over-response that the pointwise
+                        # term was not pulling back strongly enough.
                         if self.tcre_loss_scaling > 0 and self.tcre_slope is not None:
                             lats = torch.as_tensor(
                                 self._ref_ds.lats.values,
@@ -993,8 +995,25 @@ class UNetTrainer:
                             dT_gmean = (pred_co2_response * w_b).mean(dim=(1, 2, 3, 4))
                             co2_in   = cond_map[tcre_mask][:, 0:1]   # (B', 1, T, H, W)
                             co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))  # (B',)
-                            target_dT = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
-                            tcre_loss = ((dT_gmean - target_dT) ** 2).mean()
+
+                            # Slope of the per-sample (co2_gmean, dT_gmean) cloud
+                            # via OLS (closed form). Guarded when the batch CO2
+                            # range is too narrow to identify a slope.
+                            x_c = co2_gmean - co2_gmean.mean()
+                            y_c = dT_gmean  - dT_gmean.mean()
+                            xx  = (x_c * x_c).sum()
+                            if co2_gmean.numel() >= 3 and xx > 1e-6:
+                                slope_model = (x_c * y_c).sum() / xx
+                                slope_loss  = (slope_model - self.tcre_slope) ** 2
+                            else:
+                                slope_loss = torch.zeros((), device=pred_co2_response.device)
+
+                            # Intercept anchor: pointwise deviation from the
+                            # precomputed line. Downweighted so slope dominates.
+                            target_dT   = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
+                            anchor_loss = ((dT_gmean - target_dT) ** 2).mean()
+
+                            tcre_loss = slope_loss + 0.1 * anchor_loss
 
                 del pred_x0_cond, pred_x0_null
 
