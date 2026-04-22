@@ -24,15 +24,15 @@ mix_scenarios: true    # guarantees cross-scenario batches (critical for conditi
 steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
 # ── Per-scenario sampling weights ────────────────────────────
-# Upweight aaer and ghg (single-forcing experiments) to give the model
-# more gradient signal to disentangle CO2 vs aerosol responses.
-# With batch_size=12 and weights [1,2,2,2] → hist:2, ssp370:4, aaer:4, ghg:4
-# ssp370 upweighted to 2× to give more gradient signal at high cumulative CO2 where over-response is worst
+# Equal weights across all four scenarios.  With batch_size=8 this yields
+# hist=2, ssp370=2, aaer=2, ghg=2 — balanced coverage so no scenario
+# dominates and the slope-match TCRE loss sees a wide CO2 range every batch
+# (hist low CO2 → ssp370/ghg high CO2).
 scenario_weights:
   - 1  # hist
-  - 2  # ssp370 (2× — high cumulative CO2 regime, worst over-response; only 86 years vs hist 165)
-  - 2  # aaer   (2× — only 9 members, CO2-aerosol collinearity fix)
-  - 2  # ghg    (2× — only 9 members, CO2-aerosol collinearity fix)
+  - 1  # ssp370
+  - 1  # aaer
+  - 1  # ghg
 
 # ── Per-experiment configs ────────────────────────────────────
 experiment_configs:
