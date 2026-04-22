@@ -10,11 +10,9 @@ LOG_DIR = Path("/mnt/lumi2/CESM2_emulator_from_lumi/logs")
 PATTERN = "diffusion_aero_*.out"
 
 METRICS = [
-    ("VAL/Skill",       "Val Skill"),
-    ("VAL/MSE",         "Val MSE"),
-    ("VAL/DISC",        "Val Disc"),
-    ("VAL/ANOM_ERROR",  "Val Anom Error"),
-    ("VAL/ANOM_SIGNAL", "Val Anom Signal"),
+    ("VAL/MSE",  "Val MSE"),
+    ("VAL/COND", "Val Cond"),
+    ("VAL/DISC", "Val Disc"),
 ]
 
 # Match lines like: {'VAL/MSE': np.float64(0.001), ...} {'Epoch': 177, ...}
@@ -64,27 +62,21 @@ def main():
         print("No data found.")
         return
 
-    # Filter out early epochs where ANOM_SIGNAL=0 (model not yet generating
-    # meaningful signal → Skill=1.0 artifact from division by near-zero)
-    all_records = {
-        e: m for e, m in all_records.items()
-        if m.get("VAL/ANOM_SIGNAL", 0.0) > 1e-6
-    }
     epochs = np.array(sorted(all_records.keys()))
     print(f"\nTotal unique epochs: {len(epochs)} (range {epochs[0]}–{epochs[-1]})")
 
-    # Identify best epoch by VAL/Skill
-    skills = np.array([all_records[e].get("VAL/Skill", np.nan) for e in epochs])
-    best_idx = int(np.nanargmax(skills))
+    # Identify best epoch by VAL/MSE (lower is better)
+    mses = np.array([all_records[e].get("VAL/MSE", np.nan) for e in epochs])
+    best_idx = int(np.nanargmin(mses))
     best_ep  = epochs[best_idx]
-    best_sk  = skills[best_idx]
-    print(f"Best VAL/Skill = {best_sk:.4f} at epoch {best_ep}")
+    best_mse = mses[best_idx]
+    print(f"Best VAL/MSE = {best_mse:.6f} at epoch {best_ep}")
 
     # Job restart boundaries
     restarts = sorted({info[1] for info in file_info[1:]})
 
     ncols = 2
-    nrows = (len(METRICS) + 1) // ncols + (len(METRICS) + 1) % ncols
+    nrows = (len(METRICS) + ncols - 1) // ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(13, 4 * nrows))
     axes = axes.flatten()
 
@@ -94,7 +86,6 @@ def main():
         ax.plot(epochs, vals, lw=1.2, color="steelblue", label=label)
         ax.axvline(best_ep, color="crimson", lw=1.0, linestyle="--", alpha=0.7,
                    label=f"Best (ep {best_ep})")
-        # Mark best point
         ax.scatter([best_ep], [all_records[best_ep].get(key, np.nan)],
                    color="crimson", s=40, zorder=5)
         for b in restarts:
@@ -104,24 +95,12 @@ def main():
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8)
 
-    # Skill is shown twice — add a zoomed-in view in the last panel
-    ax = axes[len(METRICS)]
-    ax.plot(epochs, skills, lw=1.2, color="steelblue")
-    ax.axhline(0, color="black", lw=0.6, linestyle="--", alpha=0.5)
-    ax.axvline(best_ep, color="crimson", lw=1.0, linestyle="--", alpha=0.7)
-    ax.scatter([best_ep], [best_sk], color="crimson", s=50, zorder=5,
-               label=f"Best {best_sk:.4f} @ ep {best_ep}")
-    ax.set_title("Val Skill — full view", fontsize=11)
-    ax.set_xlabel("Epoch")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    for ax in axes[len(METRICS) + 1:]:
+    for ax in axes[len(METRICS):]:
         ax.set_visible(False)
 
     fig.suptitle(
-        f"Training — per-channel-cfg  |  {len(epochs)} epochs  |  "
-        f"Best skill {best_sk:.4f} @ ep {best_ep}",
+        f"Training — slope-tcre  |  {len(epochs)} epochs  |  "
+        f"Best MSE {best_mse:.6f} @ ep {best_ep}",
         fontsize=13, fontweight="bold",
     )
     plt.tight_layout()

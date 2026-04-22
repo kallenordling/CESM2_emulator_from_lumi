@@ -148,12 +148,12 @@ class UNetTrainer:
         #   well it shrinks back toward the floor.
         self.val_loader    = None        # set externally in main_aero.py
         self.val_every     = 10          # evaluate held-out members every N epochs
-        self.best_val_skill = -float("inf")  # tracks best VAL/Skill for auto-save
+        self.best_val_mse = float("inf")  # tracks best VAL/MSE for auto-save (lower is better)
 
         self.cond_loss_scaling = 0.0  # always start silent
         self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
         self.cond_ramp_epochs   = 30  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
-        self.cond_max_scaling   = 0.4 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
+        self.cond_max_scaling   = 0.4 # fixed cap — higher values caused instability
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
         # Eliminates the expensive second out_null forward pass.
         self.cfg_drop_prob = getattr(self, "cfg_drop_prob", 0.1)
@@ -163,25 +163,17 @@ class UNetTrainer:
         # conditioning subsets: (co2, sul), (co2, null), (null, sul), (null, null).
         self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
         self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
-        # Per-channel CO2 conditioning loss: extra MSE loss on GHG batches that
-        # directly targets the CO2-only response (model(CO2, SUL=null) - model(null, null)).
-        # Forces the model to correctly attribute GHG warming to the CO2 channel,
-        # counteracting the CO2-aerosol collinearity in ssp370 that makes the model
-        # ignore CO2 and use SUL as a time proxy.
-        self.co2_cond_loss_scaling = getattr(self, "co2_cond_loss_scaling", 0.0)
         self._cached_sensitivity = 0.0  # last valid sensitivity value
 
-        # ── Adaptive co2_cond_loss scaling ────────────────────────────────────
-        # When adaptive_loss_scaling=True, co2_cond_loss_scaling is updated each
-        # sync step so that the CO2 conditioning loss contributes a fixed fraction
-        # (co2_target_fraction) of the MSE loss in expectation.  EMAs of the raw
-        # (unscaled) loss values are used; they are saved/restored with checkpoints.
+        # ── Adaptive loss scaling ────────────────────────────────────────────
+        # When adaptive_loss_scaling=True, cond/tcre loss scalings are updated
+        # each sync step so that each component contributes a fixed fraction of
+        # the MSE loss in expectation.  EMAs of the raw (unscaled) loss values
+        # are used; they are saved/restored with checkpoints.
         self._adaptive_loss_scaling = getattr(self, "adaptive_loss_scaling", False)
-        self._co2_target_fraction  = getattr(self, "co2_target_fraction",  0.10)
         self._cond_target_fraction = getattr(self, "cond_target_fraction", 0.30)
         self._tcre_target_fraction = getattr(self, "tcre_target_fraction", 0.05)
         self._ema_mse  = None   # EMA of mse_loss magnitude
-        self._ema_co2  = None   # EMA of unscaled co2_cond_loss magnitude
         self._ema_cond = None   # EMA of unscaled cond_loss magnitude
         self._ema_tcre = None   # EMA of unscaled tcre_loss magnitude
         self._ema_decay = 0.99  # ~100 sync-step half-life — slow, stable adjustments
@@ -333,8 +325,6 @@ class UNetTrainer:
 
     def train(self):
         import time
-        epoch_anom_signals = []
-        epoch_anom_errors = []
         for epoch in range(self.first_epoch, self.max_epochs):
             epoch_start = time.time()
             for step, batch_tuple in enumerate(self.train_loader.generate()):
@@ -356,7 +346,7 @@ class UNetTrainer:
                 ):
                     continue
 
-                loss, mse_loss, cond_loss, anom_signal, anom_error, sens, scen_disc, co2_cond_loss, tcre_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
+                loss, mse_loss, cond_loss, sens, scen_disc, tcre_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
 
                 if self.accelerator.sync_gradients:
                     self.global_step += 1
@@ -371,10 +361,7 @@ class UNetTrainer:
                     avg_loss        = self.accelerator.gather_for_metrics(loss).mean()
                     avg_mse_loss    = self.accelerator.gather_for_metrics(mse_loss).mean()
                     avg_cond_loss   = self.accelerator.gather_for_metrics(cond_loss).mean()
-                    avg_co2_cond_loss = self.accelerator.gather_for_metrics(co2_cond_loss).mean()
                     avg_tcre_loss   = self.accelerator.gather_for_metrics(tcre_loss).mean()
-                    avg_anom_error  = self.accelerator.gather_for_metrics(anom_error).mean()
-                    avg_anom_signal = self.accelerator.gather_for_metrics(anom_signal).mean()
                     avg_sens        = self.accelerator.gather_for_metrics(sens).mean()
                     avg_scen_disc   = self.accelerator.gather_for_metrics(scen_disc).mean()
 
@@ -382,15 +369,10 @@ class UNetTrainer:
                         "Training/Loss":  avg_loss.detach().item(),
                         "MSE LOSS":       avg_mse_loss.detach().item(),
                         "COND LOSS":      avg_cond_loss.detach().item(),
-                        "CO2 COND LOSS":  avg_co2_cond_loss.detach().item(),
                         "TCRE LOSS":      avg_tcre_loss.detach().item(),
-                        "ANOM ERROR":     avg_anom_error.detach().item(),
-                        "ANOM SIGNAL":    avg_anom_signal.detach().item(),
                         "SENS":           avg_sens.detach().item(),
-                        "ANOM SKILL":     (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),
                         "SCEN DISC":      avg_scen_disc.detach().item(),
                         "COND SCALE":     self.cond_loss_scaling,
-                        "CO2 COND SCALE": self.co2_cond_loss_scaling,
                         "TCRE SCALE":     self.tcre_loss_scaling,
                         "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
                     }
@@ -461,8 +443,6 @@ class UNetTrainer:
             pred_anomaly = pred_x0_cond - pred_x0_null
 
             cond_loss   = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
-            anom_signal = true_anomaly.abs().mean()
-            anom_error  = (pred_anomaly - true_anomaly).abs().mean()
 
             scen_disc = torch.zeros(1, device=self.device)
             if scenario_ids is not None:
@@ -482,11 +462,9 @@ class UNetTrainer:
                         scen_disc = torch.stack(pair_dists).mean()
         else:
             cond_loss   = torch.zeros(1, device=self.device)
-            anom_signal = torch.zeros(1, device=self.device)
-            anom_error  = torch.zeros(1, device=self.device)
             scen_disc   = torch.zeros(1, device=self.device)
 
-        return mse, cond_loss, anom_signal, anom_error, scen_disc
+        return mse, cond_loss, scen_disc
 
     def eval_held_out(self, epoch: int) -> None:
         """Evaluate EMA model on held-out members, log VAL/* metrics."""
@@ -495,7 +473,7 @@ class UNetTrainer:
 
         self.ema_model.ema_model.eval()
 
-        accum = {"mse": [], "cond": [], "signal": [], "error": [], "disc": []}
+        accum = {"mse": [], "cond": [], "disc": []}
 
         for batch_tuple in self.val_loader.generate():
             if len(batch_tuple) == 3:
@@ -504,34 +482,27 @@ class UNetTrainer:
                 batch, cond = batch_tuple
                 scenario_ids = None
 
-            mse, cond_l, sig, err, disc = self._compute_val_metrics(batch, cond, scenario_ids)
+            mse, cond_l, disc = self._compute_val_metrics(batch, cond, scenario_ids)
 
             accum["mse"].append(self.accelerator.gather_for_metrics(mse).mean().item())
             accum["cond"].append(self.accelerator.gather_for_metrics(cond_l).mean().item())
-            accum["signal"].append(self.accelerator.gather_for_metrics(sig).mean().item())
-            accum["error"].append(self.accelerator.gather_for_metrics(err).mean().item())
             accum["disc"].append(self.accelerator.gather_for_metrics(disc).mean().item())
 
         import numpy as _np
-        avg_sig   = _np.mean(accum["signal"])
-        avg_err   = _np.mean(accum["error"])
-        val_skill = float(1.0 - avg_err / (avg_sig + 1e-6))
+        val_mse = float(_np.mean(accum["mse"]))
 
         log_dict = {
-            "VAL/MSE":         _np.mean(accum["mse"]),
-            "VAL/Skill":       val_skill,
-            "VAL/DISC":        _np.mean(accum["disc"]),
-            "VAL/ANOM_ERROR":  avg_err,
-            "VAL/ANOM_SIGNAL": avg_sig,
+            "VAL/MSE":  val_mse,
+            "VAL/COND": _np.mean(accum["cond"]),
+            "VAL/DISC": _np.mean(accum["disc"]),
         }
         self.accelerator.log(log_dict, step=self.global_step)
         if self.accelerator.is_main_process:
             self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
 
         # ── Auto-save best checkpoint & trigger evaluation ────────────────
-        # Guard against degenerate epoch-0 skill=1.0 (avg_sig≈0 during warm-up)
-        if avg_sig > 1e-4 and val_skill > self.best_val_skill and self.accelerator.is_main_process:
-            self.best_val_skill = val_skill
+        if val_mse < self.best_val_mse and self.accelerator.is_main_process:
+            self.best_val_mse = val_mse
             if self.save_name is not None:
                 base = self.save_name.split(".pt")[0]
                 os.makedirs(self.save_dir, exist_ok=True)
@@ -540,27 +511,25 @@ class UNetTrainer:
                 )
                 torch.save(
                     {
-                        "EMA":                   self.ema_model.ema_model.state_dict(),
-                        "Unet":                  self.accelerator.unwrap_model(self.model).state_dict(),
-                        "Optimizer":             self.optimizer.state_dict(),
-                        "Global Step":           self.global_step,
-                        "cond_loss_scaling":     self.cond_loss_scaling,
-                        "co2_cond_loss_scaling": self.co2_cond_loss_scaling,
-                        "tcre_loss_scaling":     self.tcre_loss_scaling,
-                        "tcre_slope":            self.tcre_slope,
-                        "tcre_intercept":        self.tcre_intercept,
-                        "_ema_mse":              self._ema_mse,
-                        "_ema_co2":              self._ema_co2,
-                        "_ema_cond":             self._ema_cond,
-                        "_ema_tcre":             self._ema_tcre,
-                        "best_val_skill":        val_skill,
-                        "best_epoch":            epoch,
+                        "EMA":                self.ema_model.ema_model.state_dict(),
+                        "Unet":               self.accelerator.unwrap_model(self.model).state_dict(),
+                        "Optimizer":          self.optimizer.state_dict(),
+                        "Global Step":        self.global_step,
+                        "cond_loss_scaling":  self.cond_loss_scaling,
+                        "tcre_loss_scaling":  self.tcre_loss_scaling,
+                        "tcre_slope":         self.tcre_slope,
+                        "tcre_intercept":     self.tcre_intercept,
+                        "_ema_mse":           self._ema_mse,
+                        "_ema_cond":          self._ema_cond,
+                        "_ema_tcre":          self._ema_tcre,
+                        "best_val_mse":       val_mse,
+                        "best_epoch":         epoch,
                     },
                     best_path,
                     _use_new_zipfile_serialization=False,
                 )
                 self.accelerator.print(
-                    f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
+                    f"  [BEST] New best VAL/MSE={val_mse:.6f} at epoch {epoch} → {best_path}"
                 )
                 self._spawn_eval(best_path, epoch)
 
@@ -648,15 +617,12 @@ class UNetTrainer:
             self.accelerator.print(f"  [TCRE] WARNING: failed to load latest tcre_summary: {e}")
 
     def _update_loss_emas(self) -> None:
-        """Update exponential moving averages of unscaled mse, cond, co2_cond, tcre loss."""
+        """Update exponential moving averages of unscaled mse, cond, tcre loss."""
         d = self._ema_decay
         mse_val  = getattr(self, "_last_raw_mse",  0.0)
-        co2_val  = getattr(self, "_last_raw_co2",  0.0)
         cond_val = getattr(self, "_last_raw_cond", 0.0)
         tcre_val = getattr(self, "_last_raw_tcre", 0.0)
         self._ema_mse = mse_val if self._ema_mse is None else d * self._ema_mse + (1 - d) * mse_val
-        if co2_val > 1e-8:
-            self._ema_co2 = co2_val if self._ema_co2 is None else d * self._ema_co2 + (1 - d) * co2_val
         if cond_val > 1e-8:
             self._ema_cond = cond_val if self._ema_cond is None else d * self._ema_cond + (1 - d) * cond_val
         if tcre_val > 1e-8:
@@ -672,9 +638,8 @@ class UNetTrainer:
                scaling ramps linearly 0 → cond_max_scaling over cond_ramp_epochs,
                then holds at cond_max_scaling.
 
-        If adaptive_loss_scaling=True, co2_cond_loss_scaling is additionally
-        adjusted so that the CO2 conditioning loss stays at co2_target_fraction
-        of the MSE loss in expectation.
+        If adaptive_loss_scaling=True, cond and tcre scalings are additionally
+        adjusted so each contributes a fixed fraction of the MSE loss.
         """
         # ── Phase 1: warmup ───────────────────────────────────────────────────
         if epoch < self.cond_warmup_epochs:
@@ -686,16 +651,11 @@ class UNetTrainer:
         progress = min(ramp_epoch / self.cond_ramp_epochs, 1.0)  # clamp at 1.0 after ramp
         self.cond_loss_scaling = self.cond_max_scaling * progress
 
-        # ── Adaptive scalings (both cond and co2_cond) ───────────────────────
+        # ── Adaptive scalings ────────────────────────────────────────────────
         if not self._adaptive_loss_scaling:
             return
         if self._ema_mse is None:
             return
-
-        # co2_cond_loss: free range [0.001, 0.5]
-        if self._ema_co2 is not None and self._ema_co2 > 1e-8:
-            target = self._co2_target_fraction * self._ema_mse
-            self.co2_cond_loss_scaling = float(max(0.001, min(0.5, target / self._ema_co2)))
 
         # cond_loss: only adapt once ramped to max; bounded [0.1, cond_max_scaling]
         # to keep scenario separation intact and prevent the instability seen at >0.4
@@ -704,7 +664,7 @@ class UNetTrainer:
                 target = self._cond_target_fraction * self._ema_mse
                 self.cond_loss_scaling = float(max(0.1, min(self.cond_max_scaling, target / self._ema_cond)))
 
-        # tcre_loss: free range [0.001, 0.5] — same pattern as co2_cond_loss
+        # tcre_loss: free range [0.001, 0.5]
         if self._ema_tcre is not None and self._ema_tcre > 1e-8:
             target = self._tcre_target_fraction * self._ema_mse
             self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
@@ -934,20 +894,16 @@ class UNetTrainer:
                 # Gradients flow only through pred_x0_cond (null is no_grad).
                 pred_anomaly = pred_x0_cond - pred_x0_null.detach()
 
-                # ── CO2-only forward pass for hist + ssp370 + ghg ─────────────
+                # ── CO2-only forward pass for TCRE slope-match ────────────────
                 # For every scenario except aaer (idx 2), compute the model's
                 # CO2-only response (model with SUL nulled) minus the null output.
-                # This single forward pass feeds two regularizers:
-                #   (a) co2_cond_loss — spatial MSE vs true GHG anomaly (GHG subset only).
-                #       Counteracts CO2-aerosol collinearity from ssp370.
-                #   (b) tcre_loss    — global-mean linearity vs precomputed TCRE slope.
-                #       Penalizes the scenario-averaged ΔT from CO2 deviating from
-                #       the TCRE relation fit on GHG.
-                co2_cond_loss = torch.zeros(1, device=self.device)
-                tcre_loss     = torch.zeros(1, device=self.device)
+                # Feeds the TCRE slope-match regularizer: global-mean linearity
+                # vs precomputed TCRE slope penalizes scenario-averaged ΔT from
+                # CO2 deviating from the TCRE relation fit on GHG.
+                tcre_loss = torch.zeros(1, device=self.device)
                 want_co2only = (
-                    (self.co2_cond_loss_scaling > 0 or
-                     (self.tcre_loss_scaling > 0 and self.tcre_slope is not None))
+                    self.tcre_loss_scaling > 0
+                    and self.tcre_slope is not None
                     and scenario_ids is not None
                 )
                 if want_co2only:
@@ -963,57 +919,43 @@ class UNetTrainer:
                         # CO2-only response vs null (reuse already-computed pred_x0_null)
                         pred_co2_response = pred_x0_co2only - pred_x0_null[tcre_mask].detach()
 
-                        # (a) co2_cond_loss on GHG subset of this forward pass
-                        if self.co2_cond_loss_scaling > 0:
-                            # scenario_ids[tcre_mask] gives the IDs of rows we just
-                            # computed.  Select GHG (id=3) rows within it.
-                            ghg_within = scenario_ids[tcre_mask] == 3
-                            if ghg_within.sum() > 0:
-                                co2_cond_loss = calc_mse_loss(
-                                    pred_co2_response[ghg_within],
-                                    true_anomaly[tcre_mask][ghg_within],
-                                    self._ref_ds.lats,
-                                )
-
-                        # (b) tcre_loss: slope-match between the model's CO2-only
+                        # Slope-match between the model's CO2-only
                         # (co2_gmean, dT_gmean) regression slope across the batch
                         # and the precomputed TCRE slope, plus a light pointwise
                         # anchor on the intercept. A pure pointwise form lets a
                         # uniform ΔT offset hide a slope bias; matching the slope
                         # directly targets the over-response that the pointwise
                         # term was not pulling back strongly enough.
-                        if self.tcre_loss_scaling > 0 and self.tcre_slope is not None:
-                            lats = torch.as_tensor(
-                                self._ref_ds.lats.values,
-                                dtype=pred_co2_response.dtype,
-                                device=pred_co2_response.device,
-                            )
-                            w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-                            w = w / w.mean()                         # (H,)
-                            w_b = w.view(1, 1, 1, -1, 1)             # broadcast over B,C,T,W_lon
-                            # pred_co2_response: (B', C, T, H, W) → (B',)
-                            dT_gmean = (pred_co2_response * w_b).mean(dim=(1, 2, 3, 4))
-                            co2_in   = cond_map[tcre_mask][:, 0:1]   # (B', 1, T, H, W)
-                            co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))  # (B',)
+                        lats = torch.as_tensor(
+                            self._ref_ds.lats.values,
+                            dtype=pred_co2_response.dtype,
+                            device=pred_co2_response.device,
+                        )
+                        w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+                        w = w / w.mean()                         # (H,)
+                        w_b = w.view(1, 1, 1, -1, 1)             # broadcast over B,C,T,W_lon
+                        # pred_co2_response: (B', C, T, H, W) → (B',)
+                        dT_gmean = (pred_co2_response * w_b).mean(dim=(1, 2, 3, 4))
+                        co2_in   = cond_map[tcre_mask][:, 0:1]   # (B', 1, T, H, W)
+                        co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))  # (B',)
 
-                            # Slope of the per-sample (co2_gmean, dT_gmean) cloud
-                            # via OLS (closed form). Guarded when the batch CO2
-                            # range is too narrow to identify a slope.
-                            x_c = co2_gmean - co2_gmean.mean()
-                            y_c = dT_gmean  - dT_gmean.mean()
-                            xx  = (x_c * x_c).sum()
-                            if co2_gmean.numel() >= 3 and xx > 1e-6:
-                                slope_model = (x_c * y_c).sum() / xx
-                                slope_loss  = (slope_model - self.tcre_slope) ** 2
-                            else:
-                                slope_loss = torch.zeros((), device=pred_co2_response.device)
+                        # Slope via OLS (closed form). Guarded when the batch CO2
+                        # range is too narrow to identify a slope.
+                        x_c = co2_gmean - co2_gmean.mean()
+                        y_c = dT_gmean  - dT_gmean.mean()
+                        xx  = (x_c * x_c).sum()
+                        if co2_gmean.numel() >= 3 and xx > 1e-6:
+                            slope_model = (x_c * y_c).sum() / xx
+                            slope_loss  = (slope_model - self.tcre_slope) ** 2
+                        else:
+                            slope_loss = torch.zeros((), device=pred_co2_response.device)
 
-                            # Intercept anchor: pointwise deviation from the
-                            # precomputed line. Downweighted so slope dominates.
-                            target_dT   = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
-                            anchor_loss = ((dT_gmean - target_dT) ** 2).mean()
+                        # Intercept anchor: pointwise deviation from the
+                        # precomputed line. Downweighted so slope dominates.
+                        target_dT   = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
+                        anchor_loss = ((dT_gmean - target_dT) ** 2).mean()
 
-                            tcre_loss = slope_loss + 0.1 * anchor_loss
+                        tcre_loss = slope_loss + 0.1 * anchor_loss
 
                 del pred_x0_cond, pred_x0_null
 
@@ -1022,10 +964,6 @@ class UNetTrainer:
                 # No contrastive margin needed — this is a direct regression
                 # target: (cond_output - null_output) should equal the forced signal.
                 cond_loss = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
-
-                # ── Diagnostics ───────────────────────────────────────────────
-                anom_signal = true_anomaly.abs().mean().detach()
-                anom_error  = (pred_anomaly - true_anomaly).abs().mean().detach()
                 del true_anomaly, pred_anomaly
 
                 # ── Scenario discrimination metric ────────────────────────────
@@ -1063,34 +1001,26 @@ class UNetTrainer:
                 # cond_loss_scaling is active but this is a non-sync accumulation step —
                 # skip the null pass entirely.  Use cached sensitivity from last sync step.
                 cond_loss        = torch.zeros(1, device=self.device)
-                co2_cond_loss    = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
-                anom_error       = torch.zeros(1, device=self.device)
-                anom_signal      = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.tensor(self._cached_sensitivity, device=self.device)
                 scen_disc        = torch.zeros(1, device=self.device)
 
             else:
                 cond_loss        = torch.zeros(1, device=self.device)
-                co2_cond_loss    = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
-                anom_error       = torch.zeros(1, device=self.device)
-                anom_signal      = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.zeros(1, device=self.device)
                 scen_disc        = torch.zeros(1, device=self.device)
 
             # Cache raw unscaled loss values for adaptive scaling EMA (before multiply)
             self._last_raw_mse  = mse_loss.detach().item()
-            self._last_raw_co2  = co2_cond_loss.detach().item()
             self._last_raw_cond = cond_loss.detach().item()
             self._last_raw_tcre = tcre_loss.detach().item()
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = (
                 mse_loss
-                + cond_loss     * self.cond_loss_scaling
-                + co2_cond_loss * self.co2_cond_loss_scaling
-                + tcre_loss     * self.tcre_loss_scaling
+                + cond_loss * self.cond_loss_scaling
+                + tcre_loss * self.tcre_loss_scaling
             )
 
             # Scale the loss by cosine-weighted latitude
@@ -1102,10 +1032,9 @@ class UNetTrainer:
             self.optimizer.zero_grad()
         return (
             loss, mse_loss,
-            cond_loss     * self.cond_loss_scaling,
-            anom_signal, anom_error, cond_sensitivity, scen_disc,
-            co2_cond_loss * self.co2_cond_loss_scaling,
-            tcre_loss     * self.tcre_loss_scaling,
+            cond_loss * self.cond_loss_scaling,
+            cond_sensitivity, scen_disc,
+            tcre_loss * self.tcre_loss_scaling,
         )
 
     @torch.inference_mode()
@@ -1173,15 +1102,13 @@ class UNetTrainer:
                 "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
-                "cond_loss_scaling":     self.cond_loss_scaling,
-                "co2_cond_loss_scaling": self.co2_cond_loss_scaling,
-                "tcre_loss_scaling":     self.tcre_loss_scaling,
-                "tcre_slope":            self.tcre_slope,
-                "tcre_intercept":        self.tcre_intercept,
-                "_ema_mse":              self._ema_mse,
-                "_ema_co2":              self._ema_co2,
-                "_ema_cond":             self._ema_cond,
-                "_ema_tcre":             self._ema_tcre,
+                "cond_loss_scaling":  self.cond_loss_scaling,
+                "tcre_loss_scaling":  self.tcre_loss_scaling,
+                "tcre_slope":         self.tcre_slope,
+                "tcre_intercept":     self.tcre_intercept,
+                "_ema_mse":           self._ema_mse,
+                "_ema_cond":          self._ema_cond,
+                "_ema_tcre":          self._ema_tcre,
             }
 
             # If the directory doesn't exist already create it
@@ -1328,24 +1255,21 @@ class UNetTrainer:
         )
 
         # Restore conditioning scale so resume doesn't restart warmup from 0
-        self.cond_loss_scaling     = checkpoint.get("cond_loss_scaling", 0.0)
-        self.co2_cond_loss_scaling = checkpoint.get("co2_cond_loss_scaling", self.co2_cond_loss_scaling)
-        self.tcre_loss_scaling     = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
-        self.tcre_slope            = checkpoint.get("tcre_slope",     self.tcre_slope)
-        self.tcre_intercept        = checkpoint.get("tcre_intercept", self.tcre_intercept)
+        self.cond_loss_scaling = checkpoint.get("cond_loss_scaling", 0.0)
+        self.tcre_loss_scaling = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
+        self.tcre_slope        = checkpoint.get("tcre_slope",     self.tcre_slope)
+        self.tcre_intercept    = checkpoint.get("tcre_intercept", self.tcre_intercept)
         self._ema_mse  = checkpoint.get("_ema_mse",  None)
-        self._ema_co2  = checkpoint.get("_ema_co2",  None)
         self._ema_cond = checkpoint.get("_ema_cond", None)
         self._ema_tcre = checkpoint.get("_ema_tcre", None)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
-              f"co2_cond_loss_scaling={self.co2_cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
 
-        # Restore best val skill so a resumed run doesn't overwrite a better checkpoint
-        if "best_val_skill" in checkpoint:
-            self.best_val_skill = checkpoint["best_val_skill"]
-            print(f"[INFO] Restored best_val_skill={self.best_val_skill:.4f} (epoch {checkpoint.get('best_epoch', '?')})")
+        # Restore best val MSE so a resumed run doesn't overwrite a better checkpoint
+        if "best_val_mse" in checkpoint:
+            self.best_val_mse = checkpoint["best_val_mse"]
+            print(f"[INFO] Restored best_val_mse={self.best_val_mse:.6f} (epoch {checkpoint.get('best_epoch', '?')})")
 
         # Avoid ZeroDivisionError if dataloader not yet initialized
         steps_per_epoch_accum = self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
