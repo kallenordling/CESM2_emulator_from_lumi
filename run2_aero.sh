@@ -9,7 +9,6 @@
 #SBATCH --mem=128G
 #SBATCH --time=48:00:00
 #SBATCH --output=logs/%x_%j.out
-#SBATCH --requeue
 
 set -euo pipefail
 mkdir -p logs
