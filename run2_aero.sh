@@ -70,6 +70,33 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     cp ${PERSISTENT_CACHE}/* /tmp/miopen_${SLURM_JOB_ID}/ 2>/dev/null || true
 "
 
+# ── Stage training data to /tmp on each node ─────────────────────────────────
+# Lustre I/O is the dominant bottleneck (~11.5 min/epoch); local /tmp avoids
+# repeated random reads across the cluster filesystem.  We stage:
+#   training_data/TREFHT/{hist,ssp370,AAER,GHG}    (~3.5 GB)
+#   emissions_*_timefixed.nc                       (~270 MB)
+# Total ~3.8 GB per node — trivial for compute-node /tmp.  The local copy is
+# bind-mounted over the original /scratch path inside the container so no
+# config edits are needed.
+SRC_DATA_ROOT=/scratch/project_462001328/emulator_data
+LOCAL_DATA_ROOT=/tmp/emulator_data_${SLURM_JOB_ID}
+
+srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
+    set -euo pipefail
+    mkdir -p ${LOCAL_DATA_ROOT}/training_data/TREFHT
+    echo \"[stage] node \$(hostname): copying training data to /tmp …\"
+    t0=\$(date +%s)
+    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/hist    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
+    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/ssp370  ${LOCAL_DATA_ROOT}/training_data/TREFHT/
+    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/AAER    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
+    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/GHG     ${LOCAL_DATA_ROOT}/training_data/TREFHT/
+    cp ${SRC_DATA_ROOT}/emissions_hist_timefixed.nc        ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ssp370_timefixed.nc      ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_aero_only_timefixed.nc   ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
+    echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
+"
+
 # ── Launch eval watcher as a background SLURM job ────────────────────────────
 # Submits watch_eval_triggers.sh on the small partition so it can call sbatch
 # to dispatch eval jobs when the trainer writes trigger files.
@@ -88,7 +115,7 @@ echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED}"
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
-RUN_CMD="singularity exec ${SIF} bash -c '
+RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash -c '
     accelerate launch \
         --config_file=accelerate_config.yaml \
         --num_processes=${NUM_PROCESSES} \
@@ -104,6 +131,10 @@ srun bash -c "$RUN_CMD" || true
 # Copy from head node's /tmp back to Lustre so next job skips re-benchmarking.
 cp /tmp/miopen_${SLURM_JOB_ID}/*.ufdb.* "${PERSISTENT_CACHE}/" 2>/dev/null || true
 cp /tmp/miopen_${SLURM_JOB_ID}/*.db     "${PERSISTENT_CACHE}/" 2>/dev/null || true
+
+# ── Clean up staged training data from each node's /tmp ──────────────────────
+srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
+    bash -c "rm -rf ${LOCAL_DATA_ROOT} 2>/dev/null || true" || true
 
 # ── Cancel watcher when training finishes (walltime, crash, or clean exit) ───
 if [[ -n "${WATCHER_JOB}" ]]; then
