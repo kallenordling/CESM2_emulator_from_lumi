@@ -440,15 +440,11 @@ class UNetTrainer:
         mse = calc_mse_loss(model_output, target, self._ref_ds.lats)
 
         if self.cond_loss_scaling > 0 and self.climatology is not None:
-            null_cond   = torch.full_like(cond_map, -1.0)
-            null_output = ema_model(noisy_samples, timesteps, cond_map=null_cond)
-
             pred_x0_cond = self.get_original_sample(noisy_samples, model_output, timesteps)
-            pred_x0_null = self.get_original_sample(noisy_samples, null_output, timesteps)
 
             baseline     = self.climatology.to(device=clean_samples.device, dtype=clean_samples.dtype)
             true_anomaly = self._scenario_ensemble_mean(clean_samples - baseline, scenario_ids)
-            pred_anomaly = pred_x0_cond - pred_x0_null
+            pred_anomaly = pred_x0_cond - baseline
 
             cond_loss   = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
 
@@ -865,38 +861,29 @@ class UNetTrainer:
             # ── Primary denoising loss ────────────────────────────────────────
             mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
 
-            # Only compute the expensive null forward pass on the final accumulation
-            # step (when gradients are about to sync).  With gradient_accumulation_steps=4
-            # this cuts null-pass frequency from 4× to 1× per optimizer step — a 4×
-            # reduction in null-pass overhead — with no loss in gradient quality
-            # (gradients only backprop through the conditioned pass anyway).
+            # On the final accumulation step (when gradients sync), compute the
+            # absolute anomaly loss and TCRE slope-match.  No null forward pass
+            # is needed: pred_anomaly is defined as (pred_x0_cond − climatology),
+            # not (pred_x0_cond − pred_x0_null).  The CFG-decomposition formulation
+            # was structurally biased — pred_x0_null trained toward the data mean
+            # rather than the 1850–1900 baseline, which baked a ~+1°C warm offset
+            # into every cond_loss gradient.  Anchoring to climatology directly
+            # removes that bias source and saves one forward pass per sync step.
             if _sync_with_cond:
-                # ── Null forward pass (no gradients — metric + baseline only) ─
-                # Run the same noisy batch through the model with all-null
-                # conditioning (-1.0 = pre-industrial baseline under normalisation).
-                # No grad needed: this pass is reference-only; gradients flow only
-                # through the conditioned pass above.
-                with torch.no_grad():
-                    null_cond = torch.full_like(cond_map, NULL_COND_VALUE)
-                    null_output = self.model(noisy_samples, timesteps, cond_map=null_cond)
-                    del null_cond
-
-                # ── Decode both outputs to x0 space ──────────────────────────
+                # ── Decode conditioned output to x0 space ─────────────────────
                 pred_x0_cond = self.get_original_sample(noisy_samples, model_output, timesteps)
-                with torch.no_grad():
-                    pred_x0_null = self.get_original_sample(noisy_samples, null_output, timesteps)
-                del null_output  # no longer needed; not part of grad graph
 
-                # ── Sensitivity metric: how much does conditioning move output ─
-                # Measured in x0 space so it's in physical units (not noise space).
-                cond_sensitivity = (pred_x0_cond - pred_x0_null).abs().mean().detach()
+                # ── Predicted anomaly: cond x0 prediction − climatology ───────
+                # Absolute anomaly relative to the fixed 1850–1900 baseline,
+                # matches what eval_aero plots and what TCRE is computed on.
+                clim_b = self.climatology.to(
+                    device=pred_x0_cond.device, dtype=pred_x0_cond.dtype
+                )
+                pred_anomaly = pred_x0_cond - clim_b
+
+                # Sensitivity metric — magnitude of the absolute anomaly.
+                cond_sensitivity = pred_anomaly.abs().mean().detach()
                 self._cached_sensitivity = cond_sensitivity.item()
-
-                # ── Predicted anomaly: cond output - null output ──────────────
-                # The difference between the conditioned and null model x0
-                # predictions is exactly what the emission forcing added.
-                # Gradients flow only through pred_x0_cond (null is no_grad).
-                pred_anomaly = pred_x0_cond - pred_x0_null.detach()
 
                 # ── Per-scenario TCRE slope-match on pred_anomaly ─────────────
                 # For each scenario in {hist, ssp370, ghg}, fit the batch-OLS
@@ -954,12 +941,13 @@ class UNetTrainer:
                     if per_scen_terms:
                         tcre_loss = torch.stack(per_scen_terms).mean()
 
-                del pred_x0_cond, pred_x0_null
+                del pred_x0_cond
 
                 # ── Conditioning loss ─────────────────────────────────────────
-                # Directly penalise the gap between predicted and true anomaly.
-                # No contrastive margin needed — this is a direct regression
-                # target: (cond_output - null_output) should equal the forced signal.
+                # Directly penalise the gap between predicted absolute anomaly
+                # (pred_x0_cond − climatology) and the true anomaly
+                # (clean_samples − climatology).  Equivalent to x0-space MSE on
+                # the absolute prediction, with no broken CFG decomposition.
                 cond_loss = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
                 del true_anomaly, pred_anomaly
 
