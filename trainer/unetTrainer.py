@@ -672,10 +672,11 @@ class UNetTrainer:
                 target = self._cond_target_fraction * self._ema_mse
                 self.cond_loss_scaling = float(max(0.1, min(self.cond_max_scaling, target / self._ema_cond)))
 
-        # tcre_loss: free range [0.001, 0.5]
+        # tcre_loss: floored at 0.05 so the EMA controller can't choke off the
+        # regularizer (we observed it drifting to ~0.004 → "off" in practice).
         if self._ema_tcre is not None and self._ema_tcre > 1e-8:
             target = self._tcre_target_fraction * self._ema_mse
-            self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
+            self.tcre_loss_scaling = float(max(0.05, min(0.5, target / self._ema_tcre)))
 
     def _precompute_tcre_slope(self) -> None:
         """Fit per-scenario slopes+intercepts of gmean(ΔT_norm) vs gmean(cumCO2_norm).
@@ -711,8 +712,9 @@ class UNetTrainer:
         else:
             clim = None
 
+        # hist excluded: tiny ΔT and tiny ΔcumCO2 → noise-dominated regression.
         import numpy as _np
-        for name in ("hist", "ssp370", "ghg"):
+        for name in ("ssp370", "ghg"):
             if name not in scenario_names:
                 continue
             sid = scenario_names.index(name)
@@ -1254,6 +1256,15 @@ class UNetTrainer:
         self.tcre_loss_scaling = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
         self.tcre_slopes       = checkpoint.get("tcre_slopes",     self.tcre_slopes)
         self.tcre_intercepts   = checkpoint.get("tcre_intercepts", self.tcre_intercepts)
+        # Drop hist from loaded slopes (now excluded — see _precompute_tcre_slope).
+        try:
+            scenario_names = self.train_set.scenario_names
+            if "hist" in scenario_names:
+                hist_sid = scenario_names.index("hist")
+                self.tcre_slopes.pop(hist_sid, None)
+                self.tcre_intercepts.pop(hist_sid, None)
+        except Exception:
+            pass
         self._ema_mse  = checkpoint.get("_ema_mse",  None)
         self._ema_cond = checkpoint.get("_ema_cond", None)
         self._ema_tcre = checkpoint.get("_ema_tcre", None)
