@@ -35,6 +35,18 @@ scenario_weights:
   - 1  # aaer
   - 1  # ghg
 
+# ── Year-biased window sampling ──────────────────────────────
+# Bias window draws toward later (higher-emission) years to compensate for
+# four scenarios all sharing the low-emission 1850-2014 historical period,
+# which oversamples early years across the dataset.
+# Per-experiment weight: w(y) ∝ ((y - y_min)/(y_max - y_min) + floor)^year_bias
+#   year_bias = 0.0  → uniform (off)
+#   year_bias = 1.0  → linear ramp (early year ≈ floor× the late year)
+#   year_bias = 2.0  → quadratic (stronger late-year emphasis)
+# Floor keeps early years > 0 probability so they are still seen.
+year_bias: 1.5
+year_bias_floor: 0.1
+
 # ── Per-experiment configs ────────────────────────────────────
 experiment_configs:
 
