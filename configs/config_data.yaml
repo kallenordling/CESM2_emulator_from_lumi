@@ -31,7 +31,7 @@ steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stal
 # (hist low → ssp370/ghg high).
 scenario_weights:
   - 1  # hist
-  - 2  # ssp370
+  - 1  # ssp370
   - 1  # aaer
   - 1  # ghg
 
