@@ -263,6 +263,8 @@ class MultiExperimentDataLoader:
         steps_per_realization: Optional[int] = None,
         scenario_weights: Optional[list] = None,
         prefetch_batches: int = 2,
+        year_bias: float = 0.0,
+        year_bias_floor: float = 0.05,
         **dataloader_kwargs: Any,
     ):
         self.dataset = dataset
@@ -274,6 +276,14 @@ class MultiExperimentDataLoader:
         self.dataloader_kwargs = dataloader_kwargs
         self.n_exp = dataset.n_experiments
         self.prefetch_batches = prefetch_batches
+        self.year_bias = float(year_bias)
+        self.year_bias_floor = float(year_bias_floor)
+        if self.year_bias != 0.0:
+            print(
+                f"[MULTI] Year-biased sampling enabled  "
+                f"year_bias={self.year_bias}  floor={self.year_bias_floor} "
+                f"(weight ∝ ((year-y_min)/(y_max-y_min) + floor)^year_bias per experiment)"
+            )
 
         if mix_scenarios and scenario_weights is not None:
             # Convert weights to per-experiment integer sample counts that sum
@@ -497,12 +507,32 @@ class MultiExperimentDataLoader:
         )
 
     def _generate_mixed_uniform(self, device, to_device: bool = True):
-        """Uniform-random mixed batches, respecting per-experiment sample counts."""
+        """Uniform-random mixed batches, respecting per-experiment sample counts.
+
+        When ``self.year_bias > 0`` windows are drawn (with replacement) using
+        per-window probabilities ∝ ((year - y_min)/(y_max - y_min) + floor)^year_bias
+        computed independently for each experiment.  This down-weights
+        early-year (low-emission) windows that get oversampled across multiple
+        scenarios that all cover 1850–2014.
+        """
         offsets = self.dataset._index._offsets
         index_pools: list[np.ndarray] = []
         for exp_idx in range(self.n_exp):
             flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
-            index_pools.append(np.random.permutation(flat_idx))
+            n_win = len(flat_idx)
+            if self.year_bias != 0.0 and n_win > 0:
+                ds = self.dataset.datasets[exp_idx]
+                years = ds._time_values[:n_win].astype(np.float64)
+                y_min, y_max = float(years.min()), float(years.max())
+                span = max(y_max - y_min, 1.0)
+                w = ((years - y_min) / span + self.year_bias_floor) ** self.year_bias
+                w = w / w.sum()
+                # Draw enough samples up front for the whole epoch (with replacement)
+                n_draw = max(n_win, self.per_exp_list[exp_idx])
+                local = np.random.choice(n_win, size=n_draw, replace=True, p=w)
+                index_pools.append(flat_idx[local])
+            else:
+                index_pools.append(np.random.permutation(flat_idx))
 
         n_batches = min(
             len(pool) // self.per_exp_list[i]
@@ -640,6 +670,8 @@ def build_multi_experiment_loader(
     steps_per_realization: Optional[int] = None,
     scenario_weights: Optional[list] = None,
     prefetch_batches: int = 2,
+    year_bias: float = 0.0,
+    year_bias_floor: float = 0.05,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
     """Convenience factory: build datasets from a list of config dicts.
@@ -744,4 +776,6 @@ def build_multi_experiment_loader(
         steps_per_realization=steps_per_realization,
         scenario_weights=scenario_weights,
         prefetch_batches=prefetch_batches,
+        year_bias=year_bias,
+        year_bias_floor=year_bias_floor,
     )
