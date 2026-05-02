@@ -668,11 +668,11 @@ class UNetTrainer:
                 target = self._cond_target_fraction * self._ema_mse
                 self.cond_loss_scaling = float(max(0.1, min(self.cond_max_scaling, target / self._ema_cond)))
 
-        # tcre_loss: floored at 0.05 so the EMA controller can't choke off the
-        # regularizer (we observed it drifting to ~0.004 → "off" in practice).
+        # tcre_loss: floored at 0.20 (raised from 0.05 after run_slope-tcre ep466
+        # plateaued with slopes 50–100% too steep; floor 0.05 was out-competed by cond/MSE).
         if self._ema_tcre is not None and self._ema_tcre > 1e-8:
             target = self._tcre_target_fraction * self._ema_mse
-            self.tcre_loss_scaling = float(max(0.05, min(0.5, target / self._ema_tcre)))
+            self.tcre_loss_scaling = float(max(0.20, min(0.5, target / self._ema_tcre)))
 
     def _precompute_tcre_slope(self) -> None:
         """Fit per-scenario slopes+intercepts of gmean(ΔT_norm) vs gmean(cumCO2_norm).
