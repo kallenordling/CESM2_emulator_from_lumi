@@ -39,7 +39,10 @@ scenario_weights:
 # Bias window draws toward later (higher-emission) years to compensate for
 # four scenarios all sharing the low-emission 1850-2014 historical period,
 # which oversamples early years across the dataset.
-# Per-experiment weight: w(y) ∝ ((y - y_min)/(y_max - y_min) + floor)^year_bias
+# Global-axis weight: w(y) ∝ ((y - y_min)/(y_max - y_min) + floor)^year_bias
+# where y_min/y_max span ALL experiments (e.g. 1850-2100), so hist 2014 and
+# ssp370 2015 receive nearly identical weight — no sampling discontinuity at
+# the hist→ssp boundary.
 #   year_bias = 0.0  → uniform (off)
 #   year_bias = 1.0  → linear ramp (early year ≈ floor× the late year)
 #   year_bias = 2.0  → quadratic (stronger late-year emphasis)
