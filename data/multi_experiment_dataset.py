@@ -279,10 +279,22 @@ class MultiExperimentDataLoader:
         self.year_bias = float(year_bias)
         self.year_bias_floor = float(year_bias_floor)
         if self.year_bias != 0.0:
+            global_min = float("inf")
+            global_max = float("-inf")
+            for exp_idx in range(self.n_exp):
+                n_win = len(self.dataset._index.flat_indices_for_experiment(exp_idx))
+                if n_win == 0:
+                    continue
+                years = self.dataset.datasets[exp_idx]._time_values[:n_win].astype(np.float64)
+                global_min = min(global_min, float(years.min()))
+                global_max = max(global_max, float(years.max()))
+            self._global_y_min = global_min
+            self._global_y_max = global_max
             print(
                 f"[MULTI] Year-biased sampling enabled  "
                 f"year_bias={self.year_bias}  floor={self.year_bias_floor} "
-                f"(weight ∝ ((year-y_min)/(y_max-y_min) + floor)^year_bias per experiment)"
+                f"(weight ∝ ((year-{global_min:.0f})/({global_max:.0f}-{global_min:.0f}) "
+                f"+ floor)^year_bias, global axis across experiments)"
             )
 
         if mix_scenarios and scenario_weights is not None:
@@ -511,9 +523,9 @@ class MultiExperimentDataLoader:
 
         When ``self.year_bias > 0`` windows are drawn (with replacement) using
         per-window probabilities ∝ ((year - y_min)/(y_max - y_min) + floor)^year_bias
-        computed independently for each experiment.  This down-weights
-        early-year (low-emission) windows that get oversampled across multiple
-        scenarios that all cover 1850–2014.
+        with y_min/y_max taken from the *global* year range across all
+        experiments — so a year close to a scenario boundary (e.g. hist 2014
+        vs ssp370 2015) gets nearly identical weight in either experiment.
         """
         offsets = self.dataset._index._offsets
         index_pools: list[np.ndarray] = []
@@ -523,9 +535,8 @@ class MultiExperimentDataLoader:
             if self.year_bias != 0.0 and n_win > 0:
                 ds = self.dataset.datasets[exp_idx]
                 years = ds._time_values[:n_win].astype(np.float64)
-                y_min, y_max = float(years.min()), float(years.max())
-                span = max(y_max - y_min, 1.0)
-                w = ((years - y_min) / span + self.year_bias_floor) ** self.year_bias
+                span = max(self._global_y_max - self._global_y_min, 1.0)
+                w = ((years - self._global_y_min) / span + self.year_bias_floor) ** self.year_bias
                 w = w / w.sum()
                 # Draw enough samples up front for the whole epoch (with replacement)
                 n_draw = max(n_win, self.per_exp_list[exp_idx])
