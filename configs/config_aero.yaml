@@ -48,9 +48,9 @@ trainer:
     load_path: "newest"        # "0" = train from scratch, "newest" = auto-load latest checkpoint, or explicit path
     lr: 0.00005
     sample_steps: 250
-    cfg_drop_prob: 0.1
-    cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
-    cfg_sul_drop_prob: 0.3      # 3× SUL dropout → more CO2-only training batches
+    cfg_drop_prob: 0.0
+    cfg_co2_drop_prob: 0.0      # disabled — CFG dropout removed
+    cfg_sul_drop_prob: 0.0      # disabled — CFG dropout removed
     adaptive_loss_scaling: true  # auto-tune cond/tcre scalings to fixed fractions of MSE loss
     cond_target_fraction: 0.30   # general conditioning loss target = 30% of MSE loss (bounded [0.1, 0.4])
     # ── TCRE regularization (physics prior) ──────────────────────────────
