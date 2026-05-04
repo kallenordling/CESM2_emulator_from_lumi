@@ -67,7 +67,7 @@ experiment_configs:
   - scenario_name: hist
     time_dim: time
     data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
-    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_timefixed.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -94,7 +94,7 @@ experiment_configs:
   - scenario_name: ssp370
     time_dim: time
     data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
-    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -121,7 +121,7 @@ experiment_configs:
   - scenario_name: aaer
     time_dim: time
     data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
-    cond_file: /scratch/project_462001328/emulator_data/emissions_aero_only_timefixed.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc
     realizations:
       - "001"
       - "002"
@@ -156,21 +156,21 @@ val_experiment_configs:
   - scenario_name: hist
     time_dim: time
     data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
-    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_timefixed.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: ssp370
     time_dim: time
     data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
-    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: aaer
     time_dim: time
     data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
-    cond_file: /scratch/project_462001328/emulator_data/emissions_aero_only_timefixed.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc
     realizations:
       - "010"
 
