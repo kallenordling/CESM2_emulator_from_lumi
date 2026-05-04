@@ -47,7 +47,7 @@ scenario_weights:
 #   year_bias = 1.0  → linear ramp (early year ≈ floor× the late year)
 #   year_bias = 2.0  → quadratic (stronger late-year emphasis)
 # Floor keeps early years > 0 probability so they are still seen.
-year_bias: 1.5
+year_bias: 0.0
 year_bias_floor: 0.1
 
 # ── Per-experiment configs ────────────────────────────────────
