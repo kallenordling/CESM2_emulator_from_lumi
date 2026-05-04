@@ -265,6 +265,7 @@ class MultiExperimentDataLoader:
         prefetch_batches: int = 2,
         year_bias: float = 0.0,
         year_bias_floor: float = 0.05,
+        bsp_depth: int = 0,
         **dataloader_kwargs: Any,
     ):
         self.dataset = dataset
@@ -278,6 +279,7 @@ class MultiExperimentDataLoader:
         self.prefetch_batches = prefetch_batches
         self.year_bias = float(year_bias)
         self.year_bias_floor = float(year_bias_floor)
+        self.bsp_depth = int(bsp_depth)
         if self.year_bias != 0.0:
             global_min = float("inf")
             global_max = float("-inf")
@@ -295,6 +297,46 @@ class MultiExperimentDataLoader:
                 f"year_bias={self.year_bias}  floor={self.year_bias_floor} "
                 f"(weight ∝ ((year-{global_min:.0f})/({global_max:.0f}-{global_min:.0f}) "
                 f"+ floor)^year_bias, global axis across experiments)"
+            )
+
+        if self.bsp_depth > 0:
+            n_buckets = 1 << self.bsp_depth
+            global_min = float("inf")
+            global_max = float("-inf")
+            for exp_idx in range(self.n_exp):
+                n_win = len(self.dataset._index.flat_indices_for_experiment(exp_idx))
+                if n_win == 0:
+                    continue
+                years = self.dataset.datasets[exp_idx]._time_values[:n_win].astype(np.float64)
+                global_min = min(global_min, float(years.min()))
+                global_max = max(global_max, float(years.max()))
+            self._bsp_y_min = global_min
+            self._bsp_y_max = global_max
+            span = max(global_max - global_min, 1.0)
+            # Per-experiment list of bucket arrays (each is a flat-index array).
+            self._bsp_buckets: list[list[np.ndarray]] = []
+            bucket_summary: list[str] = []
+            for exp_idx in range(self.n_exp):
+                flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
+                n_win = len(flat_idx)
+                if n_win == 0:
+                    self._bsp_buckets.append([])
+                    continue
+                years = self.dataset.datasets[exp_idx]._time_values[:n_win].astype(np.float64)
+                bidx = np.floor((years - global_min) / span * n_buckets).astype(int)
+                bidx = np.clip(bidx, 0, n_buckets - 1)
+                buckets: list[np.ndarray] = []
+                for b in range(n_buckets):
+                    sel = flat_idx[bidx == b]
+                    if len(sel) > 0:
+                        buckets.append(sel)
+                self._bsp_buckets.append(buckets)
+                name = self.dataset.scenario_names[exp_idx] if hasattr(self.dataset, "scenario_names") else f"exp{exp_idx}"
+                bucket_summary.append(f"{name}={len(buckets)}/{n_buckets}")
+            print(
+                f"[MULTI] BSP sampling enabled  bsp_depth={self.bsp_depth} "
+                f"({n_buckets} buckets over {global_min:.0f}-{global_max:.0f}); "
+                f"non-empty per exp: {', '.join(bucket_summary)}"
             )
 
         if mix_scenarios and scenario_weights is not None:
@@ -436,7 +478,9 @@ class MultiExperimentDataLoader:
 
     def _generate_mixed_cpu(self):
         """Like _generate_mixed but returns CPU tensors (for prefetch thread)."""
-        if self.stratified:
+        if self.bsp_depth > 0:
+            yield from self._generate_mixed_bsp(device=None, to_device=False)
+        elif self.stratified:
             yield from self._generate_mixed_stratified(device=None, to_device=False)
         else:
             yield from self._generate_mixed_uniform(device=None, to_device=False)
@@ -462,7 +506,9 @@ class MultiExperimentDataLoader:
         """
         device = self.accelerator.device
 
-        if self.stratified:
+        if self.bsp_depth > 0:
+            yield from self._generate_mixed_bsp(device)
+        elif self.stratified:
             yield from self._generate_mixed_stratified(device)
         else:
             yield from self._generate_mixed_uniform(device)
@@ -544,6 +590,70 @@ class MultiExperimentDataLoader:
                 index_pools.append(flat_idx[local])
             else:
                 index_pools.append(np.random.permutation(flat_idx))
+
+        n_batches = min(
+            len(pool) // self.per_exp_list[i]
+            for i, pool in enumerate(index_pools)
+            if self.per_exp_list[i] > 0
+        )
+        if self.steps_per_realization is not None:
+            n_batches = min(n_batches, self.steps_per_realization)
+        if n_batches == 0:
+            return
+
+        for b in range(n_batches):
+            window_indices_per_exp = [
+                pool[b * self.per_exp_list[i] : (b + 1) * self.per_exp_list[i]]
+                - offsets[i]
+                for i, pool in enumerate(index_pools)
+            ]
+            yield self._vectorized_fetch(window_indices_per_exp, device, to_device=to_device)
+
+    def _generate_mixed_bsp(self, device, to_device: bool = True):
+        """BSP-stratified epoch pool.
+
+        Per experiment: round-robin interleave its non-empty year buckets
+        so every n_buckets consecutive samples cover all buckets once
+        (with replacement within bucket when needed). Slicing per_exp[i]
+        consecutive entries per batch then gives each batch a balanced
+        spread across the experiment's year range, even when the bucket
+        is small (e.g. 1850-1900 for hist).
+        """
+        offsets = self.dataset._index._offsets
+        index_pools: list[np.ndarray] = []
+
+        for exp_idx in range(self.n_exp):
+            buckets = self._bsp_buckets[exp_idx]
+            per_exp = self.per_exp_list[exp_idx]
+            if per_exp == 0 or len(buckets) == 0:
+                index_pools.append(np.empty(0, dtype=np.int64))
+                continue
+
+            n_b = len(buckets)
+            # Aim to consume each bucket at most once before reshuffling.
+            # rounds = ceil(largest_bucket / 1) but capped to keep epochs
+            # comparable to uniform (~mean bucket size per round).
+            largest = max(len(b) for b in buckets)
+            # One "round" = one draw per bucket. After n_b rounds, each batch
+            # of size per_exp has cycled through all buckets at least once.
+            rounds = max(largest, per_exp * 4)
+            shuffled: list[np.ndarray] = []
+            for b in buckets:
+                if len(b) >= rounds:
+                    shuffled.append(np.random.permutation(b)[:rounds])
+                else:
+                    # Cycle with reshuffle to avoid identical repeats.
+                    parts = []
+                    needed = rounds
+                    while needed > 0:
+                        take = min(len(b), needed)
+                        parts.append(np.random.permutation(b)[:take])
+                        needed -= take
+                    shuffled.append(np.concatenate(parts))
+            # Interleave: pool[k*n_b + j] = shuffled[j][k]
+            stacked = np.stack(shuffled, axis=1)  # [rounds, n_b]
+            pool = stacked.reshape(-1)             # [rounds * n_b]
+            index_pools.append(pool)
 
         n_batches = min(
             len(pool) // self.per_exp_list[i]
@@ -683,6 +793,7 @@ def build_multi_experiment_loader(
     prefetch_batches: int = 2,
     year_bias: float = 0.0,
     year_bias_floor: float = 0.05,
+    bsp_depth: int = 0,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
     """Convenience factory: build datasets from a list of config dicts.
@@ -789,4 +900,5 @@ def build_multi_experiment_loader(
         prefetch_batches=prefetch_batches,
         year_bias=year_bias,
         year_bias_floor=year_bias_floor,
+        bsp_depth=bsp_depth,
     )

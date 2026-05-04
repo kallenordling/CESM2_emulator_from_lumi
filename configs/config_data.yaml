@@ -50,6 +50,17 @@ scenario_weights:
 year_bias: 0.0
 year_bias_floor: 0.1
 
+# ── BSP (binary-space-partition) period sampler ───────────────
+# When bsp_depth > 0, each experiment's window pool is split into
+# 2^bsp_depth equal-width year buckets and the epoch's index pool is
+# round-robin-interleaved so every (n_buckets) consecutive samples
+# cover all non-empty buckets. Guarantees that hist/ghg/aaer regularly
+# see early-period (1850-1950) windows even when those buckets are
+# small. Empty buckets per experiment (e.g. ssp* < 2015) are skipped.
+#   bsp_depth = 0  → disabled
+#   bsp_depth = 3  → 8 buckets per experiment (~31-yr each over 1850-2100)
+bsp_depth: 0
+
 # ── Per-experiment configs ────────────────────────────────────
 experiment_configs:
 
