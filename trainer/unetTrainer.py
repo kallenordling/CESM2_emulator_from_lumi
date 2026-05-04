@@ -189,6 +189,26 @@ class UNetTrainer:
         self.tcre_loss_scaling = getattr(self, "tcre_loss_scaling", 0.0)
         self.tcre_slopes     = {}  # {scenario_id: float}; filled by _precompute_tcre_slope()
         self.tcre_intercepts = {}
+
+        # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
+        # Three learnable scalars enforce a global-mean linear energy budget:
+        #   F_ghg  = α_ghg  · gmean(cumCO2_norm)   (positive forcing)
+        #   F_aero = α_aero · gmean(SUL_norm)      (negative forcing in nature)
+        #   λ      = feedback parameter (W/m²/K, expected negative)
+        # Loss is the squared residual (F_ghg + F_aero + λ·gmean(ΔT))² averaged
+        # over the batch.  Inits chosen so the implied physics is roughly right
+        # at start (CO2 warms, SUL cools, λ restores).  Registered on the UNet
+        # so DDP syncs gradients and they're saved in the model state_dict.
+        self.ebm_loss_scaling = getattr(self, "ebm_loss_scaling", 0.0)
+        self._ebm_alpha_ghg  = torch.nn.Parameter(torch.tensor(1.0))
+        self._ebm_alpha_aero = torch.nn.Parameter(torch.tensor(-1.0))
+        self._ebm_lambda     = torch.nn.Parameter(torch.tensor(-1.0))
+        self.model.register_parameter("ebm_alpha_ghg",  self._ebm_alpha_ghg)
+        self.model.register_parameter("ebm_alpha_aero", self._ebm_alpha_aero)
+        self.model.register_parameter("ebm_lambda",     self._ebm_lambda)
+        self._ebm_target_fraction = getattr(self, "ebm_target_fraction", 0.05)
+        self._ema_ebm = None
+
         self.scheduler.set_timesteps(self.sample_steps)
 
         # Keep track of our exponential moving average weights
@@ -349,7 +369,7 @@ class UNetTrainer:
                 ):
                     continue
 
-                loss, mse_loss, cond_loss, sens, scen_disc, tcre_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
+                loss, mse_loss, cond_loss, sens, scen_disc, tcre_loss, ebm_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
 
                 if self.accelerator.sync_gradients:
                     self.global_step += 1
@@ -365,6 +385,7 @@ class UNetTrainer:
                     avg_mse_loss    = self.accelerator.gather_for_metrics(mse_loss).mean()
                     avg_cond_loss   = self.accelerator.gather_for_metrics(cond_loss).mean()
                     avg_tcre_loss   = self.accelerator.gather_for_metrics(tcre_loss).mean()
+                    avg_ebm_loss    = self.accelerator.gather_for_metrics(ebm_loss).mean()
                     avg_sens        = self.accelerator.gather_for_metrics(sens).mean()
                     avg_scen_disc   = self.accelerator.gather_for_metrics(scen_disc).mean()
 
@@ -373,10 +394,15 @@ class UNetTrainer:
                         "MSE LOSS":       avg_mse_loss.detach().item(),
                         "COND LOSS":      avg_cond_loss.detach().item(),
                         "TCRE LOSS":      avg_tcre_loss.detach().item(),
+                        "EBM LOSS":       avg_ebm_loss.detach().item(),
                         "SENS":           avg_sens.detach().item(),
                         "SCEN DISC":      avg_scen_disc.detach().item(),
                         "COND SCALE":     self.cond_loss_scaling,
                         "TCRE SCALE":     self.tcre_loss_scaling,
+                        "EBM SCALE":      self.ebm_loss_scaling,
+                        "EBM/alpha_ghg":  float(self._ebm_alpha_ghg.detach().item()),
+                        "EBM/alpha_aero": float(self._ebm_alpha_aero.detach().item()),
+                        "EBM/lambda":     float(self._ebm_lambda.detach().item()),
                     }
                     # Per-scenario TCRE target slopes (static once precomputed)
                     if self.tcre_slopes:
@@ -526,6 +552,8 @@ class UNetTrainer:
                         "_ema_mse":           self._ema_mse,
                         "_ema_cond":          self._ema_cond,
                         "_ema_tcre":          self._ema_tcre,
+                        "_ema_ebm":           self._ema_ebm,
+                        "ebm_loss_scaling":   self.ebm_loss_scaling,
                         "best_val_mse":       val_mse,
                         "best_epoch":         epoch,
                     },
@@ -621,16 +649,19 @@ class UNetTrainer:
             self.accelerator.print(f"  [TCRE] WARNING: failed to load latest tcre_summary: {e}")
 
     def _update_loss_emas(self) -> None:
-        """Update exponential moving averages of unscaled mse, cond, tcre loss."""
+        """Update exponential moving averages of unscaled mse, cond, tcre, ebm loss."""
         d = self._ema_decay
         mse_val  = getattr(self, "_last_raw_mse",  0.0)
         cond_val = getattr(self, "_last_raw_cond", 0.0)
         tcre_val = getattr(self, "_last_raw_tcre", 0.0)
+        ebm_val  = getattr(self, "_last_raw_ebm",  0.0)
         self._ema_mse = mse_val if self._ema_mse is None else d * self._ema_mse + (1 - d) * mse_val
         if cond_val > 1e-8:
             self._ema_cond = cond_val if self._ema_cond is None else d * self._ema_cond + (1 - d) * cond_val
         if tcre_val > 1e-8:
             self._ema_tcre = tcre_val if self._ema_tcre is None else d * self._ema_tcre + (1 - d) * tcre_val
+        if ebm_val > 1e-8:
+            self._ema_ebm = ebm_val if self._ema_ebm is None else d * self._ema_ebm + (1 - d) * ebm_val
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
@@ -672,6 +703,11 @@ class UNetTrainer:
         if self._ema_tcre is not None and self._ema_tcre > 1e-8:
             target = self._tcre_target_fraction * self._ema_mse
             self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
+
+        # ebm_loss: free range [0.001, 0.5] (only when explicitly enabled)
+        if self.ebm_loss_scaling > 0 and self._ema_ebm is not None and self._ema_ebm > 1e-8:
+            target = self._ebm_target_fraction * self._ema_mse
+            self.ebm_loss_scaling = float(max(0.001, min(0.5, target / self._ema_ebm)))
 
     def _precompute_tcre_slope(self) -> None:
         """Fit per-scenario slopes+intercepts of gmean(ΔT_norm) vs gmean(cumCO2_norm).
@@ -883,6 +919,23 @@ class UNetTrainer:
                 cond_sensitivity = pred_anomaly.abs().mean().detach()
                 self._cached_sensitivity = cond_sensitivity.item()
 
+                # ── Cosine-latitude weights + per-sample global means ─────────
+                # Used by both the TCRE slope-match and the energy-balance loss.
+                lats = torch.as_tensor(
+                    self._ref_ds.lats.values,
+                    dtype=pred_anomaly.dtype,
+                    device=pred_anomaly.device,
+                )
+                w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+                w = w / w.mean()                        # (H,)
+                w_b = w.view(1, 1, 1, -1, 1)            # broadcast (B,C,T,H,W)
+
+                dT_gmean  = (pred_anomaly * w_b).mean(dim=(1, 2, 3, 4))
+                co2_in    = cond_map[:, 0:1]            # (B, 1, T, H, W)
+                sul_in    = cond_map[:, 1:2]            # (B, 1, T, H, W)
+                co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))
+                sul_gmean = (sul_in * w_b).mean(dim=(1, 2, 3, 4))
+
                 # ── Per-scenario TCRE slope-match on pred_anomaly ─────────────
                 # For each scenario in {hist, ssp370, ghg}, fit the batch-OLS
                 # slope of gmean(pred_anomaly) vs gmean(cumCO2) across the rows
@@ -898,20 +951,6 @@ class UNetTrainer:
                     and scenario_ids is not None
                 )
                 if want_tcre:
-                    lats = torch.as_tensor(
-                        self._ref_ds.lats.values,
-                        dtype=pred_anomaly.dtype,
-                        device=pred_anomaly.device,
-                    )
-                    w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-                    w = w / w.mean()                        # (H,)
-                    w_b = w.view(1, 1, 1, -1, 1)            # broadcast (B,C,T,H,W)
-
-                    # Per-sample global means (B,)
-                    dT_gmean  = (pred_anomaly * w_b).mean(dim=(1, 2, 3, 4))
-                    co2_in    = cond_map[:, 0:1]            # (B, 1, T, H, W)
-                    co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))
-
                     per_scen_terms = []
                     for sid, slope_ref in self.tcre_slopes.items():
                         sid_mask = scenario_ids == sid
@@ -938,6 +977,19 @@ class UNetTrainer:
 
                     if per_scen_terms:
                         tcre_loss = torch.stack(per_scen_terms).mean()
+
+                # ── Energy-balance constraint  F_ghg + F_aero + λ·ΔT ≈ 0 ──────
+                # Per-sample squared residual of the linear global-mean energy
+                # budget.  Forces (α_ghg, α_aero, λ) to be jointly consistent
+                # with the model's predicted ΔT, tying the aerosol channel to
+                # warming alongside CO2 — extending the per-scenario TCRE prior
+                # with a physics-informed SUL term.
+                ebm_loss = torch.zeros(1, device=self.device)
+                if self.ebm_loss_scaling > 0:
+                    F_ghg    = self._ebm_alpha_ghg  * co2_gmean
+                    F_aero   = self._ebm_alpha_aero * sul_gmean
+                    residual = F_ghg + F_aero + self._ebm_lambda * dT_gmean
+                    ebm_loss = (residual ** 2).mean().unsqueeze(0)
 
                 del pred_x0_cond
 
@@ -985,12 +1037,14 @@ class UNetTrainer:
                 # skip the null pass entirely.  Use cached sensitivity from last sync step.
                 cond_loss        = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
+                ebm_loss         = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.tensor(self._cached_sensitivity, device=self.device)
                 scen_disc        = torch.zeros(1, device=self.device)
 
             else:
                 cond_loss        = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
+                ebm_loss         = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.zeros(1, device=self.device)
                 scen_disc        = torch.zeros(1, device=self.device)
 
@@ -998,12 +1052,14 @@ class UNetTrainer:
             self._last_raw_mse  = mse_loss.detach().item()
             self._last_raw_cond = cond_loss.detach().item()
             self._last_raw_tcre = tcre_loss.detach().item()
+            self._last_raw_ebm  = ebm_loss.detach().item()
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = (
                 mse_loss
                 + cond_loss * self.cond_loss_scaling
                 + tcre_loss * self.tcre_loss_scaling
+                + ebm_loss  * self.ebm_loss_scaling
             )
 
             # Scale the loss by cosine-weighted latitude
@@ -1018,6 +1074,7 @@ class UNetTrainer:
             cond_loss * self.cond_loss_scaling,
             cond_sensitivity, scen_disc,
             tcre_loss * self.tcre_loss_scaling,
+            ebm_loss  * self.ebm_loss_scaling,
         )
 
     @torch.inference_mode()
@@ -1092,6 +1149,8 @@ class UNetTrainer:
                 "_ema_mse":           self._ema_mse,
                 "_ema_cond":          self._ema_cond,
                 "_ema_tcre":          self._ema_tcre,
+                "_ema_ebm":           self._ema_ebm,
+                "ebm_loss_scaling":   self.ebm_loss_scaling,
             }
 
             # If the directory doesn't exist already create it
@@ -1191,7 +1250,11 @@ class UNetTrainer:
         raw_sd = checkpoint["Unet"]
         model = self.accelerator.unwrap_model(self.model)
         migrated_sd = self._migrate_circular_conv_keys(raw_sd, model)
-        model.load_state_dict(migrated_sd, strict=True)
+        # strict=False so old checkpoints (pre-EBM scalars) load cleanly; new
+        # ebm_alpha_ghg / ebm_alpha_aero / ebm_lambda will keep their inits.
+        missing, unexpected = model.load_state_dict(migrated_sd, strict=False)
+        if missing or unexpected:
+            print(f"[INFO] load_state_dict: missing={list(missing)} unexpected={list(unexpected)}")
 
         # Restore EMA (optional)
         if "EMA" in checkpoint and checkpoint["EMA"] is not None and hasattr(self, "ema_model"):
@@ -1215,7 +1278,7 @@ class UNetTrainer:
                     update_every=10,
                 ).to(self.device)
                 ema_model_sd = self._migrate_circular_conv_keys(ema_model_sd, self.accelerator.unwrap_model(self.model))
-                ema_model.ema_model.load_state_dict(ema_model_sd)
+                ema_model.ema_model.load_state_dict(ema_model_sd, strict=False)
                 ema_model.eval()
 
             except Exception as e:
@@ -1245,6 +1308,8 @@ class UNetTrainer:
         self._ema_mse  = checkpoint.get("_ema_mse",  None)
         self._ema_cond = checkpoint.get("_ema_cond", None)
         self._ema_tcre = checkpoint.get("_ema_tcre", None)
+        self._ema_ebm  = checkpoint.get("_ema_ebm",  None)
+        self.ebm_loss_scaling = checkpoint.get("ebm_loss_scaling", self.ebm_loss_scaling)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slopes={self.tcre_slopes}")
