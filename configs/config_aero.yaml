@@ -59,6 +59,12 @@ trainer:
     # Adds ~25-33% training overhead (extra CO2-only forward pass for that subset).
     tcre_loss_scaling: 0.01      # initial value; adaptive scaling overrides once EMA warms
     tcre_target_fraction: 0.15   # bumped 0.05→0.15 with slope-match TCRE loss; was too soft to correct warm bias
+    # ── Energy-balance constraint  N = F + λ·ΔT,  F = F_ghg + F_aero ─────
+    # Three learnable scalars (α_ghg, α_aero, λ) penalize the squared
+    # global-mean residual.  Ties SUL to ΔT alongside CO2; complements TCRE
+    # which only constrains CO2.  Scaling adapts via EMA toward target_fraction.
+    ebm_loss_scaling: 0.01
+    ebm_target_fraction: 0.05
     reset_optimizer: true       # reset Adam state so old CO2-loss momentum doesn't persist
     eval_script: run_eval_aero.sh
 
