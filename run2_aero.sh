@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_aero
 #SBATCH --account=project_462001328
-#SBATCH --partition=small-g
+#SBATCH --partition=dev-g
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=56
