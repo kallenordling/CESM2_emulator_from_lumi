@@ -774,6 +774,29 @@ class UNetTrainer:
 
             x = co2_gmean.to(torch.float64).numpy()
             y = dT_gmean.to(torch.float64).numpy()
+            if x.shape[0] != y.shape[0]:
+                # Align target and cond on overlapping years
+                try:
+                    y_years = _np.asarray(ds._time_values).astype(int)
+                    x_coord = ds.dataset_cond[ds.time_dim].values
+                    if hasattr(x_coord[0], "year") or not _np.issubdtype(
+                        _np.asarray(x_coord).dtype, _np.integer
+                    ):
+                        x_years = _np.asarray([int(str(v)[:4]) for v in x_coord])
+                    else:
+                        x_years = _np.asarray(x_coord).astype(int)
+                    common, ix, iy = _np.intersect1d(x_years, y_years, return_indices=True)
+                    print(f"[TRAINER] _precompute_tcre_slope[{name}]: T mismatch "
+                          f"target={y.shape[0]} cond={x.shape[0]} → "
+                          f"aligning on {common.size} overlapping years")
+                    x = x[ix]
+                    y = y[iy]
+                except Exception as e:
+                    n = min(x.shape[0], y.shape[0])
+                    print(f"[TRAINER] _precompute_tcre_slope[{name}]: align failed ({e}); "
+                          f"clipping to {n}")
+                    x = x[:n]
+                    y = y[:n]
             if x.size < 3 or float(x.max() - x.min()) < 1e-6:
                 print(f"[TRAINER] _precompute_tcre_slope: degenerate CO2 range for {name}")
                 continue
