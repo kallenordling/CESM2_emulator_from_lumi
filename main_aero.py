@@ -6,7 +6,7 @@ os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 from omegaconf import DictConfig, OmegaConf
 import hydra
 from hydra.utils import instantiate
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from accelerate.logging import get_logger
 from diffusers import DDPMScheduler
@@ -24,10 +24,14 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 @hydra.main(version_base=None, config_path="configs", config_name="config_aero.yaml")
 def main(cfg: DictConfig) -> None:
 
+    # EBM params (ebm_alpha_*, ebm_lambda) are unused during cond warmup epochs;
+    # let DDP detect that without raising.
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         mixed_precision=cfg.accelerator.mixed_precision,
         gradient_accumulation_steps=cfg.accelerator.gradient_accumulation_steps,
         split_batches=cfg.accelerator.get('split_batches', False),
+        kwargs_handlers=[ddp_kwargs],
     )
 
     set_seed(cfg.seed, device_specific=False)
