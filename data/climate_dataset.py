@@ -569,7 +569,11 @@ class ClimateDataset(Dataset):
             else os.path.join(self.data_dir, self.cond_file)
         )
         # Open conditioning file lazily too
-        raw_cond = xr.open_dataset(cond_file, chunks={self.time_dim: -1})
+        raw_cond = xr.open_dataset(cond_file)
+        # Cond files may use "year" as time coord while data uses self.time_dim ("time")
+        if self.time_dim not in raw_cond.dims and "year" in raw_cond.dims:
+            raw_cond = raw_cond.rename({"year": self.time_dim})
+        raw_cond = raw_cond.chunk({self.time_dim: -1})
         raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
 
         coord_vals = raw_cond[self.time_dim].values
@@ -590,7 +594,10 @@ class ClimateDataset(Dataset):
         #print(raw_cond)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
         # Keep a lightweight (no-data) reference for coordinate lookups
-        self.dataset_cond = xr.open_dataset(cond_file)[self.cond_vars]#.sel({self.time_dim: selected_years})
+        _ds_cond = xr.open_dataset(cond_file)
+        if self.time_dim not in _ds_cond.dims and "year" in _ds_cond.dims:
+            _ds_cond = _ds_cond.rename({"year": self.time_dim})
+        self.dataset_cond = _ds_cond[self.cond_vars]#.sel({self.time_dim: selected_years})
         raw_cond.close()
         del raw_cond
 
