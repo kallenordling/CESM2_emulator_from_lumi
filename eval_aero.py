@@ -222,7 +222,13 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
         lat         : np.ndarray    (H,) latitude values from file
         lon         : np.ndarray    (W,) longitude values from file
     """
-    raw = xr.open_dataset(cond_file, chunks={time_dim: -1})[cond_vars]
+    raw = xr.open_dataset(cond_file)
+    # Some cond files (e.g. emissions_ghg_only_timefixed.nc) store the time axis
+    # as 'year'; the training-side loader renames it on open (78d5364).
+    # Mirror that here so downstream stacking/chunking can rely on `time_dim`.
+    if time_dim not in raw.dims and "year" in raw.dims:
+        raw = raw.rename({"year": time_dim})
+    raw = raw[cond_vars].chunk({time_dim: -1})
     norm = raw.map(normalize)
 
     lat = norm["lat"].values.astype(np.float64)
@@ -405,6 +411,8 @@ def load_co2_global_annual(cond_file: str, time_dim: str, lat: np.ndarray) -> tu
     co2_annual : np.ndarray (T,)  global annual CO2 emissions (Gt CO2 / year)
     """
     ds = xr.open_dataset(cond_file)
+    if time_dim not in ds.dims and "year" in ds.dims:
+        ds = ds.rename({"year": time_dim})
     if "CO2" not in ds:
         ds.close()
         return None, None
