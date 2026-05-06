@@ -24,9 +24,7 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 @hydra.main(version_base=None, config_path="configs", config_name="config_aero.yaml")
 def main(cfg: DictConfig) -> None:
 
-    # EBM params (ebm_alpha_*, ebm_lambda) are unused during cond warmup epochs;
-    # let DDP detect that without raising.
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = DistributedDataParallelKwargs(static_graph=True)
     accelerator = Accelerator(
         mixed_precision=cfg.accelerator.mixed_precision,
         gradient_accumulation_steps=cfg.accelerator.gradient_accumulation_steps,
