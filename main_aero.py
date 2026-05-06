@@ -24,12 +24,13 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 @hydra.main(version_base=None, config_path="configs", config_name="config_aero.yaml")
 def main(cfg: DictConfig) -> None:
 
-    ddp_kwargs = DistributedDataParallelKwargs(static_graph=True)
+    # Default DDP: every parameter (including EBM scalars) receives a gradient
+    # on every backward (the aux branch runs every iter, see unetTrainer.py:912),
+    # so neither find_unused_parameters nor static_graph is needed.
     accelerator = Accelerator(
         mixed_precision=cfg.accelerator.mixed_precision,
         gradient_accumulation_steps=cfg.accelerator.gradient_accumulation_steps,
         split_batches=cfg.accelerator.get('split_batches', False),
-        kwargs_handlers=[ddp_kwargs],
     )
 
     set_seed(cfg.seed, device_specific=False)
