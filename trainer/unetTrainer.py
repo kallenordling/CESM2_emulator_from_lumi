@@ -150,8 +150,12 @@ class UNetTrainer:
         self.val_every     = 10          # evaluate held-out members every N epochs
         self.best_val_mse = float("inf")  # tracks best VAL/MSE for auto-save (lower is better)
 
-        self.cond_loss_scaling = 0.0  # always start silent
-        self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
+        # Floored at 1e-8 (not 0.0) so the cond/tcre/ebm branch enters the
+        # autograd graph from iteration 0 — required for DDP static_graph=True.
+        # The ramp schedule still keeps the effective contribution negligible
+        # during warmup; only the graph topology is held constant.
+        self.cond_loss_scaling = 1e-8
+        self.cond_warmup_epochs = 5   # Phase 1: hold near zero for this many epochs
         self.cond_ramp_epochs   = 30  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
         self.cond_max_scaling   = 0.4 # fixed cap — higher values caused instability
         # CFG dropout prob: fraction of batch where cond_map is zeroed.
@@ -676,15 +680,19 @@ class UNetTrainer:
         If adaptive_loss_scaling=True, cond and tcre scalings are additionally
         adjusted so each contributes a fixed fraction of the MSE loss.
         """
+        # 1e-8 floor: keeps the auxiliary branch in the autograd graph at every
+        # step so DDP static_graph sees a constant parameter set across iters.
+        _SCALE_FLOOR = 1e-8
+
         # ── Phase 1: warmup ───────────────────────────────────────────────────
         if epoch < self.cond_warmup_epochs:
-            self.cond_loss_scaling = 0.0
+            self.cond_loss_scaling = _SCALE_FLOOR
             return
 
         # ── Phase 2: linear ramp then hold ────────────────────────────────────
         ramp_epoch = epoch - self.cond_warmup_epochs
         progress = min(ramp_epoch / self.cond_ramp_epochs, 1.0)  # clamp at 1.0 after ramp
-        self.cond_loss_scaling = self.cond_max_scaling * progress
+        self.cond_loss_scaling = max(_SCALE_FLOOR, self.cond_max_scaling * progress)
 
         # ── Adaptive scalings ────────────────────────────────────────────────
         if not self._adaptive_loss_scaling:
@@ -1323,8 +1331,10 @@ class UNetTrainer:
                 self.global_step * self.accelerator.gradient_accumulation_steps
         )
 
-        # Restore conditioning scale so resume doesn't restart warmup from 0
-        self.cond_loss_scaling = checkpoint.get("cond_loss_scaling", 0.0)
+        # Restore conditioning scale so resume doesn't restart warmup from 0.
+        # Floor at 1e-8 so old checkpoints that saved 0.0 still keep the
+        # auxiliary branch live in the graph (required for DDP static_graph).
+        self.cond_loss_scaling = max(1e-8, checkpoint.get("cond_loss_scaling", 1e-8))
         self.tcre_loss_scaling = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
         self.tcre_slopes       = checkpoint.get("tcre_slopes",     self.tcre_slopes)
         self.tcre_intercepts   = checkpoint.get("tcre_intercepts", self.tcre_intercepts)
