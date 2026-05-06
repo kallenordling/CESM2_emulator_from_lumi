@@ -902,9 +902,14 @@ class UNetTrainer:
             else:
                 raise NotImplementedError("Only epsilon and v_prediction supported")
 
-            # true_anomaly is only needed on the sync step (where null pass runs).
-            # Skip computing it on intermediate accumulation steps to save memory.
-            _sync_with_cond = self.cond_loss_scaling > 0 and self.accelerator.sync_gradients
+            # Run the aux (cond/tcre/ebm) branch on EVERY iteration when
+            # cond_loss_scaling > 0 — gating on accelerator.sync_gradients made
+            # the EBM params receive gradients only every other iter under
+            # gradient_accumulation_steps=2, which violates DDP static_graph.
+            # The trainer does not wrap the loop in accelerator.accumulate(),
+            # so DDP runs allreduce every backward anyway; we are not saving
+            # any allreduce by gating, only compute.
+            _sync_with_cond = self.cond_loss_scaling > 0
             if _sync_with_cond:
                 assert self.climatology is not None, (
                     "climatology must be set on the dataset — "
