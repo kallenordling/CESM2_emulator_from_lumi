@@ -19,7 +19,7 @@ n_components_target: null
 n_components_cond: [30, 5]    # [CO2, SUL]: 5 SUL EOFs (down from 10) — drops CEDS↔IAMC 2015-junction EOF that caused the aaer 2015 temperature spike after ep ~610
 
 # ── Loader settings ──────────────────────────────────────────
-batch_size: 16          # total windows per batch (bumped 14→16: null pass dropped in 671a00d freed VRAM)
+batch_size: 8           # 16→8: per_exp=2 (vs 4) so n_batches doubles → ≥16/realization for 16-rank DDP sharding
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
 steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
