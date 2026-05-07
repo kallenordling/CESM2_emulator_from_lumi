@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_aero
 #SBATCH --account=project_462001328
-#SBATCH --partition=dev-g
+#SBATCH --partition=small-g
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=128G
-#SBATCH --time=00:30:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail
