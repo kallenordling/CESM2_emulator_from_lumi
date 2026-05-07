@@ -36,6 +36,22 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed, device_specific=False)
     logger = get_logger(__name__, log_level="INFO")
 
+    # ── DDP verification: every rank prints its identity ─────────────────
+    # Confirms (a) num_processes == expected GPU count, (b) each rank is
+    # bound to a distinct device, (c) HOSTNAME differs across nodes.
+    import socket
+    print(
+        f"[DDP] rank={accelerator.process_index}/{accelerator.num_processes} "
+        f"local_rank={accelerator.local_process_index} "
+        f"device={accelerator.device} "
+        f"host={socket.gethostname()} "
+        f"pid={os.getpid()}",
+        flush=True,
+    )
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print(f"[DDP] all {accelerator.num_processes} ranks reported in", flush=True)
+
     # ── Load data config directly from its own yaml file ───────────────────
     # The data config is flat (no `data:` wrapper) so we load it separately
     # rather than composing it into config_aero.yaml via defaults.
