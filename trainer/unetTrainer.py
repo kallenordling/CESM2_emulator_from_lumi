@@ -899,6 +899,15 @@ class UNetTrainer:
             # ── Primary denoising loss ────────────────────────────────────────
             mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
 
+            # DDP sentinel: keep the EBM scalars in the autograd graph on every
+            # iteration so DDP's reducer always sees a grad path for them.
+            # Without this, accumulation iters that skip the aux branch leave
+            # ebm_alpha_ghg/ebm_alpha_aero/ebm_lambda with no gradient → crash
+            # on the next forward (`parameters which did not receive grad`).
+            mse_loss = mse_loss + 0.0 * (
+                self._ebm_alpha_ghg + self._ebm_alpha_aero + self._ebm_lambda
+            )
+
             # Only compute the expensive null forward pass on the final accumulation
             # step (when gradients are about to sync).  With gradient_accumulation_steps=4
             # this cuts null-pass frequency from 4× to 1× per optimizer step — a 4×
