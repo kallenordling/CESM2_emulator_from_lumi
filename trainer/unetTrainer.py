@@ -717,10 +717,14 @@ class UNetTrainer:
                 target = self._cond_target_fraction * self._ema_mse
                 self.cond_loss_scaling = float(max(0.1, min(self.cond_max_scaling, target / self._ema_cond)))
 
-        # tcre_loss: free range [0.001, 0.5]
+        # tcre_loss: free range [0.05, 0.5]
+        # Floor raised 0.001→0.05: per-batch slope OLS on 4 ghg samples is
+        # easily satisfied while the eval-window TCRE slope stays badly off.
+        # A higher floor keeps the slope-match prior active even when the
+        # noisy per-batch loss looks small.
         if self._ema_tcre is not None and self._ema_tcre > 1e-8:
             target = self._tcre_target_fraction * self._ema_mse
-            self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
+            self.tcre_loss_scaling = float(max(0.05, min(0.5, target / self._ema_tcre)))
 
         # ebm_loss: free range [0.001, 0.5] (only when explicitly enabled)
         if self.ebm_loss_scaling > 0 and self._ema_ebm is not None and self._ema_ebm > 1e-8:
@@ -997,7 +1001,14 @@ class UNetTrainer:
                     and scenario_ids is not None
                 )
                 if want_tcre:
-                    per_scen_terms = []
+                    # ghg is the only pure-CO2 scenario, so it is the cleanest
+                    # signal for the TCRE slope. Up-weight it ×2 in the mean
+                    # so it isn't drowned by hist+ssp370.
+                    scen_names = getattr(self.train_set, "scenario_names", [])
+                    ghg_sid = scen_names.index("ghg") if "ghg" in scen_names else -1
+
+                    per_scen_terms  = []
+                    per_scen_weights = []
                     for sid, slope_ref in self.tcre_slopes.items():
                         sid_mask = scenario_ids == sid
                         if sid_mask.sum() < 3:
@@ -1020,9 +1031,12 @@ class UNetTrainer:
                         anchor_loss = ((y - target_dT) ** 2).mean()
 
                         per_scen_terms.append(slope_loss + 0.1 * anchor_loss)
+                        per_scen_weights.append(2.0 if sid == ghg_sid else 1.0)
 
                     if per_scen_terms:
-                        tcre_loss = torch.stack(per_scen_terms).mean()
+                        terms_t  = torch.stack(per_scen_terms)
+                        w_t      = torch.tensor(per_scen_weights, device=terms_t.device, dtype=terms_t.dtype)
+                        tcre_loss = (terms_t * w_t).sum() / w_t.sum()
 
                 # ── Energy-balance constraint  F_ghg + F_aero + λ·ΔT ≈ 0 ──────
                 # Per-sample squared residual of the linear global-mean energy
