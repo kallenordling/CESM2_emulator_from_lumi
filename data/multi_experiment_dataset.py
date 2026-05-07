@@ -396,24 +396,26 @@ class MultiExperimentDataLoader:
         Floor division — discard remainder so all ranks do the same number
         of optimizer steps (otherwise DDP allreduce would hang).
         """
+        # One-time diagnostic: log once per rank what _rank_batch_range
+        # actually does, including which (if any) early-return fires.
+        ws = self.accelerator.num_processes if self.accelerator is not None else 0
+        rank = self.accelerator.process_index if self.accelerator is not None else -1
+        if not getattr(self, "_logged_shard", False):
+            print(
+                f"[DDP-LOADER] rank={rank}/{ws} n_batches={n_batches} "
+                f"shard_across_ranks={self.shard_across_ranks} "
+                f"accelerator={'set' if self.accelerator is not None else 'None'}",
+                flush=True,
+            )
+            self._logged_shard = True
+
         if not self.shard_across_ranks or self.accelerator is None:
             return 0, n_batches
-        ws = self.accelerator.num_processes
-        rank = self.accelerator.process_index
         if ws <= 1 or n_batches < ws:
             return 0, n_batches
         per_rank = n_batches // ws
         start = rank * per_rank
         end = start + per_rank
-        # One-time per-rank log so we can verify in the SLURM out file that
-        # every rank gets a distinct, non-overlapping slab of batches.
-        if not getattr(self, "_logged_shard", False):
-            print(
-                f"[DDP-LOADER] rank={rank}/{ws} n_batches={n_batches} "
-                f"slice=[{start},{end})  per_rank={per_rank}",
-                flush=True,
-            )
-            self._logged_shard = True
         return start, end
 
     # ------------------------------------------------------------------
