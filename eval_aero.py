@@ -1237,6 +1237,20 @@ def _nearest_year(years: np.ndarray, target: int) -> int:
     return int(years[idx])
 
 
+def _window_indices(years: np.ndarray, target: int, window: int = 10):
+    """Indices of years inside a `window`-year span centered on `target`.
+    For even windows, span is [target - window//2 + 1, target + window//2]
+    (clipped to the available range)."""
+    half = window // 2
+    lo = target - half + 1
+    hi = target + half
+    mask = (years >= lo) & (years <= hi)
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        idx = np.array([int(np.argmin(np.abs(years - target)))])
+    return idx
+
+
 def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                       baseline_map: np.ndarray, map_years: list,
                       cesm_data: np.ndarray | None, cesm_years: np.ndarray | None,
@@ -1304,29 +1318,30 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                 transform=ax.transAxes, fontsize=7.5, ha="right", va="bottom",
                 bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7, ec="none"))
 
+    win = 10
     for col, yr_target in enumerate(map_years):
-        yr_gen  = _nearest_year(gen_years, yr_target)
-        idx_gen = int(np.where(gen_years == yr_gen)[0][0])
-        anom_gen = gen_data[idx_gen] - baseline_map           # (H, W)
+        idx_gen = _window_indices(gen_years, yr_target, win)
+        win_gen = (int(gen_years[idx_gen[0]]), int(gen_years[idx_gen[-1]]))
+        anom_gen = gen_data[idx_gen].mean(axis=0) - baseline_map  # (H, W)
 
         _plot_panel(axes[0, col], anom_gen, norm_anom,
-                    f"{name} model  ({yr_gen})")
+                    f"{name} model  ({win_gen[0]}–{win_gen[1]})")
 
         if has_cesm:
-            yr_cs  = _nearest_year(cesm_years, yr_target)
-            idx_cs = int(np.where(cesm_years == yr_cs)[0][0])
-            anom_cs = cesm_data[idx_cs] - baseline_map
+            idx_cs = _window_indices(cesm_years, yr_target, win)
+            win_cs = (int(cesm_years[idx_cs[0]]), int(cesm_years[idx_cs[-1]]))
+            anom_cs = cesm_data[idx_cs].mean(axis=0) - baseline_map
 
             _plot_panel(axes[1, col], anom_cs, norm_anom,
-                        f"{name} CESM2  ({yr_cs})")
+                        f"{name} CESM2  ({win_cs[0]}–{win_cs[1]})")
             _plot_panel(axes[2, col], anom_gen - anom_cs, norm_diff,
-                        f"Model − CESM2  ({yr_gen})")
+                        f"Model − CESM2  ({win_gen[0]}–{win_gen[1]})")
 
             # Stipple where difference is significant vs natural variability
             if gen_ensemble is not None and cesm_ensemble is not None:
-                # Per-member anomalies at this year: (N, H, W) and (M, H, W)
-                gen_members  = gen_ensemble[:, idx_gen]  - baseline_map   # (N, H, W)
-                cesm_members = cesm_ensemble[:, idx_cs] - baseline_map    # (M, H, W)
+                # Per-member window-mean anomalies: (N, H, W) and (M, H, W)
+                gen_members  = gen_ensemble[:, idx_gen].mean(axis=1)  - baseline_map
+                cesm_members = cesm_ensemble[:, idx_cs].mean(axis=1) - baseline_map
                 # Welch's t-test at each grid point
                 _, pvals = stats.ttest_ind(gen_members, cesm_members,
                                            axis=0, equal_var=False)       # (H, W)
@@ -1344,7 +1359,7 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     for row, label in enumerate(row_labels):
         axes[row, 0].set_ylabel(label, fontsize=10)
 
-    fig.suptitle(f"TREFHT anomaly vs 1850–1900 — {name}", fontsize=12)
+    fig.suptitle(f"TREFHT anomaly vs 1850–1900 — {name} (10-yr mean centered on target)", fontsize=12)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
