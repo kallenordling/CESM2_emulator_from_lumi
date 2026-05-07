@@ -404,7 +404,17 @@ class MultiExperimentDataLoader:
             return 0, n_batches
         per_rank = n_batches // ws
         start = rank * per_rank
-        return start, start + per_rank
+        end = start + per_rank
+        # One-time per-rank log so we can verify in the SLURM out file that
+        # every rank gets a distinct, non-overlapping slab of batches.
+        if not getattr(self, "_logged_shard", False):
+            print(
+                f"[DDP-LOADER] rank={rank}/{ws} n_batches={n_batches} "
+                f"slice=[{start},{end})  per_rank={per_rank}",
+                flush=True,
+            )
+            self._logged_shard = True
+        return start, end
 
     # ------------------------------------------------------------------
 
