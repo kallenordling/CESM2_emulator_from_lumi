@@ -354,8 +354,18 @@ class UNetTrainer:
         import time
         for epoch in range(self.first_epoch, self.max_epochs):
             epoch_start = time.time()
+            _printed_shard_check = False
             for step, batch_tuple in enumerate(self.train_loader.generate()):
                 self.model.train()
+                if not _printed_shard_check and epoch == self.first_epoch:
+                    _b = batch_tuple[0]
+                    print(
+                        f"[shard-check] rank {self.accelerator.process_index}/"
+                        f"{self.accelerator.num_processes}  "
+                        f"first-batch mean={_b.float().mean().item():+.6e}",
+                        flush=True,
+                    )
+                    _printed_shard_check = True
 
                 # Multi-experiment yields (batch, cond, scenario_ids)
                 # Legacy single-experiment yields (batch, cond)

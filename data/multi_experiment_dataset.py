@@ -266,6 +266,7 @@ class MultiExperimentDataLoader:
         year_bias: float = 0.0,
         year_bias_floor: float = 0.05,
         bsp_depth: int = 0,
+        shard_across_ranks: bool = True,
         **dataloader_kwargs: Any,
     ):
         self.dataset = dataset
@@ -280,6 +281,7 @@ class MultiExperimentDataLoader:
         self.year_bias = float(year_bias)
         self.year_bias_floor = float(year_bias_floor)
         self.bsp_depth = int(bsp_depth)
+        self.shard_across_ranks = bool(shard_across_ranks)
         if self.year_bias != 0.0:
             global_min = float("inf")
             global_max = float("-inf")
@@ -380,6 +382,29 @@ class MultiExperimentDataLoader:
 
     def __len__(self) -> int:
         return self.dataset.estimate_num_batches(self.batch_size)
+
+    # ------------------------------------------------------------------
+
+    def _rank_batch_range(self, n_batches: int) -> tuple[int, int]:
+        """Per-rank [start, end) over the global batch index range.
+
+        With shared RNG seed (`set_seed(..., device_specific=False)` in
+        main_aero.py) every rank generates an identical index pool. Slicing
+        by rank therefore gives each rank a disjoint, non-overlapping slab
+        of batches per epoch, restoring real DDP weak scaling.
+
+        Floor division — discard remainder so all ranks do the same number
+        of optimizer steps (otherwise DDP allreduce would hang).
+        """
+        if not self.shard_across_ranks or self.accelerator is None:
+            return 0, n_batches
+        ws = self.accelerator.num_processes
+        rank = self.accelerator.process_index
+        if ws <= 1 or n_batches < ws:
+            return 0, n_batches
+        per_rank = n_batches // ws
+        start = rank * per_rank
+        return start, start + per_rank
 
     # ------------------------------------------------------------------
 
@@ -601,7 +626,8 @@ class MultiExperimentDataLoader:
         if n_batches == 0:
             return
 
-        for b in range(n_batches):
+        b_start, b_end = self._rank_batch_range(n_batches)
+        for b in range(b_start, b_end):
             window_indices_per_exp = [
                 pool[b * self.per_exp_list[i] : (b + 1) * self.per_exp_list[i]]
                 - offsets[i]
@@ -665,7 +691,8 @@ class MultiExperimentDataLoader:
         if n_batches == 0:
             return
 
-        for b in range(n_batches):
+        b_start, b_end = self._rank_batch_range(n_batches)
+        for b in range(b_start, b_end):
             window_indices_per_exp = [
                 pool[b * self.per_exp_list[i] : (b + 1) * self.per_exp_list[i]]
                 - offsets[i]
@@ -741,7 +768,8 @@ class MultiExperimentDataLoader:
         p_pools = [sample_period(s._pres_idx, n_batches * per_period_per_exp) for s in samplers]
         f_pools = [sample_period(s._fut_idx,  n_batches * per_period_per_exp) for s in samplers]
 
-        for b in range(n_batches):
+        b_start, b_end = self._rank_batch_range(n_batches)
+        for b in range(b_start, b_end):
             sl = slice(b * per_period_per_exp, (b + 1) * per_period_per_exp)
             # Pools already contain local window indices (no offset needed)
             window_indices_per_exp = [
@@ -771,7 +799,8 @@ class MultiExperimentDataLoader:
                 n_batches = min(n_batches, self.steps_per_realization)
 
             offset = self.dataset._index._offsets[exp_idx]
-            for b in range(n_batches):
+            b_start, b_end = self._rank_batch_range(n_batches)
+            for b in range(b_start, b_end):
                 s, e = b * self.batch_size, (b + 1) * self.batch_size
                 window_indices = shuffled[s:e] - offset
                 yield self._vectorized_fetch([window_indices], device, shuffle=False)
@@ -794,6 +823,7 @@ def build_multi_experiment_loader(
     year_bias: float = 0.0,
     year_bias_floor: float = 0.05,
     bsp_depth: int = 0,
+    shard_across_ranks: bool = True,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
     """Convenience factory: build datasets from a list of config dicts.
@@ -901,4 +931,5 @@ def build_multi_experiment_loader(
         year_bias=year_bias,
         year_bias_floor=year_bias_floor,
         bsp_depth=bsp_depth,
+        shard_across_ranks=shard_across_ranks,
     )
