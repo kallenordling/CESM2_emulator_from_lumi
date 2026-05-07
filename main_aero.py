@@ -88,6 +88,7 @@ def main(cfg: DictConfig) -> None:
             num_workers=2,
             pin_memory=True,
             persistent_workers=True,
+            shard_across_ranks=False,  # every rank evaluates the full val set
         )
         if accelerator.is_main_process:
             logger.info(f"Validation set: {val_set.dataset.scenario_names} (1 held-out member each)")
