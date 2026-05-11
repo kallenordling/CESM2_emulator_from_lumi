@@ -128,7 +128,7 @@ REF_REALIZATIONS = {
     "hist":   ["LE2-1011.001", "LE2-1021.002"],
     "ssp370": ["LE2-1011.001", "LE2-1021.002"],
 }
-SAMPLE_STEPS   = 100          # fewer steps than training → faster inference
+SAMPLE_STEPS   = 50           # fewer steps than training → faster inference
 BATCH_SIZE     = 16           # years per GPU batch
 N_ENSEMBLE     = 1            # diffusion samples per experiment
 COND_VARS      = ["CO2", "SUL"]
@@ -1547,6 +1547,19 @@ def main():
                              "Default: all of "
                              f"{[e['name'] for e in EXPERIMENTS]}. "
                              "Baseline is still taken from hist CESM2 ensemble.")
+    parser.add_argument("--fp32", action="store_true",
+                        help="Force float32 inference (default: bf16). "
+                             "Use to A/B against bf16 if precision is suspect.")
+    parser.add_argument("--shard-rank", type=int,
+                        default=int(os.environ.get("SLURM_PROCID", 0)),
+                        help="Index of this shard among --n-shards. "
+                             "Defaults to $SLURM_PROCID so srun --ntasks=N gives "
+                             "automatic experiment-level parallelism.")
+    parser.add_argument("--n-shards",   type=int,
+                        default=int(os.environ.get("SLURM_NTASKS", 1)),
+                        help="Total number of shards. Each shard runs the "
+                             "subset experiments_to_run[rank::n_shards]. "
+                             "Defaults to $SLURM_NTASKS.")
     args = parser.parse_args()
 
     # Parse --export="members=N" if --members was not set explicitly
@@ -1565,7 +1578,10 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype  = torch.float32  # float32 avoids dtype conflicts in SinusoidalPosEmb
+    # bf16 inference: SinusoidalPosEmb now computes its freq table in fp32
+    # internally and casts back to the caller's dtype, so bf16 is safe.
+    # Override with --fp32 if you ever need to A/B against the old behaviour.
+    dtype  = torch.float32 if args.fp32 else torch.bfloat16
     print(f"[DEVICE] {device}  dtype={dtype}")
 
     # ── load model ─────────────────────────────────────────────────────────
@@ -1617,6 +1633,18 @@ def main():
         print(f"\n[FILTER] Running only: {[e['name'] for e in experiments_to_run]}")
     else:
         experiments_to_run = EXPERIMENTS
+
+    # ── Shard experiments across srun tasks for multi-GPU eval ───────────────
+    # Each task takes experiments_to_run[rank::n_shards].  When n_shards==1
+    # this is a no-op.  All shards still compute the hist CESM2 baseline
+    # independently above, which is fine — it's cheap and keeps the shards
+    # fully independent (no inter-rank IPC).
+    if args.n_shards > 1:
+        all_names = [e["name"] for e in experiments_to_run]
+        experiments_to_run = experiments_to_run[args.shard_rank :: args.n_shards]
+        print(f"[SHARD] rank={args.shard_rank}/{args.n_shards} "
+              f"running={[e['name'] for e in experiments_to_run]} "
+              f"(of {all_names})")
 
     for exp in experiments_to_run:
         name = exp["name"]

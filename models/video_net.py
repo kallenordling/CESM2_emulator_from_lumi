@@ -149,13 +149,17 @@ class SinusoidalPosEmb(nn.Module):
         self.dim = dim
 
     def forward(self, x):
+        # Compute the frequency table in fp32 (the exp covers a wide dynamic
+        # range that bf16/fp16 quantise poorly), then cast the result back to
+        # the caller's dtype so the rest of the network can run in bf16/fp16.
         device = x.device
+        out_dtype = x.dtype
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
+        emb = torch.exp(torch.arange(half_dim, device=device, dtype=torch.float32) * -emb)
+        emb = x.float()[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+        return emb.to(out_dtype)
 
 
 class Pseudo3DConv(nn.Module):
