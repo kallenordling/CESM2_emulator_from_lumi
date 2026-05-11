@@ -306,7 +306,12 @@ class UNetTrainer:
         # where SUL=0 so the full response is CO2-only).  Checkpoint may
         # override via loaded tcre_slope/intercept — done above in self.load(),
         # but we still compute if not restored so new runs get a valid target.
-        if self.tcre_loss_scaling > 0 and self.tcre_slope is None:
+        # Precompute whenever the slope is missing and ghg data exists, even if
+        # current scaling is 0 — the slope is cheap, pure, and shared by both
+        # tcre_loss and co2_cond_loss (via the CO2-only forward-pass gate).
+        # _precompute_tcre_slope has internal guards for the no-ghg / degenerate
+        # cases and will zero out scaling if it can't succeed.
+        if self.tcre_slope is None and "ghg" in getattr(self.train_set, "scenario_names", []):
             self._precompute_tcre_slope()
 
     def save_hyperparameters(self, cfg: DictConfig) -> None:
@@ -1352,10 +1357,15 @@ class UNetTrainer:
                 self.global_step * self.accelerator.gradient_accumulation_steps
         )
 
-        # Restore conditioning scale so resume doesn't restart warmup from 0
+        # Restore conditioning scale so resume doesn't restart warmup from 0.
+        # For co2_cond / tcre: a restored 0.0 means a previous run silently
+        # disabled the loss (e.g. precompute failed); fall back to the
+        # config-provided initial value so adaptive scaling can re-warm.
         self.cond_loss_scaling     = checkpoint.get("cond_loss_scaling", 0.0)
-        self.co2_cond_loss_scaling = checkpoint.get("co2_cond_loss_scaling", self.co2_cond_loss_scaling)
-        self.tcre_loss_scaling     = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
+        restored_co2 = checkpoint.get("co2_cond_loss_scaling", self.co2_cond_loss_scaling)
+        self.co2_cond_loss_scaling = restored_co2 if restored_co2 > 0 else self.co2_cond_loss_scaling
+        restored_tcre = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
+        self.tcre_loss_scaling     = restored_tcre if restored_tcre > 0 else self.tcre_loss_scaling
         self.tcre_slope            = checkpoint.get("tcre_slope",     self.tcre_slope)
         self.tcre_intercept        = checkpoint.get("tcre_intercept", self.tcre_intercept)
         self._ema_mse  = checkpoint.get("_ema_mse",  None)
