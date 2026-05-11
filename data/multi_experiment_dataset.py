@@ -611,10 +611,17 @@ class MultiExperimentDataLoader:
         vs ssp370 2015) gets nearly identical weight in either experiment.
         """
         offsets = self.dataset._index._offsets
+        # Scale draw size with world_size so n_batches ≥ ws and the per-rank
+        # sharding path in _rank_batch_range stays active under 4+ nodes.
+        # Pool is drawn with replacement (year-biased) or by tiling permutations
+        # (uniform), so expanding it costs only a bit of RAM and gives each rank
+        # disjoint work instead of the unsharded fallback.
+        ws = self.accelerator.num_processes if self.accelerator is not None else 1
         index_pools: list[np.ndarray] = []
         for exp_idx in range(self.n_exp):
             flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
             n_win = len(flat_idx)
+            target_pool = max(n_win, ws * self.per_exp_list[exp_idx])
             if self.year_bias != 0.0 and n_win > 0:
                 ds = self.dataset.datasets[exp_idx]
                 years = ds._time_values[:n_win].astype(np.float64)
@@ -622,11 +629,18 @@ class MultiExperimentDataLoader:
                 w = ((years - self._global_y_min) / span + self.year_bias_floor) ** self.year_bias
                 w = w / w.sum()
                 # Draw enough samples up front for the whole epoch (with replacement)
-                n_draw = max(n_win, self.per_exp_list[exp_idx])
-                local = np.random.choice(n_win, size=n_draw, replace=True, p=w)
+                local = np.random.choice(n_win, size=target_pool, replace=True, p=w)
                 index_pools.append(flat_idx[local])
+            elif n_win > 0:
+                # Tile a permutation up to the target pool size so 4-node runs
+                # still get ws disjoint batches instead of falling back to
+                # unsharded. Each tile is a fresh permutation to avoid blocks
+                # of identical batches.
+                tiles = -(-target_pool // n_win)  # ceil
+                parts = [np.random.permutation(flat_idx) for _ in range(tiles)]
+                index_pools.append(np.concatenate(parts)[:target_pool])
             else:
-                index_pools.append(np.random.permutation(flat_idx))
+                index_pools.append(flat_idx)
 
         n_batches = min(
             len(pool) // self.per_exp_list[i]
@@ -674,7 +688,11 @@ class MultiExperimentDataLoader:
             largest = max(len(b) for b in buckets)
             # One "round" = one draw per bucket. After n_b rounds, each batch
             # of size per_exp has cycled through all buckets at least once.
-            rounds = max(largest, per_exp * 4)
+            # Also enforce ws-aware floor so pool_len = rounds * n_b ≥ ws *
+            # per_exp, which keeps n_batches ≥ ws and DDP sharding active.
+            ws = self.accelerator.num_processes if self.accelerator is not None else 1
+            ws_floor = -(-ws * per_exp // n_b)  # ceil(ws * per_exp / n_b)
+            rounds = max(largest, per_exp * 4, ws_floor)
             shuffled: list[np.ndarray] = []
             for b in buckets:
                 if len(b) >= rounds:
