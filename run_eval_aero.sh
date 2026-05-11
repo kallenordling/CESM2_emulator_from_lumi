@@ -3,10 +3,10 @@
 #SBATCH --account=project_462001328
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks=4
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=64G
+#SBATCH --gpus-per-node=4
+#SBATCH --mem=128G
 #SBATCH --time=40:00:00
 #SBATCH --output=logs/%x_%j.out
 
@@ -68,30 +68,32 @@ _XAI_FLAG=""
 _CFG_FLAG=""
 [ "${FORCE_CFG}" = "1" ] && _CFG_FLAG="--force-cfg"
 
+# Multi-GPU experiment sharding: srun launches one task per GPU; each task
+# runs experiments_to_run[$SLURM_PROCID::$SLURM_NTASKS] inside eval_aero.py
+# (--shard-rank / --n-shards default to $SLURM_PROCID / $SLURM_NTASKS).
+# ROCR_VISIBLE_DEVICES pins each task to its local GPU so they don't fight
+# over device 0.
 if [ -n "${CHECKPOINT}" ]; then
-    singularity exec ${SIF} bash -c "
-        cd ${WORK_DIR}
-        python eval_aero.py \
-            --checkpoint  '${CHECKPOINT}' \
-            --output-dir  '${OUTPUT_DIR}' \
-            --sample-steps 100 \
-            --batch-size 16 \
-            --guidance-co2 ${GUIDANCE_CO2} \
-            --guidance-sul ${GUIDANCE_SUL} \
-            --members ${MEMBERS} \
-            ${_XAI_FLAG} ${_CFG_FLAG}
-    "
+    CKPT_FLAG="--checkpoint ${CHECKPOINT}"
+    RUNS_FLAG=""
 else
-    singularity exec ${SIF} bash -c "
-        cd ${WORK_DIR}
-        python eval_aero.py \
-            --runs-dir  /projappl/project_462001328/CESM2_emulator_from_lumi/runs \
-            --output-dir '${OUTPUT_DIR}' \
-            --sample-steps 100 \
-            --batch-size 16 \
-            --guidance-co2 ${GUIDANCE_CO2} \
-            --guidance-sul ${GUIDANCE_SUL} \
-            --members ${MEMBERS} \
-            ${_XAI_FLAG} ${_CFG_FLAG}
-    "
+    CKPT_FLAG=""
+    RUNS_FLAG="--runs-dir /projappl/project_462001328/CESM2_emulator_from_lumi/runs"
 fi
+
+PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \
+    --output-dir ${OUTPUT_DIR} \
+    --sample-steps 50 \
+    --batch-size 16 \
+    --guidance-co2 ${GUIDANCE_CO2} \
+    --guidance-sul ${GUIDANCE_SUL} \
+    --members ${MEMBERS} \
+    ${_XAI_FLAG} ${_CFG_FLAG}"
+
+# All variables expand here (script-launch time) except $SLURM_LOCALID which
+# must be evaluated inside srun's spawned shell — hence the \$.
+srun --ntasks=${SLURM_NTASKS} --ntasks-per-node=${SLURM_NTASKS} --gpus-per-task=1 \
+    bash -c "
+        export ROCR_VISIBLE_DEVICES=\${SLURM_LOCALID}
+        singularity exec ${SIF} bash -c 'cd ${WORK_DIR} && python eval_aero.py ${PY_ARGS}'
+    "
