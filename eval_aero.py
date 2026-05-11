@@ -14,6 +14,7 @@ Run from the project root:
 """
 
 import argparse
+import contextlib
 import os
 import re
 import sys
@@ -264,6 +265,7 @@ def generate_timeseries(
     guidance_co2: float = 1.0,
     guidance_sul: float = 1.0,
     force_cfg: bool = False,
+    autocast_dtype: torch.dtype | None = None,
 ) -> np.ndarray:
     """Diffusion sampling for every year in cond_tensor.
 
@@ -301,7 +303,16 @@ def generate_timeseries(
             cond_sul_only[:, 0] = NULL_COND          # CO2 nulled
             cond_null = torch.full_like(cond_b, NULL_COND)
 
-        with torch.no_grad():
+        # Mixed-precision context: ops auto-cast to autocast_dtype where the
+        # backend supports it; unsupported ones (e.g. Conv3d shapes MIOpen
+        # lacks a bf16 kernel for) fall back to fp32 cleanly inside the
+        # autocast region — no hard dtype mismatch.
+        amp_ctx = (
+            torch.autocast(device_type=device.type, dtype=autocast_dtype)
+            if autocast_dtype is not None
+            else contextlib.nullcontext()
+        )
+        with torch.no_grad(), amp_ctx:
             for step_idx, t_idx in enumerate(scheduler.timesteps):
                 t = scheduler.log_snr(steps[t_idx]).expand(B).to(dtype)
                 if use_cfg:
@@ -313,7 +324,9 @@ def generate_timeseries(
                             + guidance_sul * (pred_sul - pred_null))
                 else:
                     pred = model(gen, t, cond_map=cond_b)
-                gen  = scheduler.step(pred, timestep=t_idx, sample=gen).prev_sample
+                # Scheduler step expects fp32; autocast may return bf16, so
+                # cast pred back to gen's dtype before the update.
+                gen  = scheduler.step(pred.to(gen.dtype), timestep=t_idx, sample=gen).prev_sample
 
         results.append(gen.squeeze(1).squeeze(1).cpu().float())   # (B, H, W)
 
@@ -1578,16 +1591,20 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # bf16 inference: SinusoidalPosEmb now computes its freq table in fp32
-    # internally and casts back to the caller's dtype, so bf16 is safe.
-    # Override with --fp32 if you ever need to A/B against the old behaviour.
-    dtype  = torch.float32 if args.fp32 else torch.bfloat16
-    print(f"[DEVICE] {device}  dtype={dtype}")
+    # Mixed-precision inference via torch.autocast: model + tensors stay fp32,
+    # individual ops are auto-cast to bf16 where supported and fall back to
+    # fp32 where MIOpen lacks a bf16 kernel (e.g. some Conv3d shapes on
+    # MI250x).  Casting the *whole* model to bf16 instead triggers a hard
+    # dtype-mismatch crash when MIOpen falls back silently.
+    # --fp32 disables autocast entirely for A/B testing.
+    dtype       = torch.float32
+    autocast_dt = None if args.fp32 else torch.bfloat16
+    print(f"[DEVICE] {device}  dtype={dtype}  autocast={autocast_dt}")
 
     # ── load model ─────────────────────────────────────────────────────────
     ckpt_path = args.checkpoint if args.checkpoint else find_latest_checkpoint(args.runs_dir)
     model, pca_state = load_model(ckpt_path, CONFIG_PATH, device)
-    model = model.to(dtype)   # match input dtype to avoid bf16/float32 mismatch
+    model = model.to(dtype)
     print(f"[PCA] {'Found in checkpoint' if pca_state else 'None — no PCA projection'}")
 
     pca_cond   = pca_state.get("cond")   if pca_state else None
@@ -1684,6 +1701,7 @@ def main():
                 device, dtype, args.sample_steps, args.batch_size, seed=m,
                 guidance_co2=args.guidance_co2, guidance_sul=args.guidance_sul,
                 force_cfg=args.force_cfg,
+                autocast_dtype=autocast_dt,
             )
             members.append(gen_norm * 21.0 + 4.5)   # denormalise → °C
 
