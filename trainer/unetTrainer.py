@@ -785,8 +785,25 @@ class UNetTrainer:
         x = co2_gmean.to(torch.float64).numpy()
         y = dT_gmean.to(torch.float64).numpy()
 
+        # Diagnostics: dump the area-weighted gmean trajectory so we can see
+        # exactly why the precompute may decide the range is degenerate.  The
+        # training tcre_loss uses the same area-weighted gmean of cond_map[..,0]
+        # so any fallback that changes the scalar would mismatch the loss.
+        try:
+            co2_spatial_std  = float(co2.flatten(1).std(dim=1).mean().item())
+            co2_spatial_max  = float(co2.flatten(1).amax(dim=1).max().item())
+            co2_spatial_min  = float(co2.flatten(1).amin(dim=1).min().item())
+            print(f"[TRAINER] _precompute_tcre_slope: ghg shape={tuple(co2.shape)}  "
+                  f"area-w gmean range=[{x.min():.6g}, {x.max():.6g}]  "
+                  f"first/last={x[0]:.6g}/{x[-1]:.6g}  "
+                  f"raw gridpoint min/max=[{co2_spatial_min:.6g}, {co2_spatial_max:.6g}]  "
+                  f"mean spatial std={co2_spatial_std:.6g}")
+        except Exception:
+            pass
+
         if x.size < 3 or float(x.max() - x.min()) < 1e-6:
-            print("[TRAINER] _precompute_tcre_slope: degenerate CO2 range — skipping TCRE")
+            print("[TRAINER] _precompute_tcre_slope: degenerate CO2 range — "
+                  "skipping TCRE (see diagnostics above; check ghg cond file)")
             self.tcre_loss_scaling = 0.0
             return
 
