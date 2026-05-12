@@ -1590,7 +1590,21 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Sharded LUMI runs override ROCR_VISIBLE_DEVICES per rank, which can race
+    # with SLURM's own GPU binding and leave torch.cuda.is_available()==False
+    # on some ranks (e.g. ranks 0/1/3 in job 18580141 silently fell back to CPU
+    # → Conv3D still ran but bf16 autocast on CPU produced abnormal outputs
+    # that broke downstream save).  Fail loudly so the eval restarts under a
+    # correct binding instead of producing partial output.
+    if not torch.cuda.is_available():
+        rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "<unset>")
+        hipv = os.environ.get("HIP_VISIBLE_DEVICES",  "<unset>")
+        procid = os.environ.get("SLURM_PROCID",  "<unset>")
+        localid = os.environ.get("SLURM_LOCALID", "<unset>")
+        sys.exit(f"[FATAL] torch.cuda.is_available()=False — refusing to run "
+                 f"eval on CPU.  SLURM_PROCID={procid}  SLURM_LOCALID={localid}  "
+                 f"ROCR_VISIBLE_DEVICES={rocr}  HIP_VISIBLE_DEVICES={hipv}")
+    device = torch.device("cuda")
     # Mixed-precision inference via torch.autocast: model + tensors stay fp32,
     # individual ops are auto-cast to bf16 where supported and fall back to
     # fp32 where MIOpen lacks a bf16 kernel (e.g. some Conv3d shapes on
@@ -1899,17 +1913,61 @@ def main():
     # we'd overwrite an existing global_mean_anomaly.png with only the
     # filtered subset. Use replot_eval.py afterwards to regenerate combined
     # plots from all TREFHT_*.nc files in output_dir.
+    #
+    # When sharded across ranks, each rank only holds its own subset.  Dump
+    # the partial results to a per-rank pickle, then on rank 0 wait for the
+    # other ranks' pickles and merge before plotting.  Without this, each
+    # rank races to write the same global_mean_anomaly.png / tcre.png with
+    # only its subset — the last finisher wins and the TCRE plot fails
+    # entirely on ranks that lack hist or any projection.
     if timeseries_results and not args.experiments:
-        ts_out  = os.path.join(args.output_dir, "global_mean_anomaly.png")
-        csv_out = os.path.join(args.output_dir, "global_mean_anomaly.csv")
-        print(f"\n[PLOT] Time series → {ts_out}")
-        plot_timeseries(timeseries_results, ts_out)
-        print(f"[CSV]  Global anomaly + bias → {csv_out}")
-        save_csv(timeseries_results, csv_out)
+        if args.n_shards > 1:
+            import pickle, time
+            shard_dir = os.path.join(args.output_dir, "_shards")
+            os.makedirs(shard_dir, exist_ok=True)
+            shard_pkl = os.path.join(shard_dir, f"rank{args.shard_rank}.pkl")
+            tmp_pkl = shard_pkl + ".tmp"
+            with open(tmp_pkl, "wb") as f:
+                pickle.dump(timeseries_results, f)
+            os.replace(tmp_pkl, shard_pkl)
+            print(f"[SHARD] rank={args.shard_rank} wrote {shard_pkl}")
 
-        tcre_out = os.path.join(args.output_dir, "tcre.png")
-        print(f"[PLOT] TCRE → {tcre_out}")
-        plot_tcre(timeseries_results, tcre_out)
+            if args.shard_rank != 0:
+                print(f"[SHARD] rank={args.shard_rank} done; rank 0 will aggregate")
+            else:
+                expected = [os.path.join(shard_dir, f"rank{r}.pkl")
+                            for r in range(args.n_shards)]
+                deadline = time.time() + 1800  # 30 min
+                while True:
+                    missing = [p for p in expected if not os.path.exists(p)]
+                    if not missing:
+                        break
+                    if time.time() > deadline:
+                        print(f"[SHARD] timeout waiting for {missing} — "
+                              f"aggregating partial results")
+                        break
+                    time.sleep(15)
+
+                merged = {}
+                for p in expected:
+                    if not os.path.exists(p):
+                        continue
+                    with open(p, "rb") as f:
+                        merged.update(pickle.load(f))
+                print(f"[SHARD] rank 0 merged experiments: {list(merged)}")
+                timeseries_results = merged
+
+        if args.shard_rank == 0 or args.n_shards == 1:
+            ts_out  = os.path.join(args.output_dir, "global_mean_anomaly.png")
+            csv_out = os.path.join(args.output_dir, "global_mean_anomaly.csv")
+            print(f"\n[PLOT] Time series → {ts_out}")
+            plot_timeseries(timeseries_results, ts_out)
+            print(f"[CSV]  Global anomaly + bias → {csv_out}")
+            save_csv(timeseries_results, csv_out)
+
+            tcre_out = os.path.join(args.output_dir, "tcre.png")
+            print(f"[PLOT] TCRE → {tcre_out}")
+            plot_tcre(timeseries_results, tcre_out)
 
     print("\n[DONE] All outputs saved to:", args.output_dir)
 

@@ -92,8 +92,16 @@ PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \
 
 # All variables expand here (script-launch time) except $SLURM_LOCALID which
 # must be evaluated inside srun's spawned shell — hence the \$.
+#
+# Device binding: --gpus-per-task=1 already restricts each task to a single
+# GCD; the previous `export ROCR_VISIBLE_DEVICES=\${SLURM_LOCALID}` raced with
+# that binding and left torch.cuda.is_available()==False on most ranks
+# (job 18580141: ranks 0/1/3 fell back to CPU, only rank 2 got a GPU).
+# Let SLURM set ROCR_VISIBLE_DEVICES itself; --unbuffered so per-rank stdout
+# isn't dropped if a rank crashes mid-step.
 srun --ntasks=${SLURM_NTASKS} --ntasks-per-node=${SLURM_NTASKS} --gpus-per-task=1 \
+    --unbuffered \
     bash -c "
-        export ROCR_VISIBLE_DEVICES=\${SLURM_LOCALID}
+        echo \"[BIND] rank=\${SLURM_PROCID}/\${SLURM_NTASKS} localid=\${SLURM_LOCALID} ROCR_VISIBLE_DEVICES=\${ROCR_VISIBLE_DEVICES:-unset} HIP_VISIBLE_DEVICES=\${HIP_VISIBLE_DEVICES:-unset}\"
         singularity exec ${SIF} bash -c 'cd ${WORK_DIR} && python eval_aero.py ${PY_ARGS}'
     "
