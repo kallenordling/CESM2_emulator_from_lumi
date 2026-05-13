@@ -870,19 +870,35 @@ class UNetTrainer:
             # Independently zero CO2 (ch 0) and SUL (ch 1) for randomly chosen
             # batch elements. This trains the model on all four conditioning
             # subsets so that per-channel guidance works correctly at inference.
+            # Only applied to scenarios that vary both channels (hist, ssp370):
+            # aaer has constant CO2 and ghg has constant SUL, so dropping the
+            # constant channel teaches the model nothing useful and dropping
+            # the varying channel collapses the only signal those samples carry.
             if self.cfg_co2_drop_prob > 0 or self.cfg_sul_drop_prob > 0:
                 cond_map_input = cond_map.clone()
+                if scenario_ids is not None:
+                    if not hasattr(self, "_joint_scenario_ids"):
+                        names = getattr(self.train_set, "scenario_names", [])
+                        self._joint_scenario_ids = torch.tensor(
+                            [i for i, n in enumerate(names) if n in ("hist", "ssp370")],
+                            device=self.device, dtype=scenario_ids.dtype,
+                        )
+                    joint_mask = torch.isin(scenario_ids, self._joint_scenario_ids)
+                else:
+                    joint_mask = torch.ones(
+                        clean_samples.shape[0], device=self.device, dtype=torch.bool,
+                    )
                 if self.cfg_co2_drop_prob > 0:
                     drop_co2 = (
                         torch.rand(clean_samples.shape[0], device=self.device)
                         < self.cfg_co2_drop_prob
-                    )
+                    ) & joint_mask
                     cond_map_input[drop_co2, 0] = NULL_COND_VALUE
                 if self.cfg_sul_drop_prob > 0:
                     drop_sul = (
                         torch.rand(clean_samples.shape[0], device=self.device)
                         < self.cfg_sul_drop_prob
-                    )
+                    ) & joint_mask
                     cond_map_input[drop_sul, 1] = NULL_COND_VALUE
             else:
                 cond_map_input = cond_map
