@@ -67,7 +67,7 @@ tgt_is_360 = float(tgt_lon.max()) > 180
 
 def process_scenario(scenario: str) -> None:
     print(f"\n=== Processing scenario: {scenario} ===")
-
+    '''
     CO2_SSP = os.path.join(DATA_DIR, f"CO2_cumulative_Gt_per_gridpoint_{scenario}.nc")
     SO2_SSP = os.path.join(DATA_DIR, f"SO2_cumulative_Gt_per_gridpoint_{scenario}.nc")
 
@@ -125,13 +125,14 @@ def process_scenario(scenario: str) -> None:
     regridder = xe.Regridder(ds_merged, target_grid, method="bilinear", periodic=True)
     ds_regridded = regridder(ds_merged, keep_attrs=True)
     print(f"  Output shape: {dict(ds_regridded.dims)}")
-
+    
     # ── 6. Save ───────────────────────────────────────────────────────────────
     output_file = os.path.join(OUTPUT_DIR, f"emissions_co2_so2_regridded_{scenario}.nc")
-    ds_regridded = ds_regridded.compute().sel(year=slice(1850, 2100))
-    ds_regridded.to_netcdf(output_file)
+    #ds_regridded = ds_regridded.compute().sel(year=slice(1850, 2100))
+    #ds_regridded.to_netcdf(output_file)
+    ds_regridded=xr.open_datset(output_file)
     print(f"Saved: {output_file}")
-
+    
     # ── 7. SSP-only file (2015–2100, dim renamed year→time) ──────────────────
     # Cumulative values preserved — same integration from 1850, just clipped
     # in year range. Dim renamed so eval_aero.py's time_dim="time" works.
@@ -139,10 +140,34 @@ def process_scenario(scenario: str) -> None:
         ds_regridded.sel(year=slice(2015, 2100))
                     .rename({"year": "time"})
     )
+    
     ssp_only_file = os.path.join(OUTPUT_DIR, f"emissions_{scenario}_only_timefixed.nc")
-    ssp_only.to_netcdf(ssp_only_file)
-    print(f"Saved: {ssp_only_file}  ({ssp_only.dims['time']} years, 2015–2100)")
-
+    #ssp_only.to_netcdf(ssp_only_file)
+    #print(f"Saved: {ssp_only_file}  ({ssp_only.dims['time']} years, 2015–2100)")
+    '''
+    if scenario == 'ssp370':
+        output_file = os.path.join(OUTPUT_DIR, f"emissions_co2_so2_regridded_{scenario}.nc")
+        ds_regridded=xr.open_dataset(output_file)
+        #----splot file to ghg and hist only ans hist
+        ds=ds_regridded.sel(year=slice(1850,2050))
+        ds_ghg=ds.copy()
+        print(ds_ghg)
+        ds_aero=ds.copy()
+        ds_ghg['SUL'] *=0
+        ds_ghg['SUL'] += ds['SUL'].isel(year=0)
+        
+        ds_aero['CO2'] *=0
+        ds_aero['CO2'] += ds['CO2'].isel(year=0)
+        
+        ds_hist = ds_regridded.sel(year=slice(1850,2014))
+    
+        hist_only_file = os.path.join(OUTPUT_DIR, f"emissions_hist_only_timefixed.nc")
+        ghg_only_file = os.path.join(OUTPUT_DIR, f"emissions_ghg_only_timefixed.nc")
+        aaer_only_file = os.path.join(OUTPUT_DIR, f"emissions_aaer_only_timefixed.nc")
+        
+        ds_ghg.to_netcdf(ghg_only_file)
+        ds_aero.to_netcdf(aaer_only_file)
+        ds_hist.to_netcdf(hist_only_file)  
 
 for scenario in SCENARIOS:
     process_scenario(scenario)
