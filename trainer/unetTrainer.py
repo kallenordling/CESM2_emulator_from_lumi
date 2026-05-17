@@ -163,35 +163,28 @@ class UNetTrainer:
         # conditioning subsets: (co2, sul), (co2, null), (null, sul), (null, null).
         self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
         self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
-        # Per-channel CO2 conditioning loss: extra MSE loss on GHG batches that
-        # directly targets the CO2-only response (model(CO2, SUL=null) - model(null, null)).
-        # Forces the model to correctly attribute GHG warming to the CO2 channel,
-        # counteracting the CO2-aerosol collinearity in ssp370 that makes the model
-        # ignore CO2 and use SUL as a time proxy.
-        self.co2_cond_loss_scaling = getattr(self, "co2_cond_loss_scaling", 0.0)
         self._cached_sensitivity = 0.0  # last valid sensitivity value
 
-        # ── Adaptive co2_cond_loss scaling ────────────────────────────────────
-        # When adaptive_loss_scaling=True, co2_cond_loss_scaling is updated each
-        # sync step so that the CO2 conditioning loss contributes a fixed fraction
-        # (co2_target_fraction) of the MSE loss in expectation.  EMAs of the raw
-        # (unscaled) loss values are used; they are saved/restored with checkpoints.
+        # ── Adaptive loss scaling ────────────────────────────────────────────
+        # When adaptive_loss_scaling=True, scalings are updated each sync step so
+        # that each aux loss contributes a fixed fraction of MSE in expectation.
+        # EMAs of the raw (unscaled) loss values are used; saved/restored with ckpt.
         self._adaptive_loss_scaling = getattr(self, "adaptive_loss_scaling", False)
-        self._co2_target_fraction  = getattr(self, "co2_target_fraction",  0.10)
         self._cond_target_fraction = getattr(self, "cond_target_fraction", 0.30)
         self._tcre_target_fraction = getattr(self, "tcre_target_fraction", 0.05)
         self._ema_mse  = None   # EMA of mse_loss magnitude
-        self._ema_co2  = None   # EMA of unscaled co2_cond_loss magnitude
         self._ema_cond = None   # EMA of unscaled cond_loss magnitude
         self._ema_tcre = None   # EMA of unscaled tcre_loss magnitude
         self._ema_ebm  = None   # EMA of unscaled ebm_loss magnitude
         self._ema_decay = 0.99  # ~100 sync-step half-life — slow, stable adjustments
 
         # ── TCRE regularization ──────────────────────────────────────────────
-        # Penalize the model's CO2-only global-mean response for deviating from
-        # a linear TCRE relation precomputed from GHG training data:
-        #     gmean(ΔT_norm_from_CO2) ≈ tcre_slope * gmean(cumCO2_norm) + tcre_intercept
-        # Applied to scenario_ids in {hist, ssp370, ghg} (all except aaer).
+        # Penalize the model's predicted anomaly (full conditioned response)
+        # for deviating from a linear TCRE relation precomputed from the
+        # hist + ssp370 trajectories (the all-forcings reference that eval
+        # reports in tcre.png):
+        #     gmean(ΔT_norm) ≈ tcre_slope * gmean(cumCO2_norm) + tcre_intercept
+        # Applied to scenario_ids in {hist, ssp370} only.
         self.tcre_loss_scaling = getattr(self, "tcre_loss_scaling", 0.0)
         self.tcre_slope     = None  # filled by _precompute_tcre_slope(); may be overwritten by checkpoint
         self.tcre_intercept = None
@@ -302,16 +295,12 @@ class UNetTrainer:
         # Prepare everything for GPU training
         self.prepare()
 
-        # Precompute TCRE target slope from GHG training data (needs ghg samples
-        # where SUL=0 so the full response is CO2-only).  Checkpoint may
-        # override via loaded tcre_slope/intercept — done above in self.load(),
-        # but we still compute if not restored so new runs get a valid target.
-        # Precompute whenever the slope is missing and ghg data exists, even if
-        # current scaling is 0 — the slope is cheap, pure, and shared by both
-        # tcre_loss and co2_cond_loss (via the CO2-only forward-pass gate).
-        # _precompute_tcre_slope has internal guards for the no-ghg / degenerate
-        # cases and will zero out scaling if it can't succeed.
-        if self.tcre_slope is None and "ghg" in getattr(self.train_set, "scenario_names", []):
+        # Precompute TCRE target slope from hist + ssp370 trajectories (the
+        # all-forcings reference that eval uses).  Checkpoint may override via
+        # loaded tcre_slope/intercept — done above in self.load(); we still
+        # compute if not restored so new runs get a valid target.
+        scen_names = getattr(self.train_set, "scenario_names", [])
+        if self.tcre_slope is None and "hist" in scen_names and "ssp370" in scen_names:
             self._precompute_tcre_slope()
 
     def save_hyperparameters(self, cfg: DictConfig) -> None:
@@ -380,7 +369,7 @@ class UNetTrainer:
                 ):
                     continue
 
-                loss, mse_loss, cond_loss, anom_signal, anom_error, sens, scen_disc, co2_cond_loss, tcre_loss, ebm_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
+                loss, mse_loss, cond_loss, anom_signal, anom_error, sens, scen_disc, tcre_loss, ebm_loss = self.get_loss(batch, cond, scenario_ids=scenario_ids)
 
                 if self.accelerator.sync_gradients:
                     self.global_step += 1
@@ -395,7 +384,6 @@ class UNetTrainer:
                     avg_loss        = self.accelerator.gather_for_metrics(loss).mean()
                     avg_mse_loss    = self.accelerator.gather_for_metrics(mse_loss).mean()
                     avg_cond_loss   = self.accelerator.gather_for_metrics(cond_loss).mean()
-                    avg_co2_cond_loss = self.accelerator.gather_for_metrics(co2_cond_loss).mean()
                     avg_tcre_loss   = self.accelerator.gather_for_metrics(tcre_loss).mean()
                     avg_ebm_loss    = self.accelerator.gather_for_metrics(ebm_loss).mean()
                     avg_anom_error  = self.accelerator.gather_for_metrics(anom_error).mean()
@@ -407,7 +395,6 @@ class UNetTrainer:
                         "Training/Loss":  avg_loss.detach().item(),
                         "MSE LOSS":       avg_mse_loss.detach().item(),
                         "COND LOSS":      avg_cond_loss.detach().item(),
-                        "CO2 COND LOSS":  avg_co2_cond_loss.detach().item(),
                         "TCRE LOSS":      avg_tcre_loss.detach().item(),
                         "EBM LOSS":       avg_ebm_loss.detach().item(),
                         "ANOM ERROR":     avg_anom_error.detach().item(),
@@ -416,7 +403,6 @@ class UNetTrainer:
                         "ANOM SKILL":     (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),
                         "SCEN DISC":      avg_scen_disc.detach().item(),
                         "COND SCALE":     self.cond_loss_scaling,
-                        "CO2 COND SCALE": self.co2_cond_loss_scaling,
                         "TCRE SCALE":     self.tcre_loss_scaling,
                         "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
                         "EBM SCALE":      self.ebm_loss_scaling,
@@ -575,12 +561,10 @@ class UNetTrainer:
                         "Optimizer":             self.optimizer.state_dict(),
                         "Global Step":           self.global_step,
                         "cond_loss_scaling":     self.cond_loss_scaling,
-                        "co2_cond_loss_scaling": self.co2_cond_loss_scaling,
                         "tcre_loss_scaling":     self.tcre_loss_scaling,
                         "tcre_slope":            self.tcre_slope,
                         "tcre_intercept":        self.tcre_intercept,
                         "_ema_mse":              self._ema_mse,
-                        "_ema_co2":              self._ema_co2,
                         "_ema_cond":             self._ema_cond,
                         "_ema_tcre":             self._ema_tcre,
                         "_ema_ebm":              self._ema_ebm,
@@ -643,16 +627,13 @@ class UNetTrainer:
             )
 
     def _update_loss_emas(self) -> None:
-        """Update exponential moving averages of unscaled mse, cond, co2_cond, tcre loss."""
+        """Update exponential moving averages of unscaled mse, cond, tcre, ebm loss."""
         d = self._ema_decay
         mse_val  = getattr(self, "_last_raw_mse",  0.0)
-        co2_val  = getattr(self, "_last_raw_co2",  0.0)
         cond_val = getattr(self, "_last_raw_cond", 0.0)
         tcre_val = getattr(self, "_last_raw_tcre", 0.0)
         ebm_val  = getattr(self, "_last_raw_ebm",  0.0)
         self._ema_mse = mse_val if self._ema_mse is None else d * self._ema_mse + (1 - d) * mse_val
-        if co2_val > 1e-8:
-            self._ema_co2 = co2_val if self._ema_co2 is None else d * self._ema_co2 + (1 - d) * co2_val
         if cond_val > 1e-8:
             self._ema_cond = cond_val if self._ema_cond is None else d * self._ema_cond + (1 - d) * cond_val
         if tcre_val > 1e-8:
@@ -670,9 +651,8 @@ class UNetTrainer:
                scaling ramps linearly 0 → cond_max_scaling over cond_ramp_epochs,
                then holds at cond_max_scaling.
 
-        If adaptive_loss_scaling=True, co2_cond_loss_scaling is additionally
-        adjusted so that the CO2 conditioning loss stays at co2_target_fraction
-        of the MSE loss in expectation.
+        If adaptive_loss_scaling=True, tcre/ebm/cond scalings are nudged toward
+        their target_fraction of MSE each sync step using EMAs of the raw losses.
         """
         # ── Phase 1: warmup ───────────────────────────────────────────────────
         if epoch < self.cond_warmup_epochs:
@@ -684,16 +664,11 @@ class UNetTrainer:
         progress = min(ramp_epoch / self.cond_ramp_epochs, 1.0)  # clamp at 1.0 after ramp
         self.cond_loss_scaling = self.cond_max_scaling * progress
 
-        # ── Adaptive scalings (both cond and co2_cond) ───────────────────────
+        # ── Adaptive scalings ─────────────────────────────────────────────────
         if not self._adaptive_loss_scaling:
             return
         if self._ema_mse is None:
             return
-
-        # co2_cond_loss: free range [0.001, 0.5]
-        if self._ema_co2 is not None and self._ema_co2 > 1e-8:
-            target = self._co2_target_fraction * self._ema_mse
-            self.co2_cond_loss_scaling = float(max(0.001, min(0.5, target / self._ema_co2)))
 
         # cond_loss: only adapt once ramped to max; bounded [0.1, cond_max_scaling]
         # to keep scenario separation intact and prevent the instability seen at >0.4
@@ -702,7 +677,7 @@ class UNetTrainer:
                 target = self._cond_target_fraction * self._ema_mse
                 self.cond_loss_scaling = float(max(0.1, min(self.cond_max_scaling, target / self._ema_cond)))
 
-        # tcre_loss: free range [0.001, 0.5] — same pattern as co2_cond_loss
+        # tcre_loss: free range [0.001, 0.5]
         if self._ema_tcre is not None and self._ema_tcre > 1e-8:
             target = self._tcre_target_fraction * self._ema_mse
             self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
@@ -713,15 +688,16 @@ class UNetTrainer:
             self.ebm_loss_scaling = float(max(0.001, min(0.5, target / self._ema_ebm)))
 
     def _precompute_tcre_slope(self) -> None:
-        """Fit slope+intercept of gmean(ΔT_norm) vs gmean(cumCO2_norm) from GHG.
+        """Fit slope+intercept of gmean(ΔT_norm) vs gmean(cumCO2_norm) on
+        the concatenated hist + ssp370 trajectory.
 
-        Uses the GHG dataset where SUL ≈ 0, so the full ΔT is CO2-driven.  The
-        fitted coefficients are then used to provide a TCRE target for any
-        scenario (hist / ssp370 / ghg) conditioning CO2 value.
+        This matches the all-forcings TCRE reference reported by eval
+        (`replot_eval.py`, TCRE_SCENARIOS={"hist","ssp370"}).  The slope
+        therefore includes aerosol cooling and is correctly compared
+        against the model's *full* predicted anomaly on hist+ssp370 samples.
 
-        Runs on the main process only, then broadcasts via torch scalar.  If
-        it fails (no GHG scenario, can't load realization), disables the TCRE
-        loss rather than raising.
+        Runs on the main process only.  On failure (missing scenarios,
+        degenerate range), disables the TCRE loss rather than raising.
         """
         if not self._multi:
             print("[TRAINER] _precompute_tcre_slope: single-experiment mode — skipping TCRE")
@@ -729,92 +705,70 @@ class UNetTrainer:
             return
 
         scenario_names = self.train_set.scenario_names
-        if "ghg" not in scenario_names:
-            print(f"[TRAINER] _precompute_tcre_slope: no 'ghg' scenario in {scenario_names} — skipping TCRE")
-            self.tcre_loss_scaling = 0.0
-            return
-
-        ghg_idx = scenario_names.index("ghg")
-        ghg_ds  = self.train_set.datasets[ghg_idx]
-
-        # Load the first GHG realization if nothing is loaded yet.
-        if ghg_ds.tensor_data is None or ghg_ds.tensor_data_cond is None:
-            try:
-                first_real = list(ghg_ds.realizations)[0]
-                print(f"[TRAINER] _precompute_tcre_slope: loading ghg realization '{first_real}'")
-                ghg_ds.load_data(first_real)
-            except Exception as e:
-                print(f"[TRAINER] _precompute_tcre_slope: failed to load ghg realization: {e} — skipping TCRE")
+        for required in ("hist", "ssp370"):
+            if required not in scenario_names:
+                print(f"[TRAINER] _precompute_tcre_slope: '{required}' missing from "
+                      f"{scenario_names} — skipping TCRE")
                 self.tcre_loss_scaling = 0.0
                 return
-
-        # tensor_data shape: (n_vars_target, T, H, W) — here n_vars_target=1 (TREFHT)
-        # tensor_data_cond shape: (n_vars_cond, T, H, W) — channel 0 = CO2
-        t_data = ghg_ds.tensor_data
-        c_data = ghg_ds.tensor_data_cond
-        if t_data is None or c_data is None:
-            print("[TRAINER] _precompute_tcre_slope: tensor_data not available — skipping TCRE")
-            self.tcre_loss_scaling = 0.0
-            return
 
         # Build area weights (cosine-latitude, clamped — same as training loss)
         lats = torch.as_tensor(self._ref_ds.lats.values, dtype=torch.float32)
         w_lat = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-        w_lat = w_lat / w_lat.mean()  # normalise so weighted-mean of ones = 1
-        w_lat = w_lat.view(1, -1, 1)  # (1, H, 1), broadcast over T and W
+        w_lat = w_lat / w_lat.mean()
+        w_lat = w_lat.view(1, -1, 1)  # (1, H, 1)
 
-        # Climatology baseline (broadcast to (n_vars, 1, H, W) if present)
+        # Climatology baseline (1850-1900 mean) — anchors the ΔT axis.
         if self.climatology is not None:
-            # self.climatology is (1, C, 1, H, W) on device; move to cpu & squeeze
             clim = self.climatology.detach().to("cpu").squeeze(0).squeeze(1)  # (C, H, W)
         else:
-            clim = torch.zeros(t_data.shape[0], t_data.shape[2], t_data.shape[3])
+            clim = None
 
-        t_trefht = t_data[0]        # (T, H, W) — first target variable
-        clim_t   = clim[0]           # (H, W)
+        def _gmean_trajectory(scen_name):
+            ds = self.train_set.datasets[scenario_names.index(scen_name)]
+            if ds.tensor_data is None or ds.tensor_data_cond is None:
+                first_real = list(ds.realizations)[0]
+                print(f"[TRAINER] _precompute_tcre_slope: loading {scen_name} "
+                      f"realization '{first_real}'")
+                ds.load_data(first_real)
+            t = ds.tensor_data           # (n_vars_target, T, H, W)
+            c = ds.tensor_data_cond      # (n_vars_cond,   T, H, W) — ch 0 = CO2
+            clim_t = clim[0] if clim is not None else torch.zeros(t.shape[2], t.shape[3])
+            dT  = t[0] - clim_t.unsqueeze(0)           # (T, H, W)
+            co2 = c[0]                                  # (T, H, W)
+            dT_gm  = (dT  * w_lat).mean(dim=(1, 2))    # (T,)
+            co2_gm = (co2 * w_lat).mean(dim=(1, 2))    # (T,)
+            return co2_gm.to(torch.float64).numpy(), dT_gm.to(torch.float64).numpy(), co2
 
-        # ΔT per timestep (T, H, W)
-        dT = t_trefht - clim_t.unsqueeze(0)
-        dT_gmean = (dT * w_lat).mean(dim=(1, 2))        # (T,)
-
-        # cumCO2 per timestep (T,). Channel 0 = CO2, already spatially broadcast
-        # in normalization so gmean is well-defined.
-        co2 = c_data[0]                                   # (T, H, W)
-        co2_gmean = (co2 * w_lat).mean(dim=(1, 2))        # (T,)
-
-        x = co2_gmean.to(torch.float64).numpy()
-        y = dT_gmean.to(torch.float64).numpy()
-
-        # Diagnostics: dump the area-weighted gmean trajectory so we can see
-        # exactly why the precompute may decide the range is degenerate.  The
-        # training tcre_loss uses the same area-weighted gmean of cond_map[..,0]
-        # so any fallback that changes the scalar would mismatch the loss.
         try:
-            co2_spatial_std  = float(co2.flatten(1).std(dim=1).mean().item())
-            co2_spatial_max  = float(co2.flatten(1).amax(dim=1).max().item())
-            co2_spatial_min  = float(co2.flatten(1).amin(dim=1).min().item())
-            print(f"[TRAINER] _precompute_tcre_slope: ghg shape={tuple(co2.shape)}  "
-                  f"area-w gmean range=[{x.min():.6g}, {x.max():.6g}]  "
-                  f"first/last={x[0]:.6g}/{x[-1]:.6g}  "
-                  f"raw gridpoint min/max=[{co2_spatial_min:.6g}, {co2_spatial_max:.6g}]  "
-                  f"mean spatial std={co2_spatial_std:.6g}")
-        except Exception:
-            pass
-
-        if x.size < 3 or float(x.max() - x.min()) < 1e-6:
-            print("[TRAINER] _precompute_tcre_slope: degenerate CO2 range — "
-                  "skipping TCRE (see diagnostics above; check ghg cond file)")
+            x_h, y_h, co2_h = _gmean_trajectory("hist")
+            x_s, y_s, co2_s = _gmean_trajectory("ssp370")
+        except Exception as e:
+            print(f"[TRAINER] _precompute_tcre_slope: failed to load hist/ssp370: {e}")
             self.tcre_loss_scaling = 0.0
             return
 
         import numpy as _np
+        x = _np.concatenate([x_h, x_s])
+        y = _np.concatenate([y_h, y_s])
+
+        print(f"[TRAINER] _precompute_tcre_slope: hist T={len(x_h)} "
+              f"area-w gmean=[{x_h.min():.4g}, {x_h.max():.4g}]  "
+              f"ssp370 T={len(x_s)} area-w gmean=[{x_s.min():.4g}, {x_s.max():.4g}]")
+
+        if x.size < 3 or float(x.max() - x.min()) < 1e-6:
+            print("[TRAINER] _precompute_tcre_slope: degenerate CO2 range — skipping TCRE")
+            self.tcre_loss_scaling = 0.0
+            return
+
         slope, intercept = _np.polyfit(x, y, 1)
         self.tcre_slope     = float(slope)
         self.tcre_intercept = float(intercept)
         print(
-            f"[TRAINER] TCRE precompute (ghg): slope={self.tcre_slope:.4f} "
+            f"[TRAINER] TCRE precompute (hist+ssp370): slope={self.tcre_slope:.4f} "
             f"intercept={self.tcre_intercept:.4f}  "
-            f"(CO2_norm: [{x.min():.3f}, {x.max():.3f}], ΔT_norm: [{y.min():.3f}, {y.max():.3f}])"
+            f"(CO2_norm: [{x.min():.3f}, {x.max():.3f}], "
+            f"ΔT_norm: [{y.min():.3f}, {y.max():.3f}])"
         )
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
@@ -979,18 +933,8 @@ class UNetTrainer:
                 # Gradients flow only through pred_x0_cond (null is no_grad).
                 pred_anomaly = pred_x0_cond - pred_x0_null.detach()
 
-                # ── CO2-only forward pass for hist + ssp370 + ghg ─────────────
-                # For every scenario except aaer (idx 2), compute the model's
-                # CO2-only response (model with SUL nulled) minus the null output.
-                # This single forward pass feeds two regularizers:
-                #   (a) co2_cond_loss — spatial MSE vs true GHG anomaly (GHG subset only).
-                #       Counteracts CO2-aerosol collinearity from ssp370.
-                #   (b) tcre_loss    — global-mean linearity vs precomputed TCRE slope.
-                #       Penalizes the scenario-averaged ΔT from CO2 deviating from
-                #       the TCRE relation fit on GHG.
-                co2_cond_loss = torch.zeros(1, device=self.device)
-                tcre_loss     = torch.zeros(1, device=self.device)
-                ebm_loss      = torch.zeros(1, device=self.device)
+                tcre_loss = torch.zeros(1, device=self.device)
+                ebm_loss  = torch.zeros(1, device=self.device)
 
                 # ── Energy-balance constraint  F_ghg + F_aero + λ·ΔT ≈ 0 ──────
                 # Per-sample squared residual of the linear global-mean energy
@@ -1016,56 +960,30 @@ class UNetTrainer:
                     residual = F_ghg + F_aero + self._ebm_lambda * dT_gmean_full
                     ebm_loss = (residual ** 2).mean().unsqueeze(0)
 
-                want_co2only = (
-                    (self.co2_cond_loss_scaling > 0 or
-                     (self.tcre_loss_scaling > 0 and self.tcre_slope is not None))
-                    and scenario_ids is not None
-                )
-                if want_co2only:
-                    tcre_mask = scenario_ids != 2  # exclude aaer (no CO2 variation)
+                # ── TCRE regularizer on hist + ssp370 ─────────────────────────
+                # Slope was fit on hist+ssp370 ΔT vs cumCO2 (all-forcings).
+                # Apply it to the model's full predicted anomaly on the same
+                # scenario mask. ghg (id=3) and aaer (id=2) are excluded:
+                # ghg has no aerosol offset so the slope under-predicts its ΔT;
+                # aaer has no CO2 variation.
+                if (self.tcre_loss_scaling > 0
+                        and self.tcre_slope is not None
+                        and scenario_ids is not None):
+                    tcre_mask = (scenario_ids == 0) | (scenario_ids == 1)
                     if tcre_mask.sum() > 0:
-                        co_noisy = noisy_samples[tcre_mask]
-                        co_t     = timesteps[tcre_mask]
-                        # Keep CO2 (ch 0), null out SUL (ch 1)
-                        co_cond  = cond_map[tcre_mask].clone()
-                        co_cond[:, 1] = NULL_COND_VALUE
-                        co2_output = self.model(co_noisy, co_t, cond_map=co_cond)
-                        pred_x0_co2only = self.get_original_sample(co_noisy, co2_output, co_t)
-                        # CO2-only response vs null (reuse already-computed pred_x0_null)
-                        pred_co2_response = pred_x0_co2only - pred_x0_null[tcre_mask].detach()
-
-                        # (a) co2_cond_loss on GHG subset of this forward pass
-                        if self.co2_cond_loss_scaling > 0:
-                            # scenario_ids[tcre_mask] gives the IDs of rows we just
-                            # computed.  Select GHG (id=3) rows within it.
-                            ghg_within = scenario_ids[tcre_mask] == 3
-                            if ghg_within.sum() > 0:
-                                co2_cond_loss = calc_mse_loss(
-                                    pred_co2_response[ghg_within],
-                                    true_anomaly[tcre_mask][ghg_within],
-                                    self._ref_ds.lats,
-                                )
-
-                        # (b) tcre_loss: area-weighted global mean of CO2-only ΔT
-                        # vs tcre_slope * gmean(cumCO2_norm) + tcre_intercept.
-                        # Weights are pre-normalized so w.mean()==1 — same convention
-                        # as calc_mse_loss — so (x * w).mean() approximates a lat-
-                        # weighted mean once averaged over other dims.
-                        if self.tcre_loss_scaling > 0 and self.tcre_slope is not None:
-                            lats = torch.as_tensor(
-                                self._ref_ds.lats.values,
-                                dtype=pred_co2_response.dtype,
-                                device=pred_co2_response.device,
-                            )
-                            w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-                            w = w / w.mean()                         # (H,)
-                            w_b = w.view(1, 1, 1, -1, 1)             # broadcast over B,C,T,W_lon
-                            # pred_co2_response: (B', C, T, H, W) → (B',)
-                            dT_gmean = (pred_co2_response * w_b).mean(dim=(1, 2, 3, 4))
-                            co2_in   = cond_map[tcre_mask][:, 0:1]   # (B', 1, T, H, W)
-                            co2_gmean = (co2_in * w_b).mean(dim=(1, 2, 3, 4))  # (B',)
-                            target_dT = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
-                            tcre_loss = ((dT_gmean - target_dT) ** 2).mean()
+                        lats = torch.as_tensor(
+                            self._ref_ds.lats.values,
+                            dtype=pred_anomaly.dtype,
+                            device=pred_anomaly.device,
+                        )
+                        w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+                        w = w / w.mean()                         # (H,)
+                        w_b = w.view(1, 1, 1, -1, 1)
+                        dT_gmean  = (pred_anomaly[tcre_mask]      * w_b).mean(dim=(1, 2, 3, 4))
+                        co2_in    = cond_map[tcre_mask][:, 0:1]
+                        co2_gmean = (co2_in                       * w_b).mean(dim=(1, 2, 3, 4))
+                        target_dT = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
+                        tcre_loss = ((dT_gmean - target_dT) ** 2).mean()
 
                 del pred_x0_cond, pred_x0_null
 
@@ -1115,7 +1033,6 @@ class UNetTrainer:
                 # cond_loss_scaling is active but this is a non-sync accumulation step —
                 # skip the null pass entirely.  Use cached sensitivity from last sync step.
                 cond_loss        = torch.zeros(1, device=self.device)
-                co2_cond_loss    = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
                 ebm_loss         = torch.zeros(1, device=self.device)
                 anom_error       = torch.zeros(1, device=self.device)
@@ -1125,7 +1042,6 @@ class UNetTrainer:
 
             else:
                 cond_loss        = torch.zeros(1, device=self.device)
-                co2_cond_loss    = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
                 ebm_loss         = torch.zeros(1, device=self.device)
                 anom_error       = torch.zeros(1, device=self.device)
@@ -1135,7 +1051,6 @@ class UNetTrainer:
 
             # Cache raw unscaled loss values for adaptive scaling EMA (before multiply)
             self._last_raw_mse  = mse_loss.detach().item()
-            self._last_raw_co2  = co2_cond_loss.detach().item()
             self._last_raw_cond = cond_loss.detach().item()
             self._last_raw_tcre = tcre_loss.detach().item()
             self._last_raw_ebm  = ebm_loss.detach().item()
@@ -1143,10 +1058,9 @@ class UNetTrainer:
             # ── Total loss ────────────────────────────────────────────────────
             loss = (
                 mse_loss
-                + cond_loss     * self.cond_loss_scaling
-                + co2_cond_loss * self.co2_cond_loss_scaling
-                + tcre_loss     * self.tcre_loss_scaling
-                + ebm_loss      * self.ebm_loss_scaling
+                + cond_loss * self.cond_loss_scaling
+                + tcre_loss * self.tcre_loss_scaling
+                + ebm_loss  * self.ebm_loss_scaling
             )
 
             # Scale the loss by cosine-weighted latitude
@@ -1158,11 +1072,10 @@ class UNetTrainer:
             self.optimizer.zero_grad()
         return (
             loss, mse_loss,
-            cond_loss     * self.cond_loss_scaling,
+            cond_loss * self.cond_loss_scaling,
             anom_signal, anom_error, cond_sensitivity, scen_disc,
-            co2_cond_loss * self.co2_cond_loss_scaling,
-            tcre_loss     * self.tcre_loss_scaling,
-            ebm_loss      * self.ebm_loss_scaling,
+            tcre_loss * self.tcre_loss_scaling,
+            ebm_loss  * self.ebm_loss_scaling,
         )
 
     @torch.inference_mode()
@@ -1231,12 +1144,10 @@ class UNetTrainer:
                 "Optimizer": self.optimizer.state_dict(),
                 "Global Step": self.global_step,
                 "cond_loss_scaling":     self.cond_loss_scaling,
-                "co2_cond_loss_scaling": self.co2_cond_loss_scaling,
                 "tcre_loss_scaling":     self.tcre_loss_scaling,
                 "tcre_slope":            self.tcre_slope,
                 "tcre_intercept":        self.tcre_intercept,
                 "_ema_mse":              self._ema_mse,
-                "_ema_co2":              self._ema_co2,
                 "_ema_cond":             self._ema_cond,
                 "_ema_tcre":             self._ema_tcre,
                 "_ema_ebm":              self._ema_ebm,
@@ -1391,24 +1302,20 @@ class UNetTrainer:
         )
 
         # Restore conditioning scale so resume doesn't restart warmup from 0.
-        # For co2_cond / tcre: a restored 0.0 means a previous run silently
-        # disabled the loss (e.g. precompute failed); fall back to the
-        # config-provided initial value so adaptive scaling can re-warm.
+        # For tcre: a restored 0.0 means a previous run silently disabled the
+        # loss (e.g. precompute failed); fall back to the config-provided
+        # initial value so adaptive scaling can re-warm.
         self.cond_loss_scaling     = checkpoint.get("cond_loss_scaling", 0.0)
-        restored_co2 = checkpoint.get("co2_cond_loss_scaling", self.co2_cond_loss_scaling)
-        self.co2_cond_loss_scaling = restored_co2 if restored_co2 > 0 else self.co2_cond_loss_scaling
         restored_tcre = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
         self.tcre_loss_scaling     = restored_tcre if restored_tcre > 0 else self.tcre_loss_scaling
         self.tcre_slope            = checkpoint.get("tcre_slope",     self.tcre_slope)
         self.tcre_intercept        = checkpoint.get("tcre_intercept", self.tcre_intercept)
         self._ema_mse  = checkpoint.get("_ema_mse",  None)
-        self._ema_co2  = checkpoint.get("_ema_co2",  None)
         self._ema_cond = checkpoint.get("_ema_cond", None)
         self._ema_tcre = checkpoint.get("_ema_tcre", None)
         self._ema_ebm  = checkpoint.get("_ema_ebm",  None)
         self.ebm_loss_scaling = checkpoint.get("ebm_loss_scaling", self.ebm_loss_scaling)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
-              f"co2_cond_loss_scaling={self.co2_cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
 
