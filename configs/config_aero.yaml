@@ -54,15 +54,10 @@ trainer:
     adaptive_loss_scaling: true  # auto-tune cond/tcre scalings to fixed fractions of MSE loss
     cond_target_fraction: 0.30   # general conditioning loss target = 30% of MSE loss (bounded [0.1, 0.4])
     # ── TCRE regularization (physics prior) ──────────────────────────────
-    # Penalizes scenario-averaged gmean(ΔT_from_CO2) deviating from a linear
-    # TCRE relation fit on GHG training data. Applied to hist + ssp370 + ghg.
-    # Adds ~25-33% training overhead (extra CO2-only forward pass for that subset).
+    # Slope precomputed from hist + ssp370 ΔT vs cumCO2 (matches eval).
+    # Applied to the model's full predicted anomaly on hist + ssp370 samples.
     tcre_loss_scaling: 0.01      # initial value; adaptive scaling overrides once EMA warms
     tcre_target_fraction: 0.05
-    # CO2-only conditioning loss: forces model to attribute GHG warming to CO2
-    # channel.  Default 0.0 disables it; non-zero bootstraps the adaptive EMA.
-    co2_cond_loss_scaling: 0.01
-    co2_target_fraction: 0.10
     # ── Energy-balance constraint  N = F + λ·ΔT,  F = F_ghg + F_aero ─────
     # Three learnable scalars (α_ghg, α_aero, λ) penalize the squared
     # global-mean residual.  Ties SUL to ΔT alongside CO2; complements TCRE
