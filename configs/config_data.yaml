@@ -17,6 +17,11 @@ cond_vars:
   - SUL
 n_components_target: null
 n_components_cond: [30, 5]    # [CO2, SUL]: 5 SUL EOFs (down from 10) — drops CEDS↔IAMC 2015-junction EOF that caused the aaer 2015 temperature spike after ep ~610
+# Per-channel spatial gaussian σ (gridpoints) applied to normalised cond fields
+# before PCA. CO2 is already smooth (cumulative emissions); SUL needs smoothing
+# to suppress shipping-lane/flight-path inventory artefacts that the model would
+# otherwise reproduce as line features in the predicted TREFHT.
+cond_smooth_sigma: [0, 2]
 
 # ── Loader settings ──────────────────────────────────────────
 batch_size: 8           # 16→8: per_exp=2 (vs 4) so n_batches doubles → ≥16/realization for 16-rank DDP sharding

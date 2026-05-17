@@ -392,6 +392,11 @@ class ClimateDataset(Dataset):
         # e.g.  n_components_cond=[10, 40]  → 10 EOFs for CO2, 40 for SO2
         n_components_target: Optional[Union[int, list[int]]] = None,
         n_components_cond:   Optional[Union[int, list[int]]] = None,
+        # Per-channel spatial gaussian σ (in gridpoints) applied to normalised
+        # cond fields before PCA.  None or 0 disables smoothing for that channel.
+        # Used to suppress fine-scale inventory artefacts (shipping lanes, flight
+        # paths) in SUL that would otherwise leak into the predicted TREFHT.
+        cond_smooth_sigma: Optional[Union[float, list[float]]] = None,
         # ── Set True to skip loading target climate files (diagnostics only) ─
         cond_only: bool = False,
         # ── Name of the time dimension in the NetCDF files ───────────────────
@@ -422,6 +427,22 @@ class ClimateDataset(Dataset):
         self.n_components_cond = self._norm_n_components(
             n_components_cond, len(self.cond_vars), "cond"
         )
+
+        # Normalise cond_smooth_sigma to a per-channel list (or None).
+        if cond_smooth_sigma is None:
+            self.cond_smooth_sigma = None
+        else:
+            if isinstance(cond_smooth_sigma, (int, float)):
+                sigmas = [float(cond_smooth_sigma)] * len(self.cond_vars)
+            else:
+                sigmas = [float(s) for s in cond_smooth_sigma]
+            if len(sigmas) != len(self.cond_vars):
+                raise ValueError(
+                    f"cond_smooth_sigma length {len(sigmas)} != cond_vars "
+                    f"length {len(self.cond_vars)}"
+                )
+            # None if all zero — avoid the import + per-channel loop entirely
+            self.cond_smooth_sigma = sigmas if any(s > 0 for s in sigmas) else None
 
         # Fitted PCA objects – populated on first load_data call, then reused
         self._pca_target: Optional[list[PCA]] = None
@@ -600,6 +621,25 @@ class ClimateDataset(Dataset):
         self.dataset_cond = _ds_cond[self.cond_vars]#.sel({self.time_dim: selected_years})
         raw_cond.close()
         del raw_cond
+
+        # ── Spatial smoothing on conditioning (before PCA) ───────────────────
+        # Applied per-channel via cond_smooth_sigma list. Removes line features
+        # from gridded inventories (e.g. SO2 shipping lanes, flight paths) that
+        # would otherwise teach the model non-physical per-pixel correlations.
+        # Longitude axis uses wrap padding (periodic); latitude uses reflect.
+        if self.cond_smooth_sigma is not None:
+            from scipy.ndimage import gaussian_filter1d
+            arr = self.tensor_data_cond.numpy()        # (n_vars, T, H, W)
+            for v_idx, sigma in enumerate(self.cond_smooth_sigma):
+                if sigma <= 0:
+                    continue
+                channel = arr[v_idx]                    # (T, H, W)
+                channel = gaussian_filter1d(channel, sigma=sigma, axis=-1, mode="wrap")
+                channel = gaussian_filter1d(channel, sigma=sigma, axis=-2, mode="reflect")
+                arr[v_idx] = channel
+                print(f"[COND] spatial gaussian smoothing σ={sigma} applied to "
+                      f"{self.cond_vars[v_idx]}")
+            self.tensor_data_cond = torch.from_numpy(arr).contiguous()
 
         # ── PCA denoising on conditioning ────────────────────────────────────
         if self.n_components_cond is not None:

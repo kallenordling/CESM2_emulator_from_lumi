@@ -825,12 +825,13 @@ class UNetModel3D(nn.Module):
 
             # ── Direct input injection (always-on gradient path) ──────────────
             # Projects cond_map into the same space as the noisy input x so it
-            # can be added BEFORE input_conv.  This replicates the old model's
-            # `torch.cat([x, cond_map], dim=1)` approach but as an additive
-            # residual, so in_channels stays unchanged (no checkpoint breakage).
-            # Normal init (not zero) — this path should be active from step 1.
+            # can be added BEFORE input_conv.  Spatial kernel 5×5 (time kernel 1)
+            # forces the per-pixel injection to spatially average, suppressing
+            # the leak of inventory line features (shipping lanes, flight paths)
+            # straight into the prediction.  Padding keeps shape unchanged.
             self.cond_input_proj = nn.Conv3d(
-                cond_channels, in_channels, kernel_size=1, bias=True
+                cond_channels, in_channels,
+                kernel_size=(1, 5, 5), padding=(0, 2, 2), bias=True,
             )
             nn.init.kaiming_normal_(self.cond_input_proj.weight, a=0.01)
             nn.init.zeros_(self.cond_input_proj.bias)
