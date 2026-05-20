@@ -1,13 +1,18 @@
 #!/bin/bash
 #SBATCH --job-name=eval_aero
 #SBATCH --account=project_462001328
-#SBATCH --partition=standard-g
+# small-g allows a partial-node allocation (4 GCDs) instead of reserving a whole
+# standard-g node, so the job backfills into much smaller idle gaps. Eval runs
+# in ~15-20 min (bf16 + 50 sample steps + 4-GPU sharding), so a 1 h request lets
+# the backfill scheduler slot it almost immediately rather than hunting for a
+# 40 h hole on a full node.
+#SBATCH --partition=small-g
 #SBATCH --nodes=1
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=128G
-#SBATCH --time=40:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail

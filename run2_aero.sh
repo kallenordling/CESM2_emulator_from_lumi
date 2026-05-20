@@ -7,8 +7,10 @@
 #SBATCH --cpus-per-task=56
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=128G
-#SBATCH --time=48:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
+# 6 h links instead of one 48 h reservation: short jobs backfill into idle gaps
+# far sooner. The run auto-resumes (load_path:"newest") and self-chains below.
 
 set -euo pipefail
 mkdir -p logs
@@ -101,15 +103,46 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
 # Submits watch_eval_triggers.sh on the small partition so it can call sbatch
 # to dispatch eval jobs when the trainer writes trigger files.
 # Runs outside the container (no GPU needed, just needs sbatch access).
-WATCHER_JOB=$(sbatch --job-name=eval_watcher \
-       --account=project_462001112 \
-       --partition=small \
-       --time=48:00:00 \
-       --ntasks=1 --cpus-per-task=1 --mem=256M \
-       --chdir="${SLURM_SUBMIT_DIR}" \
-       --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
-       "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" 2>/dev/null | awk '{print $NF}') || WATCHER_JOB=""
-echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED}"
+# Chain guard: a watcher from an earlier link may still be active — don't spawn
+# a duplicate (the per-job cleanup at the end only runs on a clean exit, not on
+# a walltime kill, so watchers can outlive their submitting job).
+EXISTING_WATCHER=$(squeue -u "$(whoami)" --name=eval_watcher -t PENDING,RUNNING \
+                   --noheader -o '%i' 2>/dev/null | head -1 || true)
+if [[ -n "${EXISTING_WATCHER}" ]]; then
+    WATCHER_JOB=""
+    echo "[watcher] eval watcher ${EXISTING_WATCHER} already active — not resubmitting"
+else
+    WATCHER_JOB=$(sbatch --job-name=eval_watcher \
+           --account=project_462001112 \
+           --partition=small \
+           --time=24:00:00 \
+           --ntasks=1 --cpus-per-task=1 --mem=256M \
+           --chdir="${SLURM_SUBMIT_DIR}" \
+           --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
+           "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" 2>/dev/null | awk '{print $NF}') || WATCHER_JOB=""
+    echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED}"
+fi
+
+# ── Self-chaining: queue the next training link (#2 short-walltime chaining) ──
+# A short 6 h job backfills far sooner than a 48 h reservation; the model
+# auto-resumes from the newest checkpoint and Adam momentum carries over
+# (reset_optimizer: false in configs/config_aero.yaml).
+# The next link is queued BEFORE training with an `afterany` dependency, so it
+# is registered even when this job is killed at the walltime limit (the normal
+# end-of-link case, where the post-training cleanup below never runs).
+# CHAIN_REMAINING bounds the chain length; override at first submission, e.g.
+#   CHAIN_REMAINING=20 sbatch run2_aero.sh
+CHAIN_REMAINING="${CHAIN_REMAINING:-12}"
+if [[ "${CHAIN_REMAINING}" -gt 1 ]]; then
+    NEXT_JOB=$(sbatch --parsable \
+           --dependency="afterany:${SLURM_JOB_ID}" \
+           --export="ALL,CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 ))" \
+           --chdir="${SLURM_SUBMIT_DIR}" \
+           "${SLURM_SUBMIT_DIR}/run2_aero.sh" 2>/dev/null) || NEXT_JOB=""
+    echo "[chain] queued next link ${NEXT_JOB:-FAILED} (afterany:${SLURM_JOB_ID}, CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )))"
+else
+    echo "[chain] CHAIN_REMAINING=${CHAIN_REMAINING} — final link, not resubmitting"
+fi
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
