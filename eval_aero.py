@@ -60,7 +60,7 @@ EXPERIMENTS = [
     dict(
         name         = "hist",
         data_dir     = os.path.join(DATA_ROOT, "hist"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed.nc"),
         realizations = [
             "LE2-1001.001", "LE2-1011.001", "LE2-1021.002", "LE2-1031.002",
             "LE2-1041.003", "LE2-1051.003", "LE2-1061.004", "LE2-1071.004",
@@ -73,7 +73,7 @@ EXPERIMENTS = [
     dict(
         name         = "ssp370",
         data_dir     = os.path.join(DATA_ROOT, "ssp370"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed.nc"),
         realizations = [
             "LE2-1001.001", "LE2-1011.001", "LE2-1021.002", "LE2-1031.002",
             "LE2-1041.003", "LE2-1051.003", "LE2-1061.004", "LE2-1071.004",
@@ -99,7 +99,7 @@ EXPERIMENTS = [
     dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_aero_only_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
