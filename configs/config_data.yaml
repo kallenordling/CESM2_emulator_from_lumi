@@ -29,13 +29,14 @@ mix_scenarios: true    # guarantees cross-scenario batches (critical for conditi
 steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
 # ── Per-scenario sampling weights ────────────────────────────
-# ssp370 weighted 2× to over-sample the high-forcing, CO2+aerosol-coupled
-# regime that dominates the TCRE warm bias.  With batch_size=16 and weights
-# [1,2,1,1] largest-remainder rounding yields hist=3, ssp370=7, aaer=3, ghg=3.
-# The slope-match TCRE loss still sees the full CO2 range every batch
-# (hist low → ssp370/ghg high).
+# #3 low-forcing rebalance: hist weighted 2× to over-sample the LOW cumulative-
+# CO2 regime, which the model over-warms (hist +51%, ssp126 +103% TCRE) and
+# which is under-represented relative to its leverage on ssp126. hist spans
+# cumCO2 ~0→moderate, so it anchors the low end of the per-scenario TCRE slope
+# loss. With batch_size=8, weights [2,1,1,1] → hist=3, ssp370=2, aaer=2, ghg=1
+# (largest-remainder). ssp370 still seen every batch for the high-CO2 anchor.
 scenario_weights:
-  - 1  # hist
+  - 2  # hist   (2× — low-forcing anchor; fixes convex low-cumCO2 over-warming)
   - 1  # ssp370
   - 1  # aaer
   - 1  # ghg
