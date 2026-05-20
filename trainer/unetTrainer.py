@@ -176,6 +176,7 @@ class UNetTrainer:
         self._ema_cond = None   # EMA of unscaled cond_loss magnitude
         self._ema_tcre = None   # EMA of unscaled tcre_loss magnitude
         self._ema_ebm  = None   # EMA of unscaled ebm_loss magnitude
+        self._ema_interaction = None  # EMA of unscaled superposition-interaction loss
         self._ema_decay = 0.99  # ~100 sync-step half-life — slow, stable adjustments
 
         # ── TCRE regularization ──────────────────────────────────────────────
@@ -194,6 +195,18 @@ class UNetTrainer:
         # scenario to its own CESM2 slope keeps the low-forcing response honest.
         # Recomputed deterministically at startup, so resume needs no restore.
         self.tcre_slopes = {}
+
+        # ── Superposition (interaction) penalty — strategy #2 ─────────────────
+        # ssp126 (model-only) over-warms because the model invents a non-physical
+        # CO2×aerosol interaction when aerosols decline sharply — the per-scenario
+        # CO2 slope-match does not constrain it. This penalty enforces ADDITIVE
+        # composition  f(CO2,SUL) ≈ f(CO2,0) + f(0,SUL) − f(0,0)  in the
+        # low-forcing regime (hist samples only; ssp370 excluded because the
+        # joint response is genuinely sub-additive at high forcing). With the
+        # interaction ~0, the model composes unseen low-forcing scenarios from
+        # the marginals it learned (ghg=CO2-only, aaer=aerosol-only).
+        self.interaction_loss_scaling = getattr(self, "interaction_loss_scaling", 0.0)
+        self._interaction_target_fraction = getattr(self, "interaction_target_fraction", 0.05)
 
         # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
         # Three learnable scalars enforce a global-mean linear energy budget:
@@ -407,6 +420,7 @@ class UNetTrainer:
                         "COND LOSS":      avg_cond_loss.detach().item(),
                         "TCRE LOSS":      avg_tcre_loss.detach().item(),
                         "EBM LOSS":       avg_ebm_loss.detach().item(),
+                        "INTER LOSS":     float(getattr(self, "_cached_interaction", 0.0)),
                         "ANOM ERROR":     avg_anom_error.detach().item(),
                         "ANOM SIGNAL":    avg_anom_signal.detach().item(),
                         "SENS":           avg_sens.detach().item(),
@@ -416,6 +430,7 @@ class UNetTrainer:
                         "TCRE SCALE":     self.tcre_loss_scaling,
                         "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
                         "EBM SCALE":      self.ebm_loss_scaling,
+                        "INTER SCALE":    self.interaction_loss_scaling,
                         "EBM/alpha_ghg":  float(self._ebm_alpha_ghg.detach().item()),
                         "EBM/alpha_aero": float(self._ebm_alpha_aero.detach().item()),
                         "EBM/lambda":     float(self._ebm_lambda.detach().item()),
@@ -579,6 +594,8 @@ class UNetTrainer:
                         "_ema_tcre":             self._ema_tcre,
                         "_ema_ebm":              self._ema_ebm,
                         "ebm_loss_scaling":      self.ebm_loss_scaling,
+                        "_ema_interaction":          self._ema_interaction,
+                        "interaction_loss_scaling":  self.interaction_loss_scaling,
                         "best_val_skill":        val_skill,
                         "best_epoch":            epoch,
                     },
@@ -643,6 +660,7 @@ class UNetTrainer:
         cond_val = getattr(self, "_last_raw_cond", 0.0)
         tcre_val = getattr(self, "_last_raw_tcre", 0.0)
         ebm_val  = getattr(self, "_last_raw_ebm",  0.0)
+        inter_val = getattr(self, "_last_raw_interaction", 0.0)
         self._ema_mse = mse_val if self._ema_mse is None else d * self._ema_mse + (1 - d) * mse_val
         if cond_val > 1e-8:
             self._ema_cond = cond_val if self._ema_cond is None else d * self._ema_cond + (1 - d) * cond_val
@@ -650,6 +668,8 @@ class UNetTrainer:
             self._ema_tcre = tcre_val if self._ema_tcre is None else d * self._ema_tcre + (1 - d) * tcre_val
         if ebm_val > 1e-8:
             self._ema_ebm = ebm_val if self._ema_ebm is None else d * self._ema_ebm + (1 - d) * ebm_val
+        if inter_val > 1e-8:
+            self._ema_interaction = inter_val if self._ema_interaction is None else d * self._ema_interaction + (1 - d) * inter_val
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
@@ -696,6 +716,12 @@ class UNetTrainer:
         if self.ebm_loss_scaling > 0 and self._ema_ebm is not None and self._ema_ebm > 1e-8:
             target = self._ebm_target_fraction * self._ema_mse
             self.ebm_loss_scaling = float(max(0.001, min(0.5, target / self._ema_ebm)))
+
+        # interaction_loss: free range [0.001, 0.5] (only when explicitly enabled)
+        if (self.interaction_loss_scaling > 0 and self._ema_interaction is not None
+                and self._ema_interaction > 1e-8):
+            target = self._interaction_target_fraction * self._ema_mse
+            self.interaction_loss_scaling = float(max(0.001, min(0.5, target / self._ema_interaction)))
 
     def _precompute_tcre_slope(self) -> None:
         """Fit slope+intercept of gmean(ΔT_norm) vs gmean(cumCO2_norm) on
@@ -962,6 +988,7 @@ class UNetTrainer:
 
                 tcre_loss = torch.zeros(1, device=self.device)
                 ebm_loss  = torch.zeros(1, device=self.device)
+                interaction_loss = torch.zeros(1, device=self.device)
 
                 # ── Energy-balance constraint  F_ghg + F_aero + λ·ΔT ≈ 0 ──────
                 # Per-sample squared residual of the linear global-mean energy
@@ -1017,6 +1044,32 @@ class UNetTrainer:
                     if tcre_terms:
                         tcre_loss = torch.cat(tcre_terms).mean()
 
+                # ── Superposition (interaction) penalty — strategy #2 ─────────
+                # interaction = f(CO2,SUL) − f(CO2,0) − f(0,SUL) + f(0,0).
+                # Two extra NO-GRAD marginal passes (SUL nulled / CO2 nulled) on
+                # the hist subset only; gradient flows solely through pred_x0_cond
+                # (=f(CO2,SUL)), training it toward the additive target so the
+                # model composes low-forcing scenarios (ssp126) from its
+                # marginals instead of an invented CO2×aerosol interaction.
+                # hist = low-forcing scenario; ssp370 excluded (genuinely
+                # sub-additive at high forcing). Dropped-channel samples
+                # contribute ~0 automatically, so cond_map_input is consistent.
+                if self.interaction_loss_scaling > 0 and scenario_ids is not None:
+                    lf_mask = (scenario_ids == 0)        # hist only
+                    if lf_mask.sum() > 0:
+                        ci  = cond_map_input[lf_mask]
+                        ns  = noisy_samples[lf_mask]
+                        ts  = timesteps[lf_mask]
+                        co2only = ci.clone(); co2only[:, 1] = NULL_COND_VALUE   # SUL→null
+                        sulonly = ci.clone(); sulonly[:, 0] = NULL_COND_VALUE   # CO2→null
+                        with torch.no_grad():
+                            p_co2 = self.get_original_sample(ns, self.model(ns, ts, cond_map=co2only), ts)
+                            p_sul = self.get_original_sample(ns, self.model(ns, ts, cond_map=sulonly), ts)
+                        interaction = (pred_x0_cond[lf_mask]
+                                       - p_co2.detach() - p_sul.detach()
+                                       + pred_x0_null[lf_mask].detach())
+                        interaction_loss = (interaction ** 2).mean().unsqueeze(0)
+
                 del pred_x0_cond, pred_x0_null
 
                 # ── Conditioning loss ─────────────────────────────────────────
@@ -1067,6 +1120,7 @@ class UNetTrainer:
                 cond_loss        = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
                 ebm_loss         = torch.zeros(1, device=self.device)
+                interaction_loss = torch.zeros(1, device=self.device)
                 anom_error       = torch.zeros(1, device=self.device)
                 anom_signal      = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.tensor(self._cached_sensitivity, device=self.device)
@@ -1076,6 +1130,7 @@ class UNetTrainer:
                 cond_loss        = torch.zeros(1, device=self.device)
                 tcre_loss        = torch.zeros(1, device=self.device)
                 ebm_loss         = torch.zeros(1, device=self.device)
+                interaction_loss = torch.zeros(1, device=self.device)
                 anom_error       = torch.zeros(1, device=self.device)
                 anom_signal      = torch.zeros(1, device=self.device)
                 cond_sensitivity = torch.zeros(1, device=self.device)
@@ -1086,6 +1141,8 @@ class UNetTrainer:
             self._last_raw_cond = cond_loss.detach().item()
             self._last_raw_tcre = tcre_loss.detach().item()
             self._last_raw_ebm  = ebm_loss.detach().item()
+            self._last_raw_interaction = interaction_loss.detach().item()
+            self._cached_interaction   = self._last_raw_interaction
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = (
@@ -1093,6 +1150,7 @@ class UNetTrainer:
                 + cond_loss * self.cond_loss_scaling
                 + tcre_loss * self.tcre_loss_scaling
                 + ebm_loss  * self.ebm_loss_scaling
+                + interaction_loss * self.interaction_loss_scaling
             )
 
             # Scale the loss by cosine-weighted latitude
@@ -1184,6 +1242,8 @@ class UNetTrainer:
                 "_ema_tcre":             self._ema_tcre,
                 "_ema_ebm":              self._ema_ebm,
                 "ebm_loss_scaling":      self.ebm_loss_scaling,
+                "_ema_interaction":          self._ema_interaction,
+                "interaction_loss_scaling":  self.interaction_loss_scaling,
             }
 
             # If the directory doesn't exist already create it
@@ -1347,6 +1407,9 @@ class UNetTrainer:
         self._ema_tcre = checkpoint.get("_ema_tcre", None)
         self._ema_ebm  = checkpoint.get("_ema_ebm",  None)
         self.ebm_loss_scaling = checkpoint.get("ebm_loss_scaling", self.ebm_loss_scaling)
+        self._ema_interaction = checkpoint.get("_ema_interaction", None)
+        _restored_inter = checkpoint.get("interaction_loss_scaling", self.interaction_loss_scaling)
+        self.interaction_loss_scaling = _restored_inter if _restored_inter > 0 else self.interaction_loss_scaling
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
