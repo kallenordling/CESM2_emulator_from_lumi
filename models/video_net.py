@@ -829,12 +829,15 @@ class UNetModel3D(nn.Module):
             # forces the per-pixel injection to spatially average, suppressing
             # the leak of inventory line features (shipping lanes, flight paths)
             # straight into the prediction.  Padding keeps shape unchanged.
-            self.cond_input_proj = nn.Conv3d(
+            # Uses LonCircularConv3d (like every other spatial conv) so the 2-cell
+            # longitude pad wraps periodically — a plain nn.Conv3d zero-pads the
+            # lon edges, which surfaces as a spurious seam at 0° in the output.
+            self.cond_input_proj = LonCircularConv3d(
                 cond_channels, in_channels,
                 kernel_size=(1, 5, 5), padding=(0, 2, 2), bias=True,
             )
-            nn.init.kaiming_normal_(self.cond_input_proj.weight, a=0.01)
-            nn.init.zeros_(self.cond_input_proj.bias)
+            nn.init.kaiming_normal_(self.cond_input_proj.conv.weight, a=0.01)
+            nn.init.zeros_(self.cond_input_proj.conv.bias)
 
             # Zero-init all FiLM projections: identity at start, model learns gradually
             for proj in [
