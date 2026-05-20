@@ -85,12 +85,16 @@ EXPERIMENTS = [
     ),
     dict(
         name         = "ssp126",
-        # Pre-regridded CESM2 ssp126 monthly tas (K), single member r4i1p1f1.
-        data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126.nc"),
+        # CESM2 ssp126 monthly tas (K), native 192x288 grid (= model grid, no
+        # regrid). Multi-member ensemble: data_dir/<realization>/*.nc, each
+        # member's two time-halves concatenated by_coords in the loader.
+        # Only full-coverage members (2015-2100) are included — r11 is partial
+        # (2065-2100) and would truncate the ensemble via year-intersection.
+        data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126_ens"),
         # ssp126-only cond file (2015–2100); cumulative CO2 still integrated
         # from 1850 so magnitudes match the training distribution.
         cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed.nc"),
-        realizations = ["r4i1p1f1"],
+        realizations = ["r4i1p1f1", "r10i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
         map_years    = [2015, 2050, 2100],
