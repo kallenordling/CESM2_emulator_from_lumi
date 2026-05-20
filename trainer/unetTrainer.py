@@ -186,8 +186,14 @@ class UNetTrainer:
         #     gmean(ΔT_norm) ≈ tcre_slope * gmean(cumCO2_norm) + tcre_intercept
         # Applied to scenario_ids in {hist, ssp370} only.
         self.tcre_loss_scaling = getattr(self, "tcre_loss_scaling", 0.0)
-        self.tcre_slope     = None  # filled by _precompute_tcre_slope(); may be overwritten by checkpoint
+        self.tcre_slope     = None  # combined hist+ssp370 line (logging / back-compat)
         self.tcre_intercept = None
+        # Per-scenario TCRE targets {scenario_id: (slope, intercept)} for the
+        # LOCAL slope-match loss.  A single combined line lets the response bow
+        # (too steep at low cumCO2 → ssp126/hist over-warming); pinning each
+        # scenario to its own CESM2 slope keeps the low-forcing response honest.
+        # Recomputed deterministically at startup, so resume needs no restore.
+        self.tcre_slopes = {}
 
         # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
         # Three learnable scalars enforce a global-mean linear energy budget:
@@ -300,7 +306,11 @@ class UNetTrainer:
         # loaded tcre_slope/intercept — done above in self.load(); we still
         # compute if not restored so new runs get a valid target.
         scen_names = getattr(self.train_set, "scenario_names", [])
-        if self.tcre_slope is None and "hist" in scen_names and "ssp370" in scen_names:
+        # Recompute if the combined slope is missing OR the per-scenario targets
+        # are empty (the latter is the common case on resume — tcre_slope is
+        # restored from the checkpoint but tcre_slopes is not serialised).
+        if ((self.tcre_slope is None or not self.tcre_slopes)
+                and "hist" in scen_names and "ssp370" in scen_names):
             self._precompute_tcre_slope()
 
     def save_hyperparameters(self, cfg: DictConfig) -> None:
@@ -765,11 +775,28 @@ class UNetTrainer:
         self.tcre_slope     = float(slope)
         self.tcre_intercept = float(intercept)
         print(
-            f"[TRAINER] TCRE precompute (hist+ssp370): slope={self.tcre_slope:.4f} "
+            f"[TRAINER] TCRE precompute (hist+ssp370 combined): slope={self.tcre_slope:.4f} "
             f"intercept={self.tcre_intercept:.4f}  "
             f"(CO2_norm: [{x.min():.3f}, {x.max():.3f}], "
             f"ΔT_norm: [{y.min():.3f}, {y.max():.3f}])"
         )
+
+        # ── Per-scenario targets (#1 local slope-match) ──────────────────────
+        # Fit hist and ssp370 separately so the loss pins each scenario's
+        # ΔT-vs-cumCO2 slope to its own CESM2 value.  scenario_ids: hist=0,
+        # ssp370=1.  Fall back to the combined line for any scenario whose
+        # CO2 range is degenerate.
+        self.tcre_slopes = {}
+        for sid, (xs_, ys_, nm) in {0: (x_h, y_h, "hist"),
+                                    1: (x_s, y_s, "ssp370")}.items():
+            if len(xs_) >= 2 and float(xs_.max() - xs_.min()) >= 1e-6:
+                m_, b_ = _np.polyfit(xs_, ys_, 1)
+                self.tcre_slopes[sid] = (float(m_), float(b_))
+            else:
+                self.tcre_slopes[sid] = (self.tcre_slope, self.tcre_intercept)
+            print(f"[TRAINER] TCRE precompute ({nm}): "
+                  f"slope={self.tcre_slopes[sid][0]:.4f} "
+                  f"intercept={self.tcre_slopes[sid][1]:.4f}")
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         if isinstance(self.scheduler, ContinuousDDPM):
@@ -960,30 +987,35 @@ class UNetTrainer:
                     residual = F_ghg + F_aero + self._ebm_lambda * dT_gmean_full
                     ebm_loss = (residual ** 2).mean().unsqueeze(0)
 
-                # ── TCRE regularizer on hist + ssp370 ─────────────────────────
-                # Slope was fit on hist+ssp370 ΔT vs cumCO2 (all-forcings).
-                # Apply it to the model's full predicted anomaly on the same
-                # scenario mask. ghg (id=3) and aaer (id=2) are excluded:
-                # ghg has no aerosol offset so the slope under-predicts its ΔT;
-                # aaer has no CO2 variation.
+                # ── TCRE regularizer on hist + ssp370 (per-scenario) ──────────
+                # #1 local slope-match: each scenario's full predicted ΔT is
+                # pulled to ITS OWN CESM2 ΔT-vs-cumCO2 line (hist=0, ssp370=1)
+                # rather than a single combined line, so the response can't bow
+                # convex and over-warm the low-cumCO2 regime (hist/ssp126).
+                # ghg (id=3) and aaer (id=2) excluded: ghg has no aerosol offset
+                # so the slope under-predicts its ΔT; aaer has no CO2 variation.
                 if (self.tcre_loss_scaling > 0
-                        and self.tcre_slope is not None
+                        and self.tcre_slopes
                         and scenario_ids is not None):
-                    tcre_mask = (scenario_ids == 0) | (scenario_ids == 1)
-                    if tcre_mask.sum() > 0:
-                        lats = torch.as_tensor(
-                            self._ref_ds.lats.values,
-                            dtype=pred_anomaly.dtype,
-                            device=pred_anomaly.device,
-                        )
-                        w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-                        w = w / w.mean()                         # (H,)
-                        w_b = w.view(1, 1, 1, -1, 1)
-                        dT_gmean  = (pred_anomaly[tcre_mask]      * w_b).mean(dim=(1, 2, 3, 4))
-                        co2_in    = cond_map[tcre_mask][:, 0:1]
-                        co2_gmean = (co2_in                       * w_b).mean(dim=(1, 2, 3, 4))
-                        target_dT = self.tcre_slope * co2_gmean + (self.tcre_intercept or 0.0)
-                        tcre_loss = ((dT_gmean - target_dT) ** 2).mean()
+                    lats = torch.as_tensor(
+                        self._ref_ds.lats.values,
+                        dtype=pred_anomaly.dtype,
+                        device=pred_anomaly.device,
+                    )
+                    w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+                    w = w / w.mean()                         # (H,)
+                    w_b = w.view(1, 1, 1, -1, 1)
+                    tcre_terms = []
+                    for sid, (sl, ic) in self.tcre_slopes.items():
+                        m_sid = (scenario_ids == sid)
+                        if m_sid.sum() == 0:
+                            continue
+                        dT_gmean  = (pred_anomaly[m_sid]   * w_b).mean(dim=(1, 2, 3, 4))
+                        co2_gmean = (cond_map[m_sid][:, 0:1] * w_b).mean(dim=(1, 2, 3, 4))
+                        target_dT = sl * co2_gmean + ic
+                        tcre_terms.append((dT_gmean - target_dT) ** 2)
+                    if tcre_terms:
+                        tcre_loss = torch.cat(tcre_terms).mean()
 
                 del pred_x0_cond, pred_x0_null
 
