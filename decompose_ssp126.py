@@ -45,6 +45,12 @@ def main():
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--fp32", action="store_true", help="disable bf16 autocast")
     ap.add_argument("--out", default="ssp126_decomp.png")
+    ap.add_argument("--cache", default=None,
+                    help="npz cache of per-pass results (default auto-named from "
+                         "checkpoint + sample-steps + precision). Existing passes "
+                         "are reused; only missing ones are generated.")
+    ap.add_argument("--force", action="store_true",
+                    help="regenerate all passes, ignoring any cache")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -83,14 +89,43 @@ def main():
         "null":     torch.full_like(cond, NULL),
     }
 
+    # ── Resumable cache: only generate passes that are missing ───────────────
+    # Keyed by checkpoint + sample-steps + precision so a different setting
+    # doesn't reuse stale results. Saved after every pass, so a timed-out or
+    # re-submitted job continues where it left off.
+    import os
+    ckpt_tag = os.path.splitext(os.path.basename(ckpt))[0]
+    prec = "fp32" if args.fp32 else "bf16"
+    cache_path = args.cache or f"ssp126_decomp_{ckpt_tag}_s{args.sample_steps}_{prec}.npz"
+
+    cache = {}
+    if os.path.exists(cache_path) and not args.force:
+        z = np.load(cache_path)
+        cache = {k: z[k] for k in z.files}
+        # invalidate if the cond grid changed (different year span)
+        if "years" in cache and len(cache["years"]) != len(years):
+            print(f"[CACHE] {cache_path} year span differs ({len(cache['years'])} vs "
+                  f"{len(years)}) — ignoring")
+            cache = {}
+        else:
+            have = [k for k in cache if k != "years"]
+            print(f"[CACHE] {cache_path}: reusing passes {have}")
+    cache["years"] = years
+
     gm = {}
     for name, c in passes.items():
+        if name in cache and not args.force:
+            gm[name] = cache[name]
+            print(f"  [{name:8s}] cached — skip   (2100 gmean = {gm[name][-1]:.3f}°C)")
+            continue
         gn = E.generate_timeseries(
             model, scheduler, c, device, dtype, args.sample_steps, args.batch_size,
             seed=0, autocast_dtype=autocast_dt)        # direct conditioning (w=1/1)
         celsius = gn * 21.0 + 4.5                       # denormalise → °C (T,H,W)
         gm[name] = E.area_weighted_gmean(celsius, lat)  # (T,)
-        print(f"  [{name:8s}] 2100 gmean = {gm[name][-1]:.3f}°C")
+        cache[name] = gm[name]
+        np.savez(cache_path, **cache)                   # persist incrementally
+        print(f"  [{name:8s}] generated — 2100 gmean = {gm[name][-1]:.3f}°C  (cached → {cache_path})")
 
     dT_full = gm["full"]     - gm["null"]
     dT_ghg  = gm["ghg_only"] - gm["null"]
