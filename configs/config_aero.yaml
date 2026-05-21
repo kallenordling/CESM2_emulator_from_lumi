@@ -71,6 +71,12 @@ trainer:
     # passes on the hist subset each sync step. Scaling adapts via EMA.
     interaction_loss_scaling: 0.01      # initial; adaptive scaling overrides once EMA warms
     interaction_target_fraction: 0.05
+    # PROTOTYPE (option 1, ssp126): also enforce additivity on a declining-aerosol
+    # synthetic (SUL scaled toward null by a random retained-fraction in [frac,1])
+    # for CO2-bearing samples — the high→low aerosol regime ssp126 traverses but
+    # hist/ssp370 don't. 0.0 = off. Adds ONE extra grad forward pass per sync step
+    # (~slower; watch DDP). Try 0.2 to enable; set 0.0 to disable.
+    interaction_decline_frac: 0.0
     reset_optimizer: false      # keep Adam momentum across resumes — required for short chained jobs (run2_aero.sh self-chaining). Set true only for a one-off momentum reset after a loss-function change.
     eval_script: run_eval_aero.sh
 
