@@ -103,6 +103,11 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
 # Submits watch_eval_triggers.sh on the small partition so it can call sbatch
 # to dispatch eval jobs when the trainer writes trigger files.
 # Runs outside the container (no GPU needed, just needs sbatch access).
+# Walltime: match this training job's own time limit so the watcher stops at the
+# same time as the main script (auto-tracks #SBATCH --time above; falls back to
+# 06:00:00 if the limit can't be read).
+WATCHER_TIME=$(squeue -h -j "${SLURM_JOB_ID}" -o '%l' 2>/dev/null | tr -d '[:space:]' || true)
+[[ -z "${WATCHER_TIME}" || "${WATCHER_TIME}" == "UNLIMITED" ]] && WATCHER_TIME="06:00:00"
 # Chain guard: a watcher from an earlier link may still be active — don't spawn
 # a duplicate (the per-job cleanup at the end only runs on a clean exit, not on
 # a walltime kill, so watchers can outlive their submitting job).
@@ -115,12 +120,12 @@ else
     WATCHER_JOB=$(sbatch --job-name=eval_watcher \
            --account=project_462001112 \
            --partition=small \
-           --time=24:00:00 \
+           --time="${WATCHER_TIME}" \
            --ntasks=1 --cpus-per-task=1 --mem=256M \
            --chdir="${SLURM_SUBMIT_DIR}" \
            --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_%j.out" \
            "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" 2>/dev/null | awk '{print $NF}') || WATCHER_JOB=""
-    echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED}"
+    echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED} (time=${WATCHER_TIME})"
 fi
 
 # ── Self-chaining: queue the next training link (#2 short-walltime chaining) ──
