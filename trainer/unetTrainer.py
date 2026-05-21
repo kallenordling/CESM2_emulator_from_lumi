@@ -207,6 +207,12 @@ class UNetTrainer:
         # the marginals it learned (ghg=CO2-only, aaer=aerosol-only).
         self.interaction_loss_scaling = getattr(self, "interaction_loss_scaling", 0.0)
         self._interaction_target_fraction = getattr(self, "interaction_target_fraction", 0.05)
+        # PROTOTYPE (option 1): also enforce additivity on a declining-aerosol
+        # synthetic (SUL scaled toward null by a random retained-fraction in
+        # [interaction_decline_frac, 1]) for the CO2-bearing samples — the
+        # high→low aerosol regime ssp126 traverses. 0.0 disables. Adds one extra
+        # grad forward pass; watch DDP on first run.
+        self.interaction_decline_frac = getattr(self, "interaction_decline_frac", 0.0)
 
         # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
         # Three learnable scalars enforce a global-mean linear energy budget:
@@ -1055,6 +1061,9 @@ class UNetTrainer:
                 # sub-additive at high forcing). Dropped-channel samples
                 # contribute ~0 automatically, so cond_map_input is consistent.
                 if self.interaction_loss_scaling > 0 and scenario_ids is not None:
+                    inter_terms = []
+                    # (a) additivity on hist actual cond (reuses pred_x0_cond — no
+                    #     extra grad pass).
                     lf_mask = (scenario_ids == 0)        # hist only
                     if lf_mask.sum() > 0:
                         ci  = cond_map_input[lf_mask]
@@ -1065,10 +1074,41 @@ class UNetTrainer:
                         with torch.no_grad():
                             p_co2 = self.get_original_sample(ns, self.model(ns, ts, cond_map=co2only), ts)
                             p_sul = self.get_original_sample(ns, self.model(ns, ts, cond_map=sulonly), ts)
-                        interaction = (pred_x0_cond[lf_mask]
-                                       - p_co2.detach() - p_sul.detach()
-                                       + pred_x0_null[lf_mask].detach())
-                        interaction_loss = (interaction ** 2).mean().unsqueeze(0)
+                        inter_a = (pred_x0_cond[lf_mask]
+                                   - p_co2.detach() - p_sul.detach()
+                                   + pred_x0_null[lf_mask].detach())
+                        inter_terms.append((inter_a ** 2).mean())
+
+                    # (b) PROTOTYPE (option 1): additivity on a DECLINING-AEROSOL
+                    # synthetic. ssp126 over-warms in the high→low aerosol +
+                    # present-CO2 regime that hist/ssp370 never traverse (decompose_
+                    # ssp126.py: interaction RMS ~1°C over that transition). For the
+                    # joint (CO2-bearing) samples, scale SUL toward null by a random
+                    # retained-fraction f∈[floor,1] (mimicking aerosol drawdown) and
+                    # enforce additivity there. Costs ONE extra GRAD pass on the
+                    # synthetic full + two no-grad marginals. Off when
+                    # interaction_decline_frac == 0.
+                    if self.interaction_decline_frac > 0:
+                        jm = (scenario_ids == 0) | (scenario_ids == 1)   # hist+ssp370 carry CO2
+                        if jm.sum() > 0:
+                            ns2 = noisy_samples[jm]; ts2 = timesteps[jm]
+                            floor = self.interaction_decline_frac
+                            f = floor + (1.0 - floor) * float(torch.rand(1))
+                            cond_decl = cond_map_input[jm].clone()
+                            cond_decl[:, 1] = NULL_COND_VALUE + f * (cond_decl[:, 1] - NULL_COND_VALUE)
+                            co2d = cond_decl.clone(); co2d[:, 1] = NULL_COND_VALUE
+                            suld = cond_decl.clone(); suld[:, 0] = NULL_COND_VALUE
+                            # full pass WITH grad on the synthetic declining cond
+                            f_full_d = self.get_original_sample(ns2, self.model(ns2, ts2, cond_map=cond_decl), ts2)
+                            with torch.no_grad():
+                                p_co2_d = self.get_original_sample(ns2, self.model(ns2, ts2, cond_map=co2d), ts2)
+                                p_sul_d = self.get_original_sample(ns2, self.model(ns2, ts2, cond_map=suld), ts2)
+                            inter_b = (f_full_d - p_co2_d.detach() - p_sul_d.detach()
+                                       + pred_x0_null[jm].detach())
+                            inter_terms.append((inter_b ** 2).mean())
+
+                    if inter_terms:
+                        interaction_loss = torch.stack(inter_terms).mean().unsqueeze(0)
 
                 del pred_x0_cond, pred_x0_null
 
