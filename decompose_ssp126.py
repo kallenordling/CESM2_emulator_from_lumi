@@ -133,15 +133,24 @@ def main():
     dT_add  = dT_ghg + dT_sul
     interaction = dT_full - dT_add
 
-    print("\n[DECOMP] global-mean ΔT (re null pass), 2100:")
-    print(f"  full        = {dT_full[-1]:+.3f} °C")
-    print(f"  ghg_only    = {dT_ghg[-1]:+.3f} °C")
-    print(f"  sul_only    = {dT_sul[-1]:+.3f} °C   (aerosol-removal warming)")
-    print(f"  additive    = {dT_add[-1]:+.3f} °C   (ghg + sul)")
-    print(f"  interaction = {interaction[-1]:+.3f} °C   (full - additive)")
-    frac = interaction[-1] / dT_full[-1] if dT_full[-1] != 0 else float("nan")
-    print(f"  → interaction is {frac:+.0%} of full ΔT "
-          f"({'MARGINAL-dominated' if abs(frac) < 0.25 else 'INTERACTION-dominated'})")
+    # Report over the WHOLE trajectory — judging additivity from a single year
+    # (esp. 2100, where ssp126 aerosols have vanished) is misleading: the
+    # interaction can be near-zero at the endpoint while large mid-century.
+    print("\n[DECOMP] global-mean ΔT (re null pass) — multi-year:")
+    print("  year   full    ghg     sul    interaction")
+    for y in [years[0], 2030, 2050, 2070, 2100]:
+        i = int(np.argmin(np.abs(years - y)))
+        print(f"  {years[i]:5d} {dT_full[i]:7.2f} {dT_ghg[i]:7.2f} {dT_sul[i]:7.2f} {interaction[i]:9.2f}")
+    inter_rms = float(np.sqrt((interaction ** 2).mean()))
+    print(f"\n  interaction over trajectory: RMS={inter_rms:.2f}°C  "
+          f"min={interaction.min():+.2f}  max={interaction.max():+.2f}")
+    print(f"  SUL marginal swing {years[0]}->{years[-1]}: "
+          f"{dT_sul[0]:+.2f} -> {dT_sul[-1]:+.2f}  "
+          f"(= {dT_sul[-1]-dT_sul[0]:+.2f}°C aerosol-removal trend)")
+    print(f"  full warming {years[0]}-{years[-1]}: {dT_full[-1]-dT_full[0]:+.2f}°C")
+    add_frac = inter_rms / (np.abs(dT_full).mean() + 1e-9)
+    print(f"  → trajectory interaction RMS is {add_frac:.0%} of mean |ΔT_full| "
+          f"({'ADDITIVE' if add_frac < 0.15 else 'NON-ADDITIVE over trajectory'})")
 
     fig, ax = plt.subplots(figsize=(9, 6))
     ax.plot(years, dT_full, color="k",       lw=2.2, label="full  f(CO2,SUL)")
