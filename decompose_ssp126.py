@@ -44,7 +44,9 @@ def main():
     ap.add_argument("--sample-steps", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--fp32", action="store_true", help="disable bf16 autocast")
-    ap.add_argument("--out", default="ssp126_decomp.png")
+    ap.add_argument("--scenario", default="ssp126",
+                    help="experiment to decompose (ssp126/ssp370/hist/ghg/aaer)")
+    ap.add_argument("--out", default=None, help="default <scenario>_decomp.png")
     ap.add_argument("--cache", default=None,
                     help="npz cache of per-pass results (default auto-named from "
                          "checkpoint + sample-steps + precision). Existing passes "
@@ -72,10 +74,10 @@ def main():
     SMOOTH = OmegaConf.to_container(_cs, resolve=True) if _cs is not None else None
     print(f"[COND] n_components_cond={N_COMP}  cond_smooth_sigma={SMOOTH}")
 
-    ssp = next(e for e in E.EXPERIMENTS if e["name"] == "ssp126")
+    ssp = next(e for e in E.EXPERIMENTS if e["name"] == args.scenario)
     cond, years, lat, lon = E.build_cond_tensor(
         ssp["cond_file"], E.COND_VARS, ssp["time_dim"], pca_cond, N_COMP, SMOOTH)
-    print(f"[COND] ssp126 tensor {tuple(cond.shape)}  years {years.min()}-{years.max()}")
+    print(f"[COND] {args.scenario} tensor {tuple(cond.shape)}  years {years.min()}-{years.max()}")
 
     scheduler = instantiate(OmegaConf.load(E.CONFIG_PATH).scheduler)
 
@@ -96,7 +98,7 @@ def main():
     import os
     ckpt_tag = os.path.splitext(os.path.basename(ckpt))[0]
     prec = "fp32" if args.fp32 else "bf16"
-    cache_path = args.cache or f"ssp126_decomp_{ckpt_tag}_s{args.sample_steps}_{prec}.npz"
+    cache_path = args.cache or f"{args.scenario}_decomp_{ckpt_tag}_s{args.sample_steps}_{prec}.npz"
 
     cache = {}
     if os.path.exists(cache_path) and not args.force:
@@ -161,10 +163,11 @@ def main():
     ax.axhline(0, color="grey", lw=0.6)
     ax.set_xlabel("year")
     ax.set_ylabel("global-mean ΔT vs null pass (°C)")
-    ax.set_title("ssp126 single-forcing decomposition (model-side)")
+    ax.set_title(f"{args.scenario} single-forcing decomposition (model-side)")
     ax.grid(alpha=.3); ax.legend()
-    fig.tight_layout(); fig.savefig(args.out, dpi=130)
-    print(f"\nwrote {args.out}")
+    out = args.out or f"{args.scenario}_decomp.png"
+    fig.tight_layout(); fig.savefig(out, dpi=130)
+    print(f"\nwrote {out}")
 
 
 if __name__ == "__main__":
