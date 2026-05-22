@@ -218,7 +218,8 @@ def extract_years(coord_vals) -> np.ndarray:
 
 
 def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
-                      pca_objects, n_components_cond, cond_smooth_sigma=None):
+                      pca_objects, n_components_cond, cond_smooth_sigma=None,
+                      cond_smooth_method="gaussian"):
     """Load, normalize, optionally smooth + PCA-project the conditioning data.
 
     The smoothing + PCA steps must mirror the training-side pipeline in
@@ -252,26 +253,16 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
     years = extract_years(norm[time_dim].values)
 
     # ── Spatial smoothing on conditioning (before PCA) ───────────────────────
-    # Mirrors ClimateDataset (data/climate_dataset.py): per-channel Gaussian
-    # smoothing removes inventory line features (SO2 shipping lanes, flight
-    # paths) so the model receives the same smooth cond it was trained on.
-    # Longitude axis uses wrap padding (periodic); latitude uses reflect.
+    # Reuse ClimateDataset's exact smoothing (data/climate_dataset.py) so eval
+    # feeds the model the same denoised cond it trained on — same method
+    # (gaussian/median) and per-channel sigma.
     if cond_smooth_sigma is not None:
-        from scipy.ndimage import gaussian_filter1d
-        if isinstance(cond_smooth_sigma, (int, float)):
-            sigmas = [float(cond_smooth_sigma)] * len(cond_vars)
-        else:
-            sigmas = [float(s) for s in cond_smooth_sigma]
-        arr = cond_tensor.numpy()                   # (n_vars, T, H, W)
-        for v_idx, sigma in enumerate(sigmas):
-            if sigma <= 0:
-                continue
-            channel = arr[v_idx]                    # (T, H, W)
-            channel = gaussian_filter1d(channel, sigma=sigma, axis=-1, mode="wrap")
-            channel = gaussian_filter1d(channel, sigma=sigma, axis=-2, mode="reflect")
-            arr[v_idx] = channel
-            print(f"[COND] spatial gaussian smoothing σ={sigma} applied to "
-                  f"{cond_vars[v_idx]}")
+        from data.climate_dataset import smooth_cond_spatial
+        sigmas = ([float(cond_smooth_sigma)] * len(cond_vars)
+                  if isinstance(cond_smooth_sigma, (int, float))
+                  else [float(s) for s in cond_smooth_sigma])
+        arr = smooth_cond_spatial(cond_tensor.numpy(), sigmas,
+                                  cond_smooth_method, cond_vars)
         cond_tensor = torch.from_numpy(arr).contiguous()
 
     if pca_objects is not None:
@@ -1670,7 +1661,8 @@ def main():
     # removes the inventory texture the model would otherwise imprint.
     _cs = data_cfg.get("cond_smooth_sigma", None)
     COND_SMOOTH_SIGMA = OmegaConf.to_container(_cs, resolve=True) if _cs is not None else None
-    print(f"[COND] cond_smooth_sigma={COND_SMOOTH_SIGMA}")
+    COND_SMOOTH_METHOD = data_cfg.get("cond_smooth_method", "gaussian")
+    print(f"[COND] cond_smooth_sigma={COND_SMOOTH_SIGMA} method={COND_SMOOTH_METHOD}")
     scheduler: ContinuousDDPM = instantiate(cfg.scheduler)
 
     # ── compute hist baseline map (H, W) for anomaly reference ─────────────
@@ -1727,7 +1719,7 @@ def main():
         try:
             cond_tensor, cond_years, lat_file, lon_file = build_cond_tensor(
                 exp["cond_file"], COND_VARS, exp["time_dim"],
-                pca_cond, N_COMP_COND, COND_SMOOTH_SIGMA,
+                pca_cond, N_COMP_COND, COND_SMOOTH_SIGMA, COND_SMOOTH_METHOD,
             )
         except Exception as e:
             print(f"  SKIP (conditioning failed): {e}")
