@@ -50,10 +50,11 @@ fi
 # ── Options (override via env at submit time) ────────────────────────────────
 CHECKPOINT="${CHECKPOINT:-}"          # default: newest in runs/
 SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
+SCENARIO="${SCENARIO:-ssp126}"        # ssp126/ssp370/hist/ghg/aaer
 CKPT_FLAG=""; [ -n "${CHECKPOINT}" ] && CKPT_FLAG="--checkpoint ${CHECKPOINT}"
 FP32_FLAG="";  [ "${FP32:-0}" = "1" ] && FP32_FLAG="--fp32"
 
-PY_ARGS="${CKPT_FLAG} --sample-steps ${SAMPLE_STEPS} ${FP32_FLAG} --out ${WORK_DIR}/ssp126_decomp.png"
+PY_ARGS="${CKPT_FLAG} --sample-steps ${SAMPLE_STEPS} ${FP32_FLAG} --scenario ${SCENARIO} --out ${WORK_DIR}/${SCENARIO}_decomp.png"
 
 # Let SLURM bind the single GCD (--gpus-per-task=1); do NOT set ROCR_VISIBLE_DEVICES
 # manually — that races the binding and drops ranks to CPU (see run_eval_aero.sh).
