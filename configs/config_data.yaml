@@ -22,6 +22,11 @@ n_components_cond: [30, 5]    # [CO2, SUL]: 5 SUL EOFs (down from 10) — drops 
 # to suppress shipping-lane/flight-path inventory artefacts that the model would
 # otherwise reproduce as line features in the predicted TREFHT.
 cond_smooth_sigma: [0, 2]
+# Denoiser for the smoothing above: "gaussian" (blurs all scales — also erases
+# the regional aerosol fingerprint, see model_skill_diagnosis: aaer patcorr 0.42)
+# or "median" (k=2*round(sigma)+1 kernel; removes thin shipping/flight lines but
+# preserves broad continental aerosol structure). Production = gaussian.
+cond_smooth_method: gaussian
 
 # ── Loader settings ──────────────────────────────────────────
 batch_size: 8           # 16→8: per_exp=2 (vs 4) so n_batches doubles → ≥16/realization for 16-rank DDP sharding

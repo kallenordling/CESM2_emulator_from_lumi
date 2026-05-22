@@ -205,6 +205,42 @@ def scale_quantile_transform(da: xr.DataArray, n_quantiles=1000, floor=1e-30):
 # PCA denoising helpers
 # ---------------------------------------------------------------------------
 
+def smooth_cond_spatial(arr, sigmas, method="gaussian", var_names=None):
+    """Per-channel spatial smoothing of cond fields, shape (n_vars, T, H, W).
+
+    Longitude (last axis) is periodic → wrap padding; latitude → reflect.
+      method="gaussian": separable gaussian_filter1d — blurs ALL scales, so it
+        also erases the regional aerosol fingerprint along with the line noise.
+      method="median": k×k median filter, k=2*round(sigma)+1 (sigma=1→3×3,
+        2→5×5) — removes thin line artefacts (shipping lanes, flight paths)
+        while preserving broad continental structure.
+    Returns a new array; channels with sigma<=0 are left unchanged.
+    """
+    arr = np.asarray(arr).copy()
+    method = str(method).lower()
+    for v_idx, sigma in enumerate(sigmas):
+        if sigma <= 0:
+            continue
+        ch = arr[v_idx]                                   # (T, H, W)
+        name = var_names[v_idx] if var_names is not None else f"ch{v_idx}"
+        if method == "median":
+            from scipy.ndimage import median_filter
+            k = 2 * int(round(sigma)) + 1
+            pad = k // 2
+            ch = np.pad(ch, ((0, 0), (0, 0), (pad, pad)), mode="wrap")     # lon periodic
+            ch = np.pad(ch, ((0, 0), (pad, pad), (0, 0)), mode="reflect")  # lat
+            ch = median_filter(ch, size=(1, k, k), mode="nearest")
+            ch = ch[:, pad:-pad, pad:-pad]
+            print(f"[COND] spatial median filter {k}x{k} applied to {name}")
+        else:
+            from scipy.ndimage import gaussian_filter1d
+            ch = gaussian_filter1d(ch, sigma=sigma, axis=-1, mode="wrap")
+            ch = gaussian_filter1d(ch, sigma=sigma, axis=-2, mode="reflect")
+            print(f"[COND] spatial gaussian smoothing sigma={sigma} applied to {name}")
+        arr[v_idx] = ch
+    return arr
+
+
 def fit_pca_denoise(
     data: np.ndarray,
     n_components: int,
@@ -397,6 +433,11 @@ class ClimateDataset(Dataset):
         # Used to suppress fine-scale inventory artefacts (shipping lanes, flight
         # paths) in SUL that would otherwise leak into the predicted TREFHT.
         cond_smooth_sigma: Optional[Union[float, list[float]]] = None,
+        # Denoiser for cond smoothing: "gaussian" (blurs everything — kills the
+        # regional aerosol fingerprint along with the lines) or "median" (removes
+        # thin line artefacts while preserving broad continental structure).
+        # For median, kernel size = 2*round(sigma)+1 (sigma=1→3×3, sigma=2→5×5).
+        cond_smooth_method: str = "gaussian",
         # ── Set True to skip loading target climate files (diagnostics only) ─
         cond_only: bool = False,
         # ── Name of the time dimension in the NetCDF files ───────────────────
@@ -443,6 +484,7 @@ class ClimateDataset(Dataset):
                 )
             # None if all zero — avoid the import + per-channel loop entirely
             self.cond_smooth_sigma = sigmas if any(s > 0 for s in sigmas) else None
+        self.cond_smooth_method = str(cond_smooth_method).lower()
 
         # Fitted PCA objects – populated on first load_data call, then reused
         self._pca_target: Optional[list[PCA]] = None
@@ -627,18 +669,12 @@ class ClimateDataset(Dataset):
         # from gridded inventories (e.g. SO2 shipping lanes, flight paths) that
         # would otherwise teach the model non-physical per-pixel correlations.
         # Longitude axis uses wrap padding (periodic); latitude uses reflect.
+        # method="gaussian" blurs everything (also erases the regional aerosol
+        # fingerprint); "median" removes thin lines but keeps broad structure.
         if self.cond_smooth_sigma is not None:
-            from scipy.ndimage import gaussian_filter1d
-            arr = self.tensor_data_cond.numpy()        # (n_vars, T, H, W)
-            for v_idx, sigma in enumerate(self.cond_smooth_sigma):
-                if sigma <= 0:
-                    continue
-                channel = arr[v_idx]                    # (T, H, W)
-                channel = gaussian_filter1d(channel, sigma=sigma, axis=-1, mode="wrap")
-                channel = gaussian_filter1d(channel, sigma=sigma, axis=-2, mode="reflect")
-                arr[v_idx] = channel
-                print(f"[COND] spatial gaussian smoothing σ={sigma} applied to "
-                      f"{self.cond_vars[v_idx]}")
+            arr = smooth_cond_spatial(
+                self.tensor_data_cond.numpy(),          # (n_vars, T, H, W)
+                self.cond_smooth_sigma, self.cond_smooth_method, self.cond_vars)
             self.tensor_data_cond = torch.from_numpy(arr).contiguous()
 
         # ── PCA denoising on conditioning ────────────────────────────────────
