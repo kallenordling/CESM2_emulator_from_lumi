@@ -38,12 +38,30 @@ steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stal
 # CO2 regime, which the model over-warms (hist +51%, ssp126 +103% TCRE) and
 # which is under-represented relative to its leverage on ssp126. hist spans
 # cumCO2 ~0→moderate, so it anchors the low end of the per-scenario TCRE slope
-# loss. With batch_size=8, weights [2,1,1,1] → hist=3, ssp370=2, aaer=2, ghg=1
-# (largest-remainder). ssp370 still seen every batch for the high-CO2 anchor.
+# loss. ssp370 still seen every batch for the high-CO2 anchor.
+#
+# #4 aerosol rebalance (2026-05-23): aaer 1→4 weight. The base chain progressively
+# UNLEARNS the aerosol fingerprint that it HAD learned (aaer patcorr 0.80@ep350 →
+# 0.08@ep470) as the slope-match/hist-upweight pressure pulls it off aerosols. The
+# aaer-upweight A/B (run_aaertest, same-epoch control at ep470) recovered it:
+# patcorr 0.08→0.79, aaer GMbias +0.93→−0.04, hist patcorr 0.71→0.93 — so the
+# aerosol response is WEIGHT-limited, not data-limited. (ssp126 stayed +136% TCRE
+# → it's OOD, not a marginal problem; see model_skill_diagnosis /
+# ssp126_convex_response_fix.)
+#
+# CHOSEN [2,2,4,1] over the proven [2,1,4,1]: at 4× aaer the A/B HALVED ssp370's
+# batch share and doubled its warm bias (GMbias +0.23→+0.51; pattern unaffected,
+# 0.99). Bumping ssp370 to 2 protects it. With batch_size=8 (largest-remainder):
+# [2,2,4,1] → hist=2, ssp370=2, aaer=3, ghg=1. Net vs old [2,1,1,1] (=hist3,
+# ssp370 2, aaer2, ghg1): aaer 2→3, hist 3→2, ssp370 held at 2.
+# CAVEATS: (a) aaer lands at 3/8, NOT the A/B-proven 4/8 → recovery may be partial
+# (somewhere between 0.08 and 0.79); re-eval aaer patcorr after ~30-50 epochs.
+# (b) hist drops one slot (3→2) → slightly weaker low-forcing TCRE anchor; watch
+# hist/ssp126 TCRE ratios don't creep back up.
 scenario_weights:
-  - 2  # hist   (2× — low-forcing anchor; fixes convex low-cumCO2 over-warming)
-  - 1  # ssp370
-  - 1  # aaer
+  - 2  # hist   (low-forcing anchor; was 3/8, now 2/8 — watch hist/ssp126 TCRE)
+  - 2  # ssp370 (2× — protect batch share vs aaer upweight; keeps GMbias ~+0.23)
+  - 4  # aaer   (recover aerosol fingerprint; A/B patcorr 0.08→0.79 at 4/8, here 3/8)
   - 1  # ghg
 
 # ── Year-biased window sampling ──────────────────────────────
