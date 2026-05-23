@@ -208,6 +208,17 @@ class UNetTrainer:
         self.interaction_loss_scaling = getattr(self, "interaction_loss_scaling", 0.0)
         self._interaction_target_fraction = getattr(self, "interaction_target_fraction", 0.05)
 
+        # ── TCRE eval-alignment flag (A/B, default OFF) ───────────────────────
+        # The TCRE slope-match compares CESM2's FULL anomaly (clean − climatology,
+        # see _precompute_tcre_slope) against the model's CFG-DECOMPOSITION anomaly
+        # (pred_x0_cond − pred_x0_null). These coincide only if pred_x0_null ≈
+        # climatology; when the null pass drifts above the 1850-1900 baseline the
+        # eval (cond − clim) over-warms regardless of how well the slope-match
+        # converges (ssp370 eval slope b≈1.33, warm_bias/cfg_inference_tuning gap).
+        # When True, score the TCRE loss on the FULL anomaly (pred_x0_cond − clim)
+        # so training constrains exactly the quantity eval measures.
+        self.tcre_full_anomaly = getattr(self, "tcre_full_anomaly", False)
+
         # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
         # Three learnable scalars enforce a global-mean linear energy budget:
         #   F_ghg  = α_ghg  · gmean(cumCO2_norm)   (positive forcing)
@@ -1024,6 +1035,12 @@ class UNetTrainer:
                 if (self.tcre_loss_scaling > 0
                         and self.tcre_slopes
                         and scenario_ids is not None):
+                    # Quantity to slope-match: FULL anomaly (cond − climatology,
+                    # eval-aligned) when tcre_full_anomaly, else the CFG
+                    # decomposition (cond − null). Target slopes are CESM2 full
+                    # anomaly, so the full-anomaly form is the apples-to-apples one.
+                    tcre_pred = (pred_x0_cond - self.climatology.to(dtype=pred_x0_cond.dtype)) \
+                        if self.tcre_full_anomaly else pred_anomaly
                     lats = torch.as_tensor(
                         self._ref_ds.lats.values,
                         dtype=pred_anomaly.dtype,
@@ -1037,7 +1054,7 @@ class UNetTrainer:
                         m_sid = (scenario_ids == sid)
                         if m_sid.sum() == 0:
                             continue
-                        dT_gmean  = (pred_anomaly[m_sid]   * w_b).mean(dim=(1, 2, 3, 4))
+                        dT_gmean  = (tcre_pred[m_sid]      * w_b).mean(dim=(1, 2, 3, 4))
                         co2_gmean = (cond_map[m_sid][:, 0:1] * w_b).mean(dim=(1, 2, 3, 4))
                         target_dT = sl * co2_gmean + ic
                         tcre_terms.append((dT_gmean - target_dT) ** 2)
