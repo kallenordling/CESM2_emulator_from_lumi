@@ -135,7 +135,11 @@ REF_REALIZATIONS = {
 }
 SAMPLE_STEPS   = 50           # fewer steps than training → faster inference
 BATCH_SIZE     = 16           # years per GPU batch
-N_ENSEMBLE     = 1            # diffusion samples per experiment
+N_ENSEMBLE     = 5            # diffusion samples per experiment (ensemble-MEAN model
+                             # field, matched to the multi-member CESM2 reference).
+                             # N=1 gave a single noisy realization → large random
+                             # patcorr/GMbias swings between checkpoints (aaer 0.08↔0.80,
+                             # ssp370 +0.42↔+0.89) that swamped real A/B effects.
 COND_VARS      = ["CO2", "SUL"]
 TARGET_VAR     = "TREFHT"
 LAT  = None   # set from first conditioning file in main()

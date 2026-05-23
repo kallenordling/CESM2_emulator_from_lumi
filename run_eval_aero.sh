@@ -12,7 +12,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=128G
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail
@@ -66,7 +66,11 @@ RUN_XAI="${RUN_XAI:-0}"
 # Useful to isolate whether the additive decomposition itself introduces bias.
 FORCE_CFG="${FORCE_CFG:-0}"
 # Number of diffusion ensemble members to generate per experiment.
-MEMBERS="${members:-${MEMBERS:-1}}"
+# Default 5: model field is an ensemble MEAN (matched to multi-member CESM2),
+# so per-checkpoint skill is no longer dominated by single-realization sampling
+# noise. ~5× the sampling time → walltime raised to 4h (see --time above).
+# Override with `MEMBERS=1 sbatch ...` for a quick single-draw eval.
+MEMBERS="${members:-${MEMBERS:-5}}"
 
 _XAI_FLAG=""
 [ "${RUN_XAI}" = "1" ] && _XAI_FLAG="--run-xai"
