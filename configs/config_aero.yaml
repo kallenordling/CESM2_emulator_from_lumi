@@ -58,6 +58,12 @@ trainer:
     # Applied to the model's full predicted anomaly on hist + ssp370 samples.
     tcre_loss_scaling: 0.01      # initial value; adaptive scaling overrides once EMA warms
     tcre_target_fraction: 0.05
+    # Quantity the slope-match scores: false = CFG decomposition (cond − null);
+    # true = FULL anomaly (cond − climatology, what eval measures). The target
+    # slopes are CESM2 full anomaly, so the decomposition form mismatches when
+    # pred_x0_null drifts above the 1850-1900 baseline → eval ΔT-vs-cumCO2 too
+    # steep (ssp370 b≈1.33). A/B-tested via run_tcrefulltest.sh; default off.
+    tcre_full_anomaly: false
     # ── Energy-balance constraint  N = F + λ·ΔT,  F = F_ghg + F_aero ─────
     # Three learnable scalars (α_ghg, α_aero, λ) penalize the squared
     # global-mean residual.  Ties SUL to ΔT alongside CO2; complements TCRE
