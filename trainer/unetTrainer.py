@@ -446,6 +446,7 @@ class UNetTrainer:
                         "EBM LOSS":       avg_ebm_loss.detach().item(),
                         "INTER LOSS":     float(getattr(self, "_cached_interaction", 0.0)),
                         "GMEAN LOSS":     float(getattr(self, "_cached_gmean", 0.0)),
+                        "NULL DRIFT":     float(getattr(self, "_cached_null_drift", 0.0)),
                         "ANOM ERROR":     avg_anom_error.detach().item(),
                         "ANOM SIGNAL":    avg_anom_signal.detach().item(),
                         "SENS":           avg_sens.detach().item(),
@@ -1124,6 +1125,22 @@ class UNetTrainer:
                     pred_gm = (pred_x0_cond           * w_g).mean(dim=(1, 2, 3, 4))
                     true_gm = (clean_samples.detach() * w_g).mean(dim=(1, 2, 3, 4))
                     gmean_loss = ((pred_gm - true_gm) ** 2).mean().unsqueeze(0)
+
+                # ── Diagnostic: null-pass drift from climatology ──────────────
+                # gmean(pred_x0_null − climatology) should be ~0 if "conditioning
+                # ≈ −1 everywhere" maps to the pre-industrial baseline. A
+                # systematic nonzero value = null drift, which would make the
+                # training quantity (cond − null) diverge from the eval quantity
+                # (cond − climatology). Logged only (no gradient, no loss effect);
+                # value is in NORMALISED units. Cached so non-sync steps reuse it.
+                with torch.no_grad():
+                    _wn = torch.cos(torch.deg2rad(torch.as_tensor(
+                        self._ref_ds.lats.values,
+                        dtype=pred_x0_null.dtype, device=pred_x0_null.device,
+                    ))).clamp(min=0.2)
+                    _wn = (_wn / _wn.mean()).view(1, 1, 1, -1, 1)
+                    _null_drift = ((pred_x0_null - self.climatology.to(dtype=pred_x0_null.dtype)) * _wn).mean()
+                    self._cached_null_drift = _null_drift.item()
 
                 del pred_x0_cond, pred_x0_null
 
