@@ -914,6 +914,7 @@ class UNetTrainer:
             # aaer has constant CO2 and ghg has constant SUL, so dropping the
             # constant channel teaches the model nothing useful and dropping
             # the varying channel collapses the only signal those samples carry.
+            cond_dropped = torch.zeros(clean_samples.shape[0], device=self.device, dtype=torch.bool)
             if self.cfg_co2_drop_prob > 0 or self.cfg_sul_drop_prob > 0:
                 cond_map_input = cond_map.clone()
                 if scenario_ids is not None:
@@ -934,12 +935,14 @@ class UNetTrainer:
                         < self.cfg_co2_drop_prob
                     ) & joint_mask
                     cond_map_input[drop_co2, 0] = NULL_COND_VALUE
+                    cond_dropped = cond_dropped | drop_co2
                 if self.cfg_sul_drop_prob > 0:
                     drop_sul = (
                         torch.rand(clean_samples.shape[0], device=self.device)
                         < self.cfg_sul_drop_prob
                     ) & joint_mask
                     cond_map_input[drop_sul, 1] = NULL_COND_VALUE
+                    cond_dropped = cond_dropped | drop_sul
             else:
                 cond_map_input = cond_map
 
@@ -966,6 +969,16 @@ class UNetTrainer:
                     (clean_samples - baseline).detach(), scenario_ids
                 )
                 del baseline
+                # Stash the target's area-weighted global mean for gmean_loss
+                # BEFORE clean_samples is freed (the loss is computed later, after
+                # the forward passes, by which point clean_samples is gone).
+                if self.gmean_loss_scaling > 0:
+                    _wt = torch.cos(torch.deg2rad(torch.as_tensor(
+                        self._ref_ds.lats.values,
+                        dtype=clean_samples.dtype, device=clean_samples.device,
+                    ))).clamp(min=0.2)
+                    _wt = (_wt / _wt.mean()).view(1, 1, 1, -1, 1)
+                    target_gm = (clean_samples * _wt).mean(dim=(1, 2, 3, 4)).detach()
             else:
                 true_anomaly = None
 
@@ -1115,16 +1128,18 @@ class UNetTrainer:
                 # this directly supervises the global-mean ΔT the eval measures —
                 # the quantity ordinary MSE under-penalises. Grad flows through
                 # pred_x0_cond; the target is detached.
-                if self.gmean_loss_scaling > 0:
+                # Exclude CFG-dropped samples: their conditioning was nulled, so
+                # their prediction shouldn't be matched to the fully-forced target.
+                if self.gmean_loss_scaling > 0 and (~cond_dropped).any():
+                    intact = ~cond_dropped
                     lats_g = torch.as_tensor(
                         self._ref_ds.lats.values,
                         dtype=pred_x0_cond.dtype, device=pred_x0_cond.device,
                     )
                     w_g = torch.cos(torch.deg2rad(lats_g)).clamp(min=0.2)
                     w_g = (w_g / w_g.mean()).view(1, 1, 1, -1, 1)   # (1,1,1,H,1)
-                    pred_gm = (pred_x0_cond           * w_g).mean(dim=(1, 2, 3, 4))
-                    true_gm = (clean_samples.detach() * w_g).mean(dim=(1, 2, 3, 4))
-                    gmean_loss = ((pred_gm - true_gm) ** 2).mean().unsqueeze(0)
+                    pred_gm = (pred_x0_cond * w_g).mean(dim=(1, 2, 3, 4))
+                    gmean_loss = ((pred_gm[intact] - target_gm[intact]) ** 2).mean().unsqueeze(0)
 
                 # ── Diagnostic: null-pass drift from climatology ──────────────
                 # gmean(pred_x0_null − climatology) should be ~0 if "conditioning
