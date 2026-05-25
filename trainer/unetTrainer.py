@@ -219,6 +219,19 @@ class UNetTrainer:
         # so training constrains exactly the quantity eval measures.
         self.tcre_full_anomaly = getattr(self, "tcre_full_anomaly", False)
 
+        # ── Global-mean supervision loss (default OFF) ────────────────────────
+        # Directly pins the model's predicted-field area-weighted GLOBAL MEAN to
+        # the target field's global mean, per sample, for ALL scenarios. Ordinary
+        # MSE under-weights the global mean (it's a tiny fraction of the per-grid
+        # error), so high-forcing scenarios over-warm beyond CESM2's envelope
+        # (ssp370 ~7σ, ghg ~3σ, ssp126 ~20σ). This term isolates the global mean
+        # and weights it directly. FIXED scaling (NOT adaptive — the adaptive cap
+        # is exactly what kept the TCRE penalty too weak). Climatology cancels in
+        # the prediction−target difference, so no baseline/precompute is needed,
+        # and it applies to every scenario (unlike TCRE = hist+ssp370 only).
+        self.gmean_loss_scaling = getattr(self, "gmean_loss_scaling", 0.0)
+        self._ema_gmean = None  # EMA of unscaled global-mean loss (logging only)
+
         # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
         # Three learnable scalars enforce a global-mean linear energy budget:
         #   F_ghg  = α_ghg  · gmean(cumCO2_norm)   (positive forcing)
@@ -432,6 +445,7 @@ class UNetTrainer:
                         "TCRE LOSS":      avg_tcre_loss.detach().item(),
                         "EBM LOSS":       avg_ebm_loss.detach().item(),
                         "INTER LOSS":     float(getattr(self, "_cached_interaction", 0.0)),
+                        "GMEAN LOSS":     float(getattr(self, "_cached_gmean", 0.0)),
                         "ANOM ERROR":     avg_anom_error.detach().item(),
                         "ANOM SIGNAL":    avg_anom_signal.detach().item(),
                         "SENS":           avg_sens.detach().item(),
@@ -442,6 +456,7 @@ class UNetTrainer:
                         "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
                         "EBM SCALE":      self.ebm_loss_scaling,
                         "INTER SCALE":    self.interaction_loss_scaling,
+                        "GMEAN SCALE":    self.gmean_loss_scaling,
                         "EBM/alpha_ghg":  float(self._ebm_alpha_ghg.detach().item()),
                         "EBM/alpha_aero": float(self._ebm_alpha_aero.detach().item()),
                         "EBM/lambda":     float(self._ebm_lambda.detach().item()),
@@ -607,6 +622,8 @@ class UNetTrainer:
                         "ebm_loss_scaling":      self.ebm_loss_scaling,
                         "_ema_interaction":          self._ema_interaction,
                         "interaction_loss_scaling":  self.interaction_loss_scaling,
+                        "_ema_gmean":                self._ema_gmean,
+                        "gmean_loss_scaling":        self.gmean_loss_scaling,
                         "best_val_skill":        val_skill,
                         "best_epoch":            epoch,
                     },
@@ -672,6 +689,7 @@ class UNetTrainer:
         tcre_val = getattr(self, "_last_raw_tcre", 0.0)
         ebm_val  = getattr(self, "_last_raw_ebm",  0.0)
         inter_val = getattr(self, "_last_raw_interaction", 0.0)
+        gmean_val = getattr(self, "_last_raw_gmean", 0.0)
         self._ema_mse = mse_val if self._ema_mse is None else d * self._ema_mse + (1 - d) * mse_val
         if cond_val > 1e-8:
             self._ema_cond = cond_val if self._ema_cond is None else d * self._ema_cond + (1 - d) * cond_val
@@ -681,6 +699,8 @@ class UNetTrainer:
             self._ema_ebm = ebm_val if self._ema_ebm is None else d * self._ema_ebm + (1 - d) * ebm_val
         if inter_val > 1e-8:
             self._ema_interaction = inter_val if self._ema_interaction is None else d * self._ema_interaction + (1 - d) * inter_val
+        if gmean_val > 1e-8:
+            self._ema_gmean = gmean_val if self._ema_gmean is None else d * self._ema_gmean + (1 - d) * gmean_val
 
     def _update_cond_scaling(self, sensitivity_value: float, epoch: int) -> None:
         """Update cond_loss_scaling on a fixed epoch-based schedule.
@@ -883,6 +903,7 @@ class UNetTrainer:
         with self.accelerator.accumulate(self.model):
 
             NULL_COND_VALUE = -1.0
+            gmean_loss = torch.zeros(1, device=self.device)  # global-mean supervision (set below if enabled)
 
             # ── Per-channel CFG dropout ───────────────────────────────────────
             # Independently zero CO2 (ch 0) and SUL (ch 1) for randomly chosen
@@ -1087,6 +1108,23 @@ class UNetTrainer:
                                        + pred_x0_null[lf_mask].detach())
                         interaction_loss = (interaction ** 2).mean().unsqueeze(0)
 
+                # ── Global-mean supervision (all scenarios, fixed weight) ─────
+                # Pin the predicted field's area-weighted global mean to the
+                # target's, per sample. Climatology cancels (pred − target), so
+                # this directly supervises the global-mean ΔT the eval measures —
+                # the quantity ordinary MSE under-penalises. Grad flows through
+                # pred_x0_cond; the target is detached.
+                if self.gmean_loss_scaling > 0:
+                    lats_g = torch.as_tensor(
+                        self._ref_ds.lats.values,
+                        dtype=pred_x0_cond.dtype, device=pred_x0_cond.device,
+                    )
+                    w_g = torch.cos(torch.deg2rad(lats_g)).clamp(min=0.2)
+                    w_g = (w_g / w_g.mean()).view(1, 1, 1, -1, 1)   # (1,1,1,H,1)
+                    pred_gm = (pred_x0_cond           * w_g).mean(dim=(1, 2, 3, 4))
+                    true_gm = (clean_samples.detach() * w_g).mean(dim=(1, 2, 3, 4))
+                    gmean_loss = ((pred_gm - true_gm) ** 2).mean().unsqueeze(0)
+
                 del pred_x0_cond, pred_x0_null
 
                 # ── Conditioning loss ─────────────────────────────────────────
@@ -1160,6 +1198,8 @@ class UNetTrainer:
             self._last_raw_ebm  = ebm_loss.detach().item()
             self._last_raw_interaction = interaction_loss.detach().item()
             self._cached_interaction   = self._last_raw_interaction
+            self._last_raw_gmean = gmean_loss.detach().item()
+            self._cached_gmean   = self._last_raw_gmean
 
             # ── Total loss ────────────────────────────────────────────────────
             loss = (
@@ -1168,6 +1208,7 @@ class UNetTrainer:
                 + tcre_loss * self.tcre_loss_scaling
                 + ebm_loss  * self.ebm_loss_scaling
                 + interaction_loss * self.interaction_loss_scaling
+                + gmean_loss * self.gmean_loss_scaling
             )
 
             # Scale the loss by cosine-weighted latitude
@@ -1427,6 +1468,9 @@ class UNetTrainer:
         self._ema_interaction = checkpoint.get("_ema_interaction", None)
         _restored_inter = checkpoint.get("interaction_loss_scaling", self.interaction_loss_scaling)
         self.interaction_loss_scaling = _restored_inter if _restored_inter > 0 else self.interaction_loss_scaling
+        self._ema_gmean = checkpoint.get("_ema_gmean", None)
+        _restored_gmean = checkpoint.get("gmean_loss_scaling", self.gmean_loss_scaling)
+        self.gmean_loss_scaling = _restored_gmean if _restored_gmean > 0 else self.gmean_loss_scaling
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
