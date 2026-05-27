@@ -1334,6 +1334,8 @@ class UNetTrainer:
                 "ebm_loss_scaling":      self.ebm_loss_scaling,
                 "_ema_interaction":          self._ema_interaction,
                 "interaction_loss_scaling":  self.interaction_loss_scaling,
+                "_ema_gmean":                self._ema_gmean,
+                "gmean_loss_scaling":        self.gmean_loss_scaling,
             }
 
             # If the directory doesn't exist already create it
