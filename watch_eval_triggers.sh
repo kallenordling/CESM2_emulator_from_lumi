@@ -22,6 +22,21 @@ POLL_INTERVAL=60   # seconds between checks
 mkdir -p "$TRIGGER_DIR" "$DONE_DIR"
 echo "[watcher] Started. Watching ${TRIGGER_DIR} every ${POLL_INTERVAL}s"
 
+# ── Startup purge: drop stale non-production triggers ────────────────────────
+# A restart (e.g. after a walltime kill) would otherwise drain whatever piled
+# up while the watcher was down — including triggers from one-off A/B forks
+# (run_gmeantest, run_tcrefulltest, …). Only auto-dispatch evals for the
+# production run; move everything else to done/ so it can't fire. Override the
+# run name with PROD_RUN=... if production's save_name changes.
+PROD_RUN="${PROD_RUN:-run_slope-tcre}"
+for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
+    [[ -f "$trigger" ]] || continue
+    if ! grep -q "$PROD_RUN" "$trigger"; then
+        echo "[watcher] startup-purge: non-production trigger $(basename "$trigger") → done/"
+        mv "$trigger" "${DONE_DIR}/$(basename "$trigger").purged"
+    fi
+done
+
 while true; do
     for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
         # glob returns the pattern itself if no match
