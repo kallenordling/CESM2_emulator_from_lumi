@@ -92,10 +92,13 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/ssp370  ${LOCAL_DATA_ROOT}/training_data/TREFHT/
     cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/AAER    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
     cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/GHG     ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp ${SRC_DATA_ROOT}/emissions_hist_timefixed.nc        ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ssp370_timefixed.nc      ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_aero_only_timefixed.nc   ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
+    # Cond files: the four "_only_" scenario files needed by both EMISSIONS_PATHS
+    # (1-99 pct reference, see data/climate_dataset.py) and the per-scenario
+    # config_data.yaml inputs. ssp126 is the OOD test and is not staged here.
+    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed.nc  ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed.nc     ${LOCAL_DATA_ROOT}/
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 

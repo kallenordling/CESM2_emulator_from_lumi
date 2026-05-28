@@ -1,7 +1,5 @@
 import os
 import random
-import subprocess
-import sys
 from typing import Any, Callable
 
 import torch
@@ -9,45 +7,46 @@ from accelerate import Accelerator
 from diffusers import SchedulerMixin
 from omegaconf.dictconfig import DictConfig
 from torch.optim import Optimizer
-from torch.nn.functional import mse_loss
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-from einops import reduce
-# import wandb
 from ema_pytorch import EMA
 
-# from utils.viz_utils import create_gif
 from data.climate_dataset import ClimateDataset, ClimateDataLoader
 from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
-# from utils.gen_utils import generate_samples
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
-from torch.serialization import add_safe_globals
-import ema_pytorch
 
+
+# =============================================================================
+# Module-level constants
+# =============================================================================
+# Normalised value representing "no forcing" / pre-industrial baseline in cond.
+# Used both as the CFG-dropout replacement value during training and as the
+# null-cond input for the second forward pass in `get_loss`.
+NULL_COND_VALUE = -1.0
+
+# EMA wrapper hyperparameters (ema-pytorch defaults we override).
+_EMA_BETA          = 0.9999
+_EMA_UPDATE_AFTER  = 100
+_EMA_UPDATE_EVERY  = 10
+
+
+# =============================================================================
+# Module-level helpers
+# =============================================================================
 
 def _get_ema_state_dict(ema_obj):
-    """
-    Works for both ema-pytorch.EMA and custom EMA wrappers.
-    Tries common attributes in this order.
-    """
+    """Return ema_obj's state_dict, supporting ema-pytorch and custom wrappers."""
     if ema_obj is None:
         return None
-    # ema-pytorch exposes .state_dict()
     if hasattr(ema_obj, "state_dict"):
         return ema_obj.state_dict()
-    # some wrappers store the averaged model as .ema_model
     if hasattr(ema_obj, "ema_model") and hasattr(ema_obj.ema_model, "state_dict"):
         return ema_obj.ema_model.state_dict()
     raise AttributeError("EMA object does not expose a state_dict().")
 
 
 def _load_ema_state_dict(ema_obj, state):
-    """
-    Load EMA state into the existing EMA object.
-    Supports ema-pytorch.EMA (has .load_state_dict) and
-    fallback to .ema_model.load_state_dict.
-    """
+    """Load state into an existing EMA object (ema-pytorch or custom wrapper)."""
     if ema_obj is None or state is None:
         return
     if hasattr(ema_obj, "load_state_dict"):
@@ -59,45 +58,59 @@ def _load_ema_state_dict(ema_obj, state):
     raise AttributeError("EMA object does not support load_state_dict().")
 
 
-def _list_ckpts_sorted(ckpt_dir, pattern="ckpt_epoch_*.pt"):
-    import os, re, glob
-    paths = glob.glob(os.path.join(ckpt_dir, pattern))  # <-- module.function
-
-    def _key(p):
-        m = re.search(r"epoch[_-](\d+)", os.path.basename(p))
-        return (int(m.group(1)) if m else -1, os.path.getmtime(p))
-
-    return sorted(paths, key=_key, reverse=True)
-
-
 def calc_mse_loss(model_output, target, lats):
-    """Manually calculate mse loss"""
+    """Cosine-latitude-weighted MSE.
+
+    Per-pixel squared error is weighted by cos(latitude), clamped at 0.2 so
+    poles still contribute. Returns scalar mean over batch / time / lat / lon.
+    """
     spatial_loss = (model_output - target) ** 2
-
-    # Weight the equator more heavily than the poles
-    latitude = torch.as_tensor(lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device)
-
-    latitude_rad = torch.deg2rad(latitude)
-    latitude_weight = torch.cos(latitude_rad).clamp(min=0.2)
-
-    # Weight the loss
-    # print(spatial_loss.shape,latitude_weight.shape)
-    lat_weighted_loss = torch.einsum('...yx,y->...yx', spatial_loss,
-                                     latitude_weight).mean()  # (spatial_loss * latitude_weight).mean()
-
-    return lat_weighted_loss
-
-
-def calc_mse_loss_precomputed_sq(sq_tensor, lats):
-    """Lat-weighted mean of an already-squared tensor.
-    Avoids allocating a zeros_like tensor for the null-anomaly baseline loss."""
-    latitude = torch.as_tensor(lats.values, dtype=sq_tensor.dtype, device=sq_tensor.device)
+    latitude = torch.as_tensor(
+        lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device,
+    )
     latitude_weight = torch.cos(torch.deg2rad(latitude)).clamp(min=0.2)
-    return torch.einsum('...yx,y->...yx', sq_tensor, latitude_weight).mean()
+    return torch.einsum('...yx,y->...yx', spatial_loss, latitude_weight).mean()
+
+
+def _area_weights_1d(lats, *, dtype, device):
+    """1-D area weights ∝ cos(lat), clamped at 0.2 and mean-normalised.
+
+    Most aux losses inside `get_loss` need exactly this 1-D `(H,)` tensor —
+    they reshape it to a broadcast-ready form themselves. Keeping the helper
+    1-D (vs returning a pre-shaped 5-D tensor) keeps callers explicit about
+    the broadcast they need and avoids a hidden shape contract.
+    """
+    lat = torch.as_tensor(lats.values, dtype=dtype, device=device)
+    w = torch.cos(torch.deg2rad(lat)).clamp(min=0.2)
+    return w / w.mean()
 
 
 class UNetTrainer:
     """Trainer class for 2D diffusion models."""
+
+    # State-dict fields persisted to disk on save() and restored on load(),
+    # in addition to the always-present "EMA" / "Unet" / "Optimizer" / "Global Step".
+    # Each entry: (ckpt_key, attr_name, zero_disables).
+    # When zero_disables=True, a restored value of 0 keeps the current
+    # (config-provided) attribute instead — protects against a previous run
+    # silently disabling the aux loss (e.g. precompute failure) and that 0
+    # then sticking forever on subsequent resumes.
+    _PERSISTED_FIELDS = (
+        # ckpt_key,                    attr_name,                   zero_disables
+        ("cond_loss_scaling",          "cond_loss_scaling",         False),
+        ("tcre_loss_scaling",          "tcre_loss_scaling",         True),
+        ("tcre_slope",                 "tcre_slope",                False),
+        ("tcre_intercept",             "tcre_intercept",            False),
+        ("_ema_mse",                   "_ema_mse",                  False),
+        ("_ema_cond",                  "_ema_cond",                 False),
+        ("_ema_tcre",                  "_ema_tcre",                 False),
+        ("_ema_ebm",                   "_ema_ebm",                  False),
+        ("ebm_loss_scaling",           "ebm_loss_scaling",          False),
+        ("_ema_interaction",           "_ema_interaction",          False),
+        ("interaction_loss_scaling",   "interaction_loss_scaling",  True),
+        ("_ema_gmean",                 "_ema_gmean",                False),
+        ("gmean_loss_scaling",         "gmean_loss_scaling",        True),
+    )
 
     def __init__(
             self,
@@ -109,224 +122,59 @@ class UNetTrainer:
             optimizer: Callable[[Any], Optimizer],
             dataloader: Callable[[Any], DataLoader] = None,  # unused in multi-experiment mode
     ) -> None:
-        # Assign the hyperparameters to class attributes
+        # Hyperparameters → self.* attributes (lr, save_name, load_path, …).
         self.save_hyperparameters(hyperparameters)
 
         self.accelerator = accelerator
+        self.device      = accelerator.device
+        self.weight_dtype = torch.float32
         self.val_set = 0
         self.model = model
         self.scheduler: SchedulerMixin = scheduler
 
-        # ── Detect multi-experiment vs legacy single-experiment mode ──────────
-        # Multi-experiment: train_set is a MultiExperimentDataLoader, already
-        #   fully built in main_aero.py. The `dataloader` config arg is ignored.
-        # Legacy: train_set is a ClimateDataset, dataloader callable is used.
-        if isinstance(train_set, MultiExperimentDataLoader):
-            self.train_loader = train_set
-            self.train_set    = train_set.dataset          # MultiExperimentDataset
-            self._ref_ds      = train_set.dataset.datasets[0]  # first ClimateDataset for lats/climatology
-            self._multi       = True
-            print(
-                f"[TRAINER] Multi-experiment mode  "
-                f"scenarios={self.train_set.scenario_names}"
-            )
-        else:
-            # Legacy single-experiment path — build loader from config callable
-            self.train_set = train_set
-            self._ref_ds   = train_set
-            self._multi    = False
-        # ── Adaptive conditioning loss scaling ───────────────────────────────
-        # Phase 1 (warmup): scaling held at 0.0 for `cond_warmup_steps` so the
-        #   model first learns a solid MSE baseline without interference.
-        # Phase 2 (ramp):   linearly ramps from 0 → cond_max_scaling over the
-        #   same number of steps.
-        # Phase 3 (adaptive): once fully ramped, the scale is nudged up/down
-        #   every `cond_adapt_every` steps based on a running EMA of
-        #   cond_sensitivity (how much the conditioning actually changes the
-        #   model output).  If the model is ignoring conditioning
-        #   (sensitivity < target) the scale grows; if it's already responding
-        #   well it shrinks back toward the floor.
-        self.val_loader    = None        # set externally in main_aero.py
-        self.val_every     = 10          # evaluate held-out members every N epochs
-        self.best_val_skill = -float("inf")  # tracks best VAL/Skill for auto-save
-
-        self.cond_loss_scaling = 0.0  # always start silent
-        self.cond_warmup_epochs = 5   # Phase 1: hold at 0.0 for this many epochs
-        self.cond_ramp_epochs   = 30  # Phase 2: linearly ramp 0 → cond_max_scaling over this many epochs
-        self.cond_max_scaling   = 0.4 # fixed cap — 1.0 crashed ANOM_SKILL in epoch 6; 0.3 still too high
-        # CFG dropout prob: fraction of batch where cond_map is zeroed.
-        # Eliminates the expensive second out_null forward pass.
-        self.cfg_drop_prob = getattr(self, "cfg_drop_prob", 0.1)
-        # Per-channel CFG dropout: independently drop CO2 (ch 0) and SUL (ch 1).
-        # Required for per-channel classifier-free guidance at inference time.
-        # Each channel is dropped independently, so the model sees all four
-        # conditioning subsets: (co2, sul), (co2, null), (null, sul), (null, null).
-        self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
-        self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
-        self._cached_sensitivity = 0.0  # last valid sensitivity value
-
-        # ── Adaptive loss scaling ────────────────────────────────────────────
-        # When adaptive_loss_scaling=True, scalings are updated each sync step so
-        # that each aux loss contributes a fixed fraction of MSE in expectation.
-        # EMAs of the raw (unscaled) loss values are used; saved/restored with ckpt.
-        self._adaptive_loss_scaling = getattr(self, "adaptive_loss_scaling", False)
-        self._cond_target_fraction = getattr(self, "cond_target_fraction", 0.30)
-        self._tcre_target_fraction = getattr(self, "tcre_target_fraction", 0.05)
-        self._ema_mse  = None   # EMA of mse_loss magnitude
-        self._ema_cond = None   # EMA of unscaled cond_loss magnitude
-        self._ema_tcre = None   # EMA of unscaled tcre_loss magnitude
-        self._ema_ebm  = None   # EMA of unscaled ebm_loss magnitude
-        self._ema_interaction = None  # EMA of unscaled superposition-interaction loss
-        self._ema_decay = 0.99  # ~100 sync-step half-life — slow, stable adjustments
-
-        # ── TCRE regularization ──────────────────────────────────────────────
-        # Penalize the model's predicted anomaly (full conditioned response)
-        # for deviating from a linear TCRE relation precomputed from the
-        # hist + ssp370 trajectories (the all-forcings reference that eval
-        # reports in tcre.png):
-        #     gmean(ΔT_norm) ≈ tcre_slope * gmean(cumCO2_norm) + tcre_intercept
-        # Applied to scenario_ids in {hist, ssp370} only.
-        self.tcre_loss_scaling = getattr(self, "tcre_loss_scaling", 0.0)
-        self.tcre_slope     = None  # combined hist+ssp370 line (logging / back-compat)
-        self.tcre_intercept = None
-        # Per-scenario TCRE targets {scenario_id: (slope, intercept)} for the
-        # LOCAL slope-match loss.  A single combined line lets the response bow
-        # (too steep at low cumCO2 → ssp126/hist over-warming); pinning each
-        # scenario to its own CESM2 slope keeps the low-forcing response honest.
-        # Recomputed deterministically at startup, so resume needs no restore.
-        self.tcre_slopes = {}
-
-        # ── Superposition (interaction) penalty — strategy #2 ─────────────────
-        # ssp126 (model-only) over-warms because the model invents a non-physical
-        # CO2×aerosol interaction when aerosols decline sharply — the per-scenario
-        # CO2 slope-match does not constrain it. This penalty enforces ADDITIVE
-        # composition  f(CO2,SUL) ≈ f(CO2,0) + f(0,SUL) − f(0,0)  in the
-        # low-forcing regime (hist samples only; ssp370 excluded because the
-        # joint response is genuinely sub-additive at high forcing). With the
-        # interaction ~0, the model composes unseen low-forcing scenarios from
-        # the marginals it learned (ghg=CO2-only, aaer=aerosol-only).
-        self.interaction_loss_scaling = getattr(self, "interaction_loss_scaling", 0.0)
-        self._interaction_target_fraction = getattr(self, "interaction_target_fraction", 0.05)
-
-        # ── TCRE eval-alignment flag (A/B, default OFF) ───────────────────────
-        # The TCRE slope-match compares CESM2's FULL anomaly (clean − climatology,
-        # see _precompute_tcre_slope) against the model's CFG-DECOMPOSITION anomaly
-        # (pred_x0_cond − pred_x0_null). These coincide only if pred_x0_null ≈
-        # climatology; when the null pass drifts above the 1850-1900 baseline the
-        # eval (cond − clim) over-warms regardless of how well the slope-match
-        # converges (ssp370 eval slope b≈1.33, warm_bias/cfg_inference_tuning gap).
-        # When True, score the TCRE loss on the FULL anomaly (pred_x0_cond − clim)
-        # so training constrains exactly the quantity eval measures.
-        self.tcre_full_anomaly = getattr(self, "tcre_full_anomaly", False)
-
-        # ── Global-mean supervision loss (default OFF) ────────────────────────
-        # Directly pins the model's predicted-field area-weighted GLOBAL MEAN to
-        # the target field's global mean, per sample, for ALL scenarios. Ordinary
-        # MSE under-weights the global mean (it's a tiny fraction of the per-grid
-        # error), so high-forcing scenarios over-warm beyond CESM2's envelope
-        # (ssp370 ~7σ, ghg ~3σ, ssp126 ~20σ). This term isolates the global mean
-        # and weights it directly. FIXED scaling (NOT adaptive — the adaptive cap
-        # is exactly what kept the TCRE penalty too weak). Climatology cancels in
-        # the prediction−target difference, so no baseline/precompute is needed,
-        # and it applies to every scenario (unlike TCRE = hist+ssp370 only).
-        self.gmean_loss_scaling = getattr(self, "gmean_loss_scaling", 0.0)
-        self._ema_gmean = None  # EMA of unscaled global-mean loss (logging only)
-
-        # ── Energy-balance constraint  N = F_ghg + F_aero + λ·ΔT  (≈0 at eq.) ──
-        # Three learnable scalars enforce a global-mean linear energy budget:
-        #   F_ghg  = α_ghg  · gmean(cumCO2_norm)   (positive forcing)
-        #   F_aero = α_aero · gmean(SUL_norm)      (negative forcing in nature)
-        #   λ      = feedback parameter (expected negative)
-        # Loss is the squared residual (F_ghg + F_aero + λ·gmean(ΔT))² averaged
-        # over the batch.  Registered on the UNet so DDP syncs gradients and
-        # they're saved in the model state_dict.
-        self.ebm_loss_scaling = getattr(self, "ebm_loss_scaling", 0.0)
-        self._ebm_alpha_ghg  = torch.nn.Parameter(torch.tensor(1.0))
-        self._ebm_alpha_aero = torch.nn.Parameter(torch.tensor(-1.0))
-        self._ebm_lambda     = torch.nn.Parameter(torch.tensor(-1.0))
-        self.model.register_parameter("ebm_alpha_ghg",  self._ebm_alpha_ghg)
-        self.model.register_parameter("ebm_alpha_aero", self._ebm_alpha_aero)
-        self.model.register_parameter("ebm_lambda",     self._ebm_lambda)
-        self._ebm_target_fraction = getattr(self, "ebm_target_fraction", 0.05)
+        # ── Order of remaining init steps matters: ───────────────────────────
+        # 1. detect multi vs legacy dataloader mode      → self.train_loader/_ref_ds
+        # 2. loss-schedule + aux-loss flags              → adaptive EMAs, gmean, tcre, ...
+        # 3. register EBM scalars on self.model          → MUST precede optimizer
+        # 4. scheduler.set_timesteps                     → sampler bookkeeping
+        # 5. EMA wrapper around self.model               → uses model on device
+        # 6. climatology buffer                          → uses self._ref_ds + self.device
+        # 7. optimizer                                   → uses self.model.parameters()
+        # 8. legacy ClimateDataLoader (multi mode = no-op)
+        # 9. step counters + log hparams                 → uses self.train_loader
+        # 10. resolve + load checkpoint                  → uses optimizer + model
+        # 11. accelerator.prepare                        → wraps model + optimizer
+        # 12. precompute TCRE slope                      → needs train_set, ref_ds
+        self._init_dataloader_mode(train_set)
+        self._init_loss_schedule_and_flags()
+        self._register_ebm_scalars()
 
         self.scheduler.set_timesteps(self.sample_steps)
-
-        # Keep track of our exponential moving average weights
         self.ema_model = EMA(
             self.model,
-            beta=0.9999,  # exponential moving average factor
-            update_after_step=100,  # only after this number of .update() calls will it start updating
-            update_every=10,
-        ).to(self.accelerator.device)
+            beta=_EMA_BETA,
+            update_after_step=_EMA_UPDATE_AFTER,
+            update_every=_EMA_UPDATE_EVERY,
+        ).to(self.device)
 
-        # Assign the device and weight dtype (32 bit for training)
-        self.device = self.accelerator.device
-        self.weight_dtype = torch.float32
-
-        # ── Anomaly-based conditioning loss ──────────────────────────────────
-        # Pre-compute the 1850-1900 climatological mean from the training set
-        # and register it as a non-trainable buffer so it moves with the device.
-        # Expected shape: (1, C, 1, H, W)  (one value per variable per pixel,
-        # broadcast over batch and time dimensions).
-        # The dataset is expected to expose `climatology` as a pre-normalised
-        # tensor; if it doesn't, we fall back to zeros (no anomaly shift).
-        if hasattr(self._ref_ds, "climatology") and self._ref_ds.climatology is not None:
-            clim = self._ref_ds.climatology.to(dtype=torch.float32)
-            if clim.ndim == 3:
-                clim = clim.unsqueeze(0).unsqueeze(2)
-            self.climatology = clim.to(self.device)
-            print(f"[TRAINER] Loaded climatology baseline, shape={self.climatology.shape}")
-        else:
-            self.climatology = None
-            print("[TRAINER] No climatology found on dataset – anomaly loss will use batch mean as baseline.")
+        self._init_climatology_buffer()
 
         if self.accelerator.is_main_process:
             print(f"[TRAINER] LR: {self.lr:.2e}")
-        self.optimizer = optimizer(
-            self.model.parameters(), lr=self.lr
-        )
+        self.optimizer = optimizer(self.model.parameters(), lr=self.lr)
 
-        if self._multi:
-            # Loader already built in main_aero.py — nothing to do here
-            pass
-        else:
-            # Legacy single-experiment: build ClimateDataLoader from config callable
+        if not self._multi:
+            # Legacy single-experiment: build ClimateDataLoader from config callable.
+            # Multi-experiment mode supplies the loader pre-built via train_set.
             self.train_loader: ClimateDataLoader = dataloader(
-                self.train_set,
-                self.accelerator,
-                self.batch_size,
-                stratified=True,
+                self.train_set, self.accelerator, self.batch_size, stratified=True,
             )
-        # self.val_loader: ClimateDataLoader = dataloader(
-        #    self.val_set,
-        #    self.accelerator,
-        #    self.batch_size,
-        # )
 
-        # Initialize counters
-        self.global_step = 0
-        self.first_epoch = 0
-
-        # Keep track of important variables for logging
-        self.total_batch_size = (
-                self.batch_size
-                * self.accelerator.num_processes
-                * self.accelerator.gradient_accumulation_steps
-        )
-        self.num_steps_per_epoch = (
-                len(self.train_loader)
-                // self.accelerator.gradient_accumulation_steps
-                // self.accelerator.num_processes
-        )
-        self.max_train_steps = self.max_epochs * self.num_steps_per_epoch
-
-        # Log to WANDB (on main process only)
+        self._init_step_counters()
         if self.accelerator.is_main_process:
             self.log_hparams()
 
-        # Load model states from checkpoints if they exist
-        # load_path="0"     → start from scratch (no checkpoint loaded)
-        # load_path="newest" → auto-resolve the latest checkpoint in save_dir
+        # Resume from checkpoint if one matches load_path (handles "0", "newest", path).
         if self.load_path:
             resolved = self._resolve_load_path(self.load_path)
             if resolved:
@@ -335,20 +183,152 @@ class UNetTrainer:
             else:
                 self.load_path = None
 
-        # Prepare everything for GPU training
-        self.prepare()
+        self.prepare()  # accelerator.prepare(model, optimizer) + optional torch.compile
 
-        # Precompute TCRE target slope from hist + ssp370 trajectories (the
-        # all-forcings reference that eval uses).  Checkpoint may override via
-        # loaded tcre_slope/intercept — done above in self.load(); we still
-        # compute if not restored so new runs get a valid target.
+        # TCRE slopes are deterministic from the train set — recompute if either
+        # (a) we just initialised fresh, or (b) we resumed but tcre_slopes wasn't
+        # in the checkpoint (the per-scenario dict isn't serialised, only the
+        # combined slope/intercept are).
         scen_names = getattr(self.train_set, "scenario_names", [])
-        # Recompute if the combined slope is missing OR the per-scenario targets
-        # are empty (the latter is the common case on resume — tcre_slope is
-        # restored from the checkpoint but tcre_slopes is not serialised).
         if ((self.tcre_slope is None or not self.tcre_slopes)
                 and "hist" in scen_names and "ssp370" in scen_names):
             self._precompute_tcre_slope()
+
+    # ── __init__ helpers ─────────────────────────────────────────────────────
+
+    def _init_dataloader_mode(self, train_set) -> None:
+        """Detect multi-experiment vs legacy single-experiment mode.
+
+        Multi-experiment: `train_set` is a MultiExperimentDataLoader built in
+        main_aero.py — we use it directly. Legacy: `train_set` is a single
+        ClimateDataset, and the dataloader callable from the config will wrap
+        it later in __init__.
+        """
+        if isinstance(train_set, MultiExperimentDataLoader):
+            self.train_loader = train_set
+            self.train_set    = train_set.dataset
+            self._ref_ds      = train_set.dataset.datasets[0]
+            self._multi       = True
+            print(
+                f"[TRAINER] Multi-experiment mode  "
+                f"scenarios={self.train_set.scenario_names}"
+            )
+        else:
+            self.train_set = train_set
+            self._ref_ds   = train_set
+            self._multi    = False
+
+    def _init_loss_schedule_and_flags(self) -> None:
+        """Initialise the cond-loss warmup/ramp schedule, CFG dropout probs,
+        adaptive-loss EMAs, and per-aux-loss configuration flags.
+
+        These are all pure attribute assignments (no side effects on the model)
+        and run before EBM parameter registration and the optimizer.
+        """
+        # ── Held-out validation bookkeeping ──
+        self.val_loader     = None        # set externally in main_aero.py
+        self.val_every      = 10          # eval every N epochs
+        self.best_val_skill = -float("inf")
+
+        # ── Cond-loss warmup → linear ramp → adaptive (capped) schedule ──
+        # Phase 1 (warmup, cond_warmup_epochs):  scaling = 0
+        # Phase 2 (ramp, cond_ramp_epochs):      0 → cond_max_scaling
+        # Phase 3 (adaptive, after ramp):        nudged toward target_fraction*MSE
+        self.cond_loss_scaling   = 0.0
+        self.cond_warmup_epochs  = 5
+        self.cond_ramp_epochs    = 30
+        self.cond_max_scaling    = 0.4    # 1.0 crashed ANOM_SKILL by epoch 6; 0.3 also too high
+        self._cached_sensitivity = 0.0
+
+        # ── Per-channel CFG dropout (independent CO2 / SUL) ──
+        # Drops cond_map channels to NULL_COND_VALUE for a random fraction of
+        # batch elements. Independence is required so per-channel guidance
+        # at inference can isolate either pathway.
+        self.cfg_drop_prob     = getattr(self, "cfg_drop_prob",     0.1)
+        self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
+        self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
+
+        # ── Adaptive loss-scaling EMAs (saved/restored with checkpoint) ──
+        self._adaptive_loss_scaling = getattr(self, "adaptive_loss_scaling", False)
+        self._cond_target_fraction  = getattr(self, "cond_target_fraction",  0.30)
+        self._tcre_target_fraction  = getattr(self, "tcre_target_fraction",  0.05)
+        self._ema_decay  = 0.99   # ~100-step half-life
+        self._ema_mse    = None
+        self._ema_cond   = None
+        self._ema_tcre   = None
+        self._ema_ebm    = None
+        self._ema_interaction = None
+        self._ema_gmean  = None
+
+        # ── TCRE per-scenario slope-match (precomputed from hist + ssp370) ──
+        # tcre_full_anomaly=True scores against (pred − climatology), the
+        # quantity eval reports; False scores the CFG decomposition (cond − null).
+        self.tcre_loss_scaling = getattr(self, "tcre_loss_scaling", 0.0)
+        self.tcre_slope        = None
+        self.tcre_intercept    = None
+        self.tcre_slopes       = {}          # {scenario_id: (slope, intercept)}
+        self.tcre_full_anomaly = getattr(self, "tcre_full_anomaly", False)
+
+        # ── Superposition (interaction) penalty: f(CO2,SUL) ≈ f(CO2,0)+f(0,SUL)−f(0,0)
+        # Applied to hist (low-forcing) samples; ssp370 excluded because the
+        # joint response is genuinely sub-additive at high forcing.
+        self.interaction_loss_scaling      = getattr(self, "interaction_loss_scaling", 0.0)
+        self._interaction_target_fraction  = getattr(self, "interaction_target_fraction", 0.05)
+
+        # ── Global-mean supervision (per-sample, fixed scaling, all scenarios) ──
+        self.gmean_loss_scaling = getattr(self, "gmean_loss_scaling", 0.0)
+
+        # ── Energy-balance constraint scaling and target ──
+        # The scalar parameters themselves are registered on the model in
+        # `_register_ebm_scalars()` (DDP-syncable + saved with model state).
+        self.ebm_loss_scaling     = getattr(self, "ebm_loss_scaling",     0.0)
+        self._ebm_target_fraction = getattr(self, "ebm_target_fraction",  0.05)
+
+    def _register_ebm_scalars(self) -> None:
+        """Create the three EBM scalars (α_ghg, α_aero, λ) and attach them to
+        `self.model` so DDP syncs their gradients and they're persisted in the
+        model state_dict. Must run BEFORE the optimizer is constructed.
+        """
+        self._ebm_alpha_ghg  = torch.nn.Parameter(torch.tensor( 1.0))
+        self._ebm_alpha_aero = torch.nn.Parameter(torch.tensor(-1.0))
+        self._ebm_lambda     = torch.nn.Parameter(torch.tensor(-1.0))
+        self.model.register_parameter("ebm_alpha_ghg",  self._ebm_alpha_ghg)
+        self.model.register_parameter("ebm_alpha_aero", self._ebm_alpha_aero)
+        self.model.register_parameter("ebm_lambda",     self._ebm_lambda)
+
+    def _init_climatology_buffer(self) -> None:
+        """Move the dataset-side 1850-1900 climatology mean to `self.device`.
+
+        Expected shape on the dataset: (1, C, 1, H, W). Older datasets may
+        store (C, H, W) — we pad to 5-D for broadcasting. If the dataset has
+        no climatology attribute (e.g. cond-only diagnostic mode), the
+        anomaly loss falls back to per-batch mean elsewhere.
+        """
+        if hasattr(self._ref_ds, "climatology") and self._ref_ds.climatology is not None:
+            clim = self._ref_ds.climatology.to(dtype=torch.float32)
+            if clim.ndim == 3:
+                clim = clim.unsqueeze(0).unsqueeze(2)
+            self.climatology = clim.to(self.device)
+            print(f"[TRAINER] Loaded climatology baseline, shape={self.climatology.shape}")
+        else:
+            self.climatology = None
+            print("[TRAINER] No climatology found on dataset — anomaly loss will use batch mean as baseline.")
+
+    def _init_step_counters(self) -> None:
+        """Compute step counters that depend on the (now-built) dataloader."""
+        self.global_step = 0
+        self.first_epoch = 0
+        self.total_batch_size = (
+            self.batch_size
+            * self.accelerator.num_processes
+            * self.accelerator.gradient_accumulation_steps
+        )
+        self.num_steps_per_epoch = (
+            len(self.train_loader)
+            // self.accelerator.gradient_accumulation_steps
+            // self.accelerator.num_processes
+        )
+        self.max_train_steps = self.max_epochs * self.num_steps_per_epoch
 
     def save_hyperparameters(self, cfg: DictConfig) -> None:
         """Saves the hyperparameters as class attributes."""
@@ -607,27 +587,9 @@ class UNetTrainer:
                     os.path.join(self.save_dir, f"{base}_best.pt")
                 )
                 torch.save(
-                    {
-                        "EMA":                   self.ema_model.ema_model.state_dict(),
-                        "Unet":                  self.accelerator.unwrap_model(self.model).state_dict(),
-                        "Optimizer":             self.optimizer.state_dict(),
-                        "Global Step":           self.global_step,
-                        "cond_loss_scaling":     self.cond_loss_scaling,
-                        "tcre_loss_scaling":     self.tcre_loss_scaling,
-                        "tcre_slope":            self.tcre_slope,
-                        "tcre_intercept":        self.tcre_intercept,
-                        "_ema_mse":              self._ema_mse,
-                        "_ema_cond":             self._ema_cond,
-                        "_ema_tcre":             self._ema_tcre,
-                        "_ema_ebm":              self._ema_ebm,
-                        "ebm_loss_scaling":      self.ebm_loss_scaling,
-                        "_ema_interaction":          self._ema_interaction,
-                        "interaction_loss_scaling":  self.interaction_loss_scaling,
-                        "_ema_gmean":                self._ema_gmean,
-                        "gmean_loss_scaling":        self.gmean_loss_scaling,
-                        "best_val_skill":        val_skill,
-                        "best_epoch":            epoch,
-                    },
+                    self._build_save_dict(
+                        extra={"best_val_skill": val_skill, "best_epoch": epoch}
+                    ),
                     best_path,
                     _use_new_zipfile_serialization=False,
                 )
@@ -879,6 +841,156 @@ class UNetTrainer:
             result[mask] = anomaly[mask].mean(dim=0, keepdim=True)
         return result
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Aux-loss components used by get_loss.
+    # Each returns a scalar tensor (or a (1,)-tensor of zeros if disabled), so
+    # the caller can multiply by its scaling factor and add to the total loss
+    # without further branching.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _compute_ebm_loss(self, pred_anomaly: torch.Tensor,
+                          cond_map: torch.Tensor) -> torch.Tensor:
+        """Energy-balance constraint: (F_ghg + F_aero + λ·ΔT)² per-sample, mean.
+
+        F_ghg = α_ghg · gmean(cumCO2_norm),  F_aero = α_aero · gmean(SUL_norm).
+        Returns zeros when ebm_loss_scaling <= 0.
+        """
+        if self.ebm_loss_scaling <= 0:
+            return torch.zeros(1, device=self.device)
+        w_be = _area_weights_1d(
+            self._ref_ds.lats, dtype=pred_anomaly.dtype, device=pred_anomaly.device,
+        ).view(1, 1, 1, -1, 1)
+        dT_gmean  = (pred_anomaly         * w_be).mean(dim=(1, 2, 3, 4))
+        co2_gmean = (cond_map[:, 0:1]     * w_be).mean(dim=(1, 2, 3, 4))
+        sul_gmean = (cond_map[:, 1:2]     * w_be).mean(dim=(1, 2, 3, 4))
+        F_ghg    = self._ebm_alpha_ghg  * co2_gmean
+        F_aero   = self._ebm_alpha_aero * sul_gmean
+        residual = F_ghg + F_aero + self._ebm_lambda * dT_gmean
+        return (residual ** 2).mean().unsqueeze(0)
+
+    def _compute_tcre_loss(self, pred_x0_cond: torch.Tensor,
+                           pred_anomaly: torch.Tensor,
+                           cond_map: torch.Tensor,
+                           scenario_ids) -> torch.Tensor:
+        """Per-scenario slope-match: ΔT_norm ≈ slope · cumCO2_norm + intercept.
+
+        Slopes precomputed from CESM2 hist + ssp370 trajectories
+        (`_precompute_tcre_slope`). Only scenarios present in self.tcre_slopes
+        contribute (hist=0, ssp370=1 by default).
+        """
+        if not (self.tcre_loss_scaling > 0 and self.tcre_slopes and scenario_ids is not None):
+            return torch.zeros(1, device=self.device)
+
+        # Match the quantity eval reports: FULL anomaly (cond − climatology) when
+        # tcre_full_anomaly is True; otherwise the CFG decomposition (cond − null).
+        tcre_pred = (
+            pred_x0_cond - self.climatology.to(dtype=pred_x0_cond.dtype)
+        ) if self.tcre_full_anomaly else pred_anomaly
+
+        w_b = _area_weights_1d(
+            self._ref_ds.lats, dtype=pred_anomaly.dtype, device=pred_anomaly.device,
+        ).view(1, 1, 1, -1, 1)
+
+        tcre_terms = []
+        for sid, (slope, intercept) in self.tcre_slopes.items():
+            m_sid = (scenario_ids == sid)
+            if m_sid.sum() == 0:
+                continue
+            dT_gmean  = (tcre_pred[m_sid]          * w_b).mean(dim=(1, 2, 3, 4))
+            co2_gmean = (cond_map[m_sid][:, 0:1]   * w_b).mean(dim=(1, 2, 3, 4))
+            target_dT = slope * co2_gmean + intercept
+            tcre_terms.append((dT_gmean - target_dT) ** 2)
+        if not tcre_terms:
+            return torch.zeros(1, device=self.device)
+        return torch.cat(tcre_terms).mean()
+
+    def _compute_interaction_loss(self, pred_x0_cond: torch.Tensor,
+                                  pred_x0_null: torch.Tensor,
+                                  cond_map_input: torch.Tensor,
+                                  noisy_samples: torch.Tensor,
+                                  timesteps: torch.Tensor,
+                                  scenario_ids) -> torch.Tensor:
+        """Additivity penalty: interaction = f(CO2,SUL) − f(CO2,0) − f(0,SUL) + f(0,0).
+
+        Applied to hist samples only (low-forcing). Two extra NO-GRAD marginal
+        forward passes; gradient flows only through pred_x0_cond[lf_mask].
+        """
+        if not (self.interaction_loss_scaling > 0 and scenario_ids is not None):
+            return torch.zeros(1, device=self.device)
+        lf_mask = (scenario_ids == 0)                 # hist only
+        if lf_mask.sum() == 0:
+            return torch.zeros(1, device=self.device)
+
+        ci = cond_map_input[lf_mask]
+        ns = noisy_samples[lf_mask]
+        ts = timesteps[lf_mask]
+        co2only = ci.clone(); co2only[:, 1] = NULL_COND_VALUE       # SUL→null
+        sulonly = ci.clone(); sulonly[:, 0] = NULL_COND_VALUE       # CO2→null
+        with torch.no_grad():
+            p_co2 = self.get_original_sample(ns, self.model(ns, ts, cond_map=co2only), ts)
+            p_sul = self.get_original_sample(ns, self.model(ns, ts, cond_map=sulonly), ts)
+        interaction = (
+            pred_x0_cond[lf_mask]
+            - p_co2.detach() - p_sul.detach()
+            + pred_x0_null[lf_mask].detach()
+        )
+        return (interaction ** 2).mean().unsqueeze(0)
+
+    def _compute_gmean_loss(self, pred_x0_cond: torch.Tensor,
+                            target_gm: torch.Tensor,
+                            cond_dropped: torch.Tensor) -> torch.Tensor:
+        """Pin the predicted field's area-weighted global mean to the target's.
+
+        Excludes CFG-dropped samples (their conditioning was nulled, so their
+        prediction shouldn't be matched to the fully-forced target).
+        """
+        if self.gmean_loss_scaling <= 0 or not (~cond_dropped).any():
+            return torch.zeros(1, device=self.device)
+        intact = ~cond_dropped
+        w_g = _area_weights_1d(
+            self._ref_ds.lats, dtype=pred_x0_cond.dtype, device=pred_x0_cond.device,
+        ).view(1, 1, 1, -1, 1)
+        pred_gm = (pred_x0_cond * w_g).mean(dim=(1, 2, 3, 4))
+        return ((pred_gm[intact] - target_gm[intact]) ** 2).mean().unsqueeze(0)
+
+    def _log_null_drift(self, pred_x0_null: torch.Tensor) -> None:
+        """Diagnostic: gmean(pred_x0_null − climatology) — should be ~0 if calibrated.
+
+        Side effect: caches the value in self._cached_null_drift for the next log entry.
+        """
+        with torch.no_grad():
+            w_n = _area_weights_1d(
+                self._ref_ds.lats, dtype=pred_x0_null.dtype, device=pred_x0_null.device,
+            ).view(1, 1, 1, -1, 1)
+            drift = ((pred_x0_null - self.climatology.to(dtype=pred_x0_null.dtype)) * w_n).mean()
+            self._cached_null_drift = drift.item()
+
+    def _compute_scen_disc(self, model_output: torch.Tensor,
+                           noisy_samples: torch.Tensor,
+                           timesteps: torch.Tensor,
+                           scenario_ids) -> torch.Tensor:
+        """Mean pairwise L1 distance between per-scenario mean x0 predictions."""
+        if scenario_ids is None:
+            return torch.zeros(1, device=self.device)
+        unique_scenarios = scenario_ids.unique()
+        if len(unique_scenarios) < 2:
+            return torch.zeros(1, device=self.device)
+        # Use model_output detached so this metric doesn't pull gradients.
+        pred_x0_scen = self.get_original_sample(noisy_samples, model_output.detach(), timesteps)
+        scenario_means = []
+        for sid in unique_scenarios:
+            mask_s = scenario_ids == sid
+            if mask_s.sum() > 0:
+                scenario_means.append(pred_x0_scen[mask_s].mean(dim=0))
+        if len(scenario_means) < 2:
+            return torch.zeros(1, device=self.device)
+        n = len(scenario_means)
+        pair_dists = [
+            (scenario_means[i] - scenario_means[j]).abs().mean()
+            for i in range(n) for j in range(i + 1, n)
+        ]
+        return torch.stack(pair_dists).mean()
+
     def get_loss(self, batch, cond_map, scenario_ids=None):
         clean_samples = batch.to(self.weight_dtype)
 
@@ -903,7 +1015,6 @@ class UNetTrainer:
 
         with self.accelerator.accumulate(self.model):
 
-            NULL_COND_VALUE = -1.0
             gmean_loss = torch.zeros(1, device=self.device)  # global-mean supervision (set below if enabled)
 
             # ── Per-channel CFG dropout ───────────────────────────────────────
@@ -1032,174 +1143,34 @@ class UNetTrainer:
                 # Gradients flow only through pred_x0_cond (null is no_grad).
                 pred_anomaly = pred_x0_cond - pred_x0_null.detach()
 
-                tcre_loss = torch.zeros(1, device=self.device)
-                ebm_loss  = torch.zeros(1, device=self.device)
-                interaction_loss = torch.zeros(1, device=self.device)
+                # ── Aux losses (each helper returns zeros when its scaling is 0) ──
+                ebm_loss         = self._compute_ebm_loss(pred_anomaly, cond_map)
+                tcre_loss        = self._compute_tcre_loss(
+                    pred_x0_cond, pred_anomaly, cond_map, scenario_ids,
+                )
+                interaction_loss = self._compute_interaction_loss(
+                    pred_x0_cond, pred_x0_null, cond_map_input,
+                    noisy_samples, timesteps, scenario_ids,
+                )
+                gmean_loss       = self._compute_gmean_loss(
+                    pred_x0_cond, target_gm, cond_dropped,
+                )
 
-                # ── Energy-balance constraint  F_ghg + F_aero + λ·ΔT ≈ 0 ──────
-                # Per-sample squared residual of the linear global-mean energy
-                # budget on the full predicted ΔT (pred_anomaly).  Forces
-                # (α_ghg, α_aero, λ) to be jointly consistent with the model's
-                # response, tying the aerosol channel to warming alongside CO2.
-                if self.ebm_loss_scaling > 0:
-                    lats_e = torch.as_tensor(
-                        self._ref_ds.lats.values,
-                        dtype=pred_anomaly.dtype,
-                        device=pred_anomaly.device,
-                    )
-                    w_e = torch.cos(torch.deg2rad(lats_e)).clamp(min=0.2)
-                    w_e = w_e / w_e.mean()                  # (H,)
-                    w_be = w_e.view(1, 1, 1, -1, 1)         # (B,C,T,H,W)
-                    dT_gmean_full  = (pred_anomaly * w_be).mean(dim=(1, 2, 3, 4))
-                    co2_in_full    = cond_map[:, 0:1]
-                    sul_in_full    = cond_map[:, 1:2]
-                    co2_gmean_full = (co2_in_full * w_be).mean(dim=(1, 2, 3, 4))
-                    sul_gmean_full = (sul_in_full * w_be).mean(dim=(1, 2, 3, 4))
-                    F_ghg    = self._ebm_alpha_ghg  * co2_gmean_full
-                    F_aero   = self._ebm_alpha_aero * sul_gmean_full
-                    residual = F_ghg + F_aero + self._ebm_lambda * dT_gmean_full
-                    ebm_loss = (residual ** 2).mean().unsqueeze(0)
-
-                # ── TCRE regularizer on hist + ssp370 (per-scenario) ──────────
-                # #1 local slope-match: each scenario's full predicted ΔT is
-                # pulled to ITS OWN CESM2 ΔT-vs-cumCO2 line (hist=0, ssp370=1)
-                # rather than a single combined line, so the response can't bow
-                # convex and over-warm the low-cumCO2 regime (hist/ssp126).
-                # ghg (id=3) and aaer (id=2) excluded: ghg has no aerosol offset
-                # so the slope under-predicts its ΔT; aaer has no CO2 variation.
-                if (self.tcre_loss_scaling > 0
-                        and self.tcre_slopes
-                        and scenario_ids is not None):
-                    # Quantity to slope-match: FULL anomaly (cond − climatology,
-                    # eval-aligned) when tcre_full_anomaly, else the CFG
-                    # decomposition (cond − null). Target slopes are CESM2 full
-                    # anomaly, so the full-anomaly form is the apples-to-apples one.
-                    tcre_pred = (pred_x0_cond - self.climatology.to(dtype=pred_x0_cond.dtype)) \
-                        if self.tcre_full_anomaly else pred_anomaly
-                    lats = torch.as_tensor(
-                        self._ref_ds.lats.values,
-                        dtype=pred_anomaly.dtype,
-                        device=pred_anomaly.device,
-                    )
-                    w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-                    w = w / w.mean()                         # (H,)
-                    w_b = w.view(1, 1, 1, -1, 1)
-                    tcre_terms = []
-                    for sid, (sl, ic) in self.tcre_slopes.items():
-                        m_sid = (scenario_ids == sid)
-                        if m_sid.sum() == 0:
-                            continue
-                        dT_gmean  = (tcre_pred[m_sid]      * w_b).mean(dim=(1, 2, 3, 4))
-                        co2_gmean = (cond_map[m_sid][:, 0:1] * w_b).mean(dim=(1, 2, 3, 4))
-                        target_dT = sl * co2_gmean + ic
-                        tcre_terms.append((dT_gmean - target_dT) ** 2)
-                    if tcre_terms:
-                        tcre_loss = torch.cat(tcre_terms).mean()
-
-                # ── Superposition (interaction) penalty — strategy #2 ─────────
-                # interaction = f(CO2,SUL) − f(CO2,0) − f(0,SUL) + f(0,0).
-                # Two extra NO-GRAD marginal passes (SUL nulled / CO2 nulled) on
-                # the hist subset only; gradient flows solely through pred_x0_cond
-                # (=f(CO2,SUL)), training it toward the additive target so the
-                # model composes low-forcing scenarios (ssp126) from its
-                # marginals instead of an invented CO2×aerosol interaction.
-                # hist = low-forcing scenario; ssp370 excluded (genuinely
-                # sub-additive at high forcing). Dropped-channel samples
-                # contribute ~0 automatically, so cond_map_input is consistent.
-                if self.interaction_loss_scaling > 0 and scenario_ids is not None:
-                    lf_mask = (scenario_ids == 0)        # hist only
-                    if lf_mask.sum() > 0:
-                        ci  = cond_map_input[lf_mask]
-                        ns  = noisy_samples[lf_mask]
-                        ts  = timesteps[lf_mask]
-                        co2only = ci.clone(); co2only[:, 1] = NULL_COND_VALUE   # SUL→null
-                        sulonly = ci.clone(); sulonly[:, 0] = NULL_COND_VALUE   # CO2→null
-                        with torch.no_grad():
-                            p_co2 = self.get_original_sample(ns, self.model(ns, ts, cond_map=co2only), ts)
-                            p_sul = self.get_original_sample(ns, self.model(ns, ts, cond_map=sulonly), ts)
-                        interaction = (pred_x0_cond[lf_mask]
-                                       - p_co2.detach() - p_sul.detach()
-                                       + pred_x0_null[lf_mask].detach())
-                        interaction_loss = (interaction ** 2).mean().unsqueeze(0)
-
-                # ── Global-mean supervision (all scenarios, fixed weight) ─────
-                # Pin the predicted field's area-weighted global mean to the
-                # target's, per sample. Climatology cancels (pred − target), so
-                # this directly supervises the global-mean ΔT the eval measures —
-                # the quantity ordinary MSE under-penalises. Grad flows through
-                # pred_x0_cond; the target is detached.
-                # Exclude CFG-dropped samples: their conditioning was nulled, so
-                # their prediction shouldn't be matched to the fully-forced target.
-                if self.gmean_loss_scaling > 0 and (~cond_dropped).any():
-                    intact = ~cond_dropped
-                    lats_g = torch.as_tensor(
-                        self._ref_ds.lats.values,
-                        dtype=pred_x0_cond.dtype, device=pred_x0_cond.device,
-                    )
-                    w_g = torch.cos(torch.deg2rad(lats_g)).clamp(min=0.2)
-                    w_g = (w_g / w_g.mean()).view(1, 1, 1, -1, 1)   # (1,1,1,H,1)
-                    pred_gm = (pred_x0_cond * w_g).mean(dim=(1, 2, 3, 4))
-                    gmean_loss = ((pred_gm[intact] - target_gm[intact]) ** 2).mean().unsqueeze(0)
-
-                # ── Diagnostic: null-pass drift from climatology ──────────────
-                # gmean(pred_x0_null − climatology) should be ~0 if "conditioning
-                # ≈ −1 everywhere" maps to the pre-industrial baseline. A
-                # systematic nonzero value = null drift, which would make the
-                # training quantity (cond − null) diverge from the eval quantity
-                # (cond − climatology). Logged only (no gradient, no loss effect);
-                # value is in NORMALISED units. Cached so non-sync steps reuse it.
-                with torch.no_grad():
-                    _wn = torch.cos(torch.deg2rad(torch.as_tensor(
-                        self._ref_ds.lats.values,
-                        dtype=pred_x0_null.dtype, device=pred_x0_null.device,
-                    ))).clamp(min=0.2)
-                    _wn = (_wn / _wn.mean()).view(1, 1, 1, -1, 1)
-                    _null_drift = ((pred_x0_null - self.climatology.to(dtype=pred_x0_null.dtype)) * _wn).mean()
-                    self._cached_null_drift = _null_drift.item()
+                # Diagnostic only — caches self._cached_null_drift, no grad.
+                self._log_null_drift(pred_x0_null)
 
                 del pred_x0_cond, pred_x0_null
 
-                # ── Conditioning loss ─────────────────────────────────────────
-                # Directly penalise the gap between predicted and true anomaly.
-                # No contrastive margin needed — this is a direct regression
-                # target: (cond_output - null_output) should equal the forced signal.
+                # ── Conditioning loss: direct anomaly regression ──────────────
                 cond_loss = calc_mse_loss(pred_anomaly, true_anomaly, self._ref_ds.lats)
-
-                # ── Diagnostics ───────────────────────────────────────────────
                 anom_signal = true_anomaly.abs().mean().detach()
                 anom_error  = (pred_anomaly - true_anomaly).abs().mean().detach()
                 del true_anomaly, pred_anomaly
 
-                # ── Scenario discrimination metric ────────────────────────────
-                # Mean pairwise L1 distance between per-scenario mean x0 predictions.
-                # Positive only if conditioning produces scenario-specific outputs.
-                if scenario_ids is not None:
-                    unique_scenarios = scenario_ids.unique()
-                    if len(unique_scenarios) >= 2:
-                        # Recompute pred_x0_cond for scen_disc (already freed above)
-                        # Use model_output which still has grad — detach for metric only
-                        pred_x0_scen = self.get_original_sample(
-                            noisy_samples, model_output.detach(), timesteps
-                        )
-                        scenario_means = []
-                        for sid in unique_scenarios:
-                            mask_s = scenario_ids == sid
-                            if mask_s.sum() > 0:
-                                scenario_means.append(pred_x0_scen[mask_s].mean(dim=0))
-                        del pred_x0_scen
-                        if len(scenario_means) >= 2:
-                            n = len(scenario_means)
-                            pair_dists = [
-                                (scenario_means[i] - scenario_means[j]).abs().mean()
-                                for i in range(n) for j in range(i + 1, n)
-                            ]
-                            scen_disc = torch.stack(pair_dists).mean()
-                        else:
-                            scen_disc = torch.zeros(1, device=self.device)
-                    else:
-                        scen_disc = torch.zeros(1, device=self.device)
-                else:
-                    scen_disc = torch.zeros(1, device=self.device)
+                # ── Scenario discrimination metric (per-scenario mean x0 spread) ─
+                scen_disc = self._compute_scen_disc(
+                    model_output, noisy_samples, timesteps, scenario_ids,
+                )
 
             elif self.cond_loss_scaling > 0:
                 # cond_loss_scaling is active but this is a non-sync accumulation step —
@@ -1313,66 +1284,72 @@ class UNetTrainer:
                 {f"Original {var}": wandb.Video(gif, fps=4)}, step=self.global_step
             )
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Checkpoint I/O: shared state-dict builder + restore helper
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_save_dict(self, extra: dict | None = None) -> dict:
+        """Assemble the on-disk checkpoint payload.
+
+        Always includes EMA / Unet / Optimizer / Global Step and every entry
+        from `_PERSISTED_FIELDS`. `extra` is merged in last for site-specific
+        keys (e.g. best_val_skill / best_epoch in the held-out best-save).
+        """
+        sd = {
+            "EMA":         self.ema_model.ema_model.state_dict(),
+            "Unet":        self.accelerator.unwrap_model(self.model).state_dict(),
+            "Optimizer":   self.optimizer.state_dict(),
+            "Global Step": self.global_step,
+        }
+        for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
+            sd[ckpt_key] = getattr(self, attr)
+        if extra:
+            sd.update(extra)
+        return sd
+
+    def _restore_persisted_fields(self, checkpoint: dict) -> None:
+        """Restore aux-loss scalings / EMAs from a checkpoint dict.
+
+        Honours the `zero_disables` flag: a restored 0 (or None) for a field
+        marked zero_disables=True keeps the current (config-provided) value.
+        """
+        for ckpt_key, attr, zero_disables in self._PERSISTED_FIELDS:
+            if ckpt_key not in checkpoint:
+                continue
+            value = checkpoint[ckpt_key]
+            if zero_disables and (value is None or value == 0):
+                continue
+            setattr(self, attr, value)
+
     def save(self, epoch: int):
-        """Saves the state of training to disk."""
+        """Persist a numbered checkpoint and prune all but the last 5 numbered ones."""
         if self.save_name is None:
             return
-        else:
-            state_dict = {
-                "EMA": self.ema_model.ema_model.state_dict(),
-                "Unet": self.accelerator.unwrap_model(self.model).state_dict(),
-                "Optimizer": self.optimizer.state_dict(),
-                "Global Step": self.global_step,
-                "cond_loss_scaling":     self.cond_loss_scaling,
-                "tcre_loss_scaling":     self.tcre_loss_scaling,
-                "tcre_slope":            self.tcre_slope,
-                "tcre_intercept":        self.tcre_intercept,
-                "_ema_mse":              self._ema_mse,
-                "_ema_cond":             self._ema_cond,
-                "_ema_tcre":             self._ema_tcre,
-                "_ema_ebm":              self._ema_ebm,
-                "ebm_loss_scaling":      self.ebm_loss_scaling,
-                "_ema_interaction":          self._ema_interaction,
-                "interaction_loss_scaling":  self.interaction_loss_scaling,
-                "_ema_gmean":                self._ema_gmean,
-                "gmean_loss_scaling":        self.gmean_loss_scaling,
-            }
 
-            # If the directory doesn't exist already create it
-            os.makedirs(self.save_dir, exist_ok=True)
+        state_dict = self._build_save_dict()
+        os.makedirs(self.save_dir, exist_ok=True)
 
-            # Create the save filename and add the epoch number
-            save_name = self.save_name.split(".pt")[0] + f"_{epoch}.pt"
+        base = self.save_name.split(".pt")[0]
+        save_path = os.path.join(self.save_dir, f"{base}_{epoch}.pt")
+        torch.save(state_dict, save_path, _use_new_zipfile_serialization=False)
 
-            # Save the State dictionary to disk
-            torch.save(state_dict, os.path.join(self.save_dir, save_name), _use_new_zipfile_serialization=False)
+        # ── Rotate: keep the 5 newest numbered checkpoints (best.pt is excluded) ─
+        def _epoch_from_name(fname: str) -> int:
+            try:
+                return int(fname.split("_")[-1].split(".")[0])
+            except ValueError:
+                return -1
 
-            base = self.save_name.split(".pt")[0]
-            save_name = f"{base}_{epoch}.pt"
-            save_path = os.path.join(self.save_dir, save_name)
-
-            all_ckpts = [
-                os.path.join(self.save_dir, f)
-                for f in os.listdir(self.save_dir)
-                if f.startswith(base + "_") and f.endswith(".pt") and not f.endswith("_best.pt")
-            ]
-
-            # Sort by epoch number extracted from filename
-            def extract_epoch(fname):
-                try:
-                    return int(fname.split("_")[-1].split(".")[0])
-                except ValueError:
-                    return -1  # fallback, should not happen
-
-            all_ckpts_sorted = sorted(all_ckpts, key=extract_epoch, reverse=True)
-
-            # Keep last 5, delete the rest
-            keep_last = 5
-            for ckpt in all_ckpts_sorted[keep_last:]:
-                try:
-                    os.remove(ckpt)
-                except OSError:
-                    pass
+        existing = [
+            os.path.join(self.save_dir, f)
+            for f in os.listdir(self.save_dir)
+            if f.startswith(base + "_") and f.endswith(".pt") and not f.endswith("_best.pt")
+        ]
+        for stale in sorted(existing, key=_epoch_from_name, reverse=True)[5:]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
 
     @staticmethod
     def _migrate_circular_conv_keys(state_dict, model):
@@ -1441,31 +1418,24 @@ class UNetTrainer:
         if missing or unexpected:
             print(f"[INFO] load_state_dict: missing={list(missing)} unexpected={list(unexpected)}")
 
-        # Restore EMA (optional)
+        # Restore EMA into the EXISTING wrapper created in __init__.
+        # The checkpoint stores self.ema_model.ema_model.state_dict() (just the
+        # averaged weights, not the EMA wrapper's bookkeeping), so we load it
+        # back into self.ema_model.ema_model. Previously this code built a new
+        # local EMA wrapper and loaded into it — the wrapper was then discarded
+        # so EMA was silently never restored on resume.
         if "EMA" in checkpoint and checkpoint["EMA"] is not None and hasattr(self, "ema_model"):
             try:
-                # self.ema_model.load_state_dict(checkpoint["EMA"], strict=False)
-                # self.ema_model = checkpoint["EMA"].to(self.device)
-
-                ema_model_sd = checkpoint["EMA"]  # full EMA state dict (online_model + ema_model)
-
-                # Extract only EMA weights and strip "ema_model." prefix
-                # ema_model_sd = {
-                #     k.replace("ema_model.", ""): v
-                #     for k, v in ema_wrapped_sd.items()
-                #     if k.startswith("ema_model.")
-                # }
-
-                ema_model = EMA(
-                    self.model,
-                    beta=0.9999,  # exponential moving average factor
-                    update_after_step=100,  # only after this number of .update() calls will it start updating
-                    update_every=10,
-                ).to(self.device)
-                ema_model_sd = self._migrate_circular_conv_keys(ema_model_sd, self.accelerator.unwrap_model(self.model))
-                ema_model.ema_model.load_state_dict(ema_model_sd, strict=False)
-                ema_model.eval()
-
+                ema_model_sd = self._migrate_circular_conv_keys(
+                    checkpoint["EMA"], self.accelerator.unwrap_model(self.model),
+                )
+                missing, unexpected = self.ema_model.ema_model.load_state_dict(
+                    ema_model_sd, strict=False,
+                )
+                if missing or unexpected:
+                    print(f"[INFO] EMA load_state_dict: missing={list(missing)} "
+                          f"unexpected={list(unexpected)}")
+                print("[INFO] EMA state restored from checkpoint")
             except Exception as e:
                 print(f"[WARN] Could not load EMA: {e}")
 
@@ -1485,26 +1455,11 @@ class UNetTrainer:
                 self.global_step * self.accelerator.gradient_accumulation_steps
         )
 
-        # Restore conditioning scale so resume doesn't restart warmup from 0.
-        # For tcre: a restored 0.0 means a previous run silently disabled the
-        # loss (e.g. precompute failed); fall back to the config-provided
-        # initial value so adaptive scaling can re-warm.
-        self.cond_loss_scaling     = checkpoint.get("cond_loss_scaling", 0.0)
-        restored_tcre = checkpoint.get("tcre_loss_scaling", self.tcre_loss_scaling)
-        self.tcre_loss_scaling     = restored_tcre if restored_tcre > 0 else self.tcre_loss_scaling
-        self.tcre_slope            = checkpoint.get("tcre_slope",     self.tcre_slope)
-        self.tcre_intercept        = checkpoint.get("tcre_intercept", self.tcre_intercept)
-        self._ema_mse  = checkpoint.get("_ema_mse",  None)
-        self._ema_cond = checkpoint.get("_ema_cond", None)
-        self._ema_tcre = checkpoint.get("_ema_tcre", None)
-        self._ema_ebm  = checkpoint.get("_ema_ebm",  None)
-        self.ebm_loss_scaling = checkpoint.get("ebm_loss_scaling", self.ebm_loss_scaling)
-        self._ema_interaction = checkpoint.get("_ema_interaction", None)
-        _restored_inter = checkpoint.get("interaction_loss_scaling", self.interaction_loss_scaling)
-        self.interaction_loss_scaling = _restored_inter if _restored_inter > 0 else self.interaction_loss_scaling
-        self._ema_gmean = checkpoint.get("_ema_gmean", None)
-        _restored_gmean = checkpoint.get("gmean_loss_scaling", self.gmean_loss_scaling)
-        self.gmean_loss_scaling = _restored_gmean if _restored_gmean > 0 else self.gmean_loss_scaling
+        # Restore aux-loss scalings / EMAs / tcre slope from the checkpoint.
+        # Fields marked zero_disables=True in _PERSISTED_FIELDS keep the
+        # config-provided value when the checkpoint stored a 0, so a previously
+        # disabled-by-bug run doesn't sticky-disable the loss on resume.
+        self._restore_persisted_fields(checkpoint)
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
