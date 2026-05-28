@@ -9,20 +9,21 @@ import numpy as np
 import xarray as xr
 from torch.utils.data import Dataset, DataLoader
 from accelerate import Accelerator
-import dask
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend for saving plots
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import QuantileTransformer
 from sklearn.decomposition import PCA
 
-# Constants for the minimum and maximum of our datasets
+# =============================================================================
+# Target-variable preprocessing / normalisation
+# =============================================================================
+# TREFHT: Kelvin → Celsius then z-score-style with fixed (mean=4.5°C, std=21°C)
+# pr:     kg/m²/s → mm/day then cube-root compression of the heavy positive tail
+
 MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
 
-# Convert from kelvin to celsius and from kg/m^2/s to mm/day
 PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
-fit_minmax = lambda x: (np.nanmin(x), np.nanmax(x))
-# Normalization and Inverse Normalization functions
 NORM_FN = {
     "TREFHT": lambda x: (x - 4.5) / 21.0,
     "pr": lambda x: np.cbrt(x),
@@ -32,98 +33,33 @@ DENORM_FN = {
     "pr": lambda x: x**3,
 }
 
-# These functions transform the range of the data to [-1, 1]
-MIN_MAX_FN = {"TREFHT": lambda x: x}
-
-def norm_zscore(
-    da: xr.DataArray,
-    lo_pct: float = 1.0,
-    hi_pct: float = 99.0,
-    mode: str = "zscore",   # "percentile" | "zscore"
-    n_std: float = 3.0,         # only used when mode="zscore"
-) -> xr.DataArray:
-    """
-    Log1p normalisation to [-1, 1].
-
-    mode='percentile'  (default)
-        lo = p(lo_pct) of log1p(non-ocean values)
-        hi = p(hi_pct) of log1p(non-ocean values)
-        Robust to outliers; the bulk of real-emission cells fill [-1, 1].
-
-    mode='zscore'
-        lo = mean - n_std * std   of log1p(non-ocean values)
-        hi = mean + n_std * std
-        Keeps the Gaussian shape centred; n_std=3 maps ±3σ → ±1.
-        Useful when you want the model to see relative anomalies rather than
-        the absolute rank of each cell.
-
-    Both modes:
-      - Operate on log1p(da) so transform and statistics are in the same space.
-      - Compute statistics on non-ocean (above-floor) cells only.
-      - Pin below-floor cells to exactly -1.
-      - Hard-clip output to [-1, 1] via numpy (bypasses xarray edge-cases).
-    """
-    floor = {"SUL": 1e-9, "CO2": 1e-3}.get(da.name, 0.0)
-
-    vals     = da.values.flatten().astype(np.float64)
-    log_vals = np.log1p(np.clip(vals, 0.0, None))
-    mask     = vals > floor
-
-    if mask.sum() == 0:
-        result = xr.full_like(da, -1.0).astype("float32")
-        result.attrs.update(norm_lo=0.0, norm_hi=1.0)
-        return result
-
-    if mode == "percentile":
-        lo = float(np.percentile(log_vals[mask], lo_pct))
-        hi = float(np.percentile(log_vals[mask], hi_pct))
-    elif mode == "zscore":
-        mu  = float(log_vals[mask].mean())
-        std = float(log_vals[mask].std())
-        lo  = mu - n_std * std
-        hi  = mu + n_std * std
-    else:
-        raise ValueError(f"mode must be 'percentile' or 'zscore', got '{mode}'")
-
-    # Transform DataArray in log-space, stretch [lo, hi] -> [-1, 1]
-    log_da = np.log1p(da.clip(min=0))
-    normed = 2.0 * (log_da - lo) / max(hi - lo, 1e-30) - 1.0
-
-    # Pin ocean / below-floor cells to exactly -1
-    normed = xr.where(da <= floor, -1.0, normed)
-
-    # Hard clip via numpy — guarantees [-1, 1] regardless of outliers
-    out = np.clip(normed.values, -1.0, 1.0).astype(np.float32)
-    result = xr.DataArray(out, dims=da.dims, coords=da.coords, name=da.name)
-    result.attrs["norm_lo"]   = lo
-    result.attrs["norm_hi"]   = hi
-    result.attrs["norm_mode"] = mode
-    return result
-
-
-def min_max_norm(x: Any, min_val: float, max_val: float) -> Any:
-    """Normalizes a data array to the range [-1, 1]"""
-    return (x - min_val) / (max_val - min_val)
-
-
-def min_max_denorm(x: Any, min_val: float, max_val: float) -> Any:
-    """Inverse normalizes a data array from the range [-1, 1] to [min_val, max_val]"""
-    return x * (max_val - min_val) + min_val
-
 
 def preprocess(ds: xr.DataArray) -> xr.DataArray:
-    """Preprocesses a data array"""
-
-    # The name of the variable is contained within the dataarray
+    """Apply variable-specific unit conversion (Kelvin→Celsius, kg/m²/s→mm/day)."""
     return PREPROCESS_FN[ds.name](ds)
 
 
+# =============================================================================
+# Conditioning (CO2 / SUL) normalisation
+# =============================================================================
+# Reference scenarios used to derive the [-1, +1] percentile range.
+# `_only_timefixed.nc` files contain scenario emissions only (no historical
+# baseline), matching what config_data.yaml feeds to training/eval.
+# ssp126 is intentionally excluded: it's the OOD test scenario.
 EMISSIONS_PATHS = [
     "/scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc",
     "/scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc",
     "/scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc",
     "/scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc",
 ]
+
+
+# -----------------------------------------------------------------------------
+# Alternative normalisation functions kept for diagnostic scripts only
+# (plot_hist.py, plot_difanos_cond_encoder.py). NOT used by the training path —
+# the active normaliser is `normalize()` below, which uses
+# `_get_emissions_minmax()`.
+# -----------------------------------------------------------------------------
 
 def scale_cumulative_linear(da: xr.DataArray):
     """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
@@ -137,20 +73,6 @@ def scale_cumulative_linear(da: xr.DataArray):
     normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
     return normed.broadcast_like(da).astype("float32")
 
-
-def scale_spatial_log10(da: xr.DataArray, floor=1e-30, lo_pct=1.0, hi_pct=99.0):
-    """Log10 normalization to [-1, 1] preserving spatial structure.
-    Percentiles computed only on non-zero cells to avoid ocean domination.
-    Near-zero cells (ocean) mapped to -1.
-    Best for regionally varying emissions like SO2."""
-    positive = da.where(da > floor)
-    lx = np.log10(positive)
-    lo = float(lx.quantile(lo_pct / 100.0, skipna=True))
-    hi = float(lx.quantile(hi_pct / 100.0, skipna=True))
-    z = (lx - lo) / max(hi - lo, 1e-30)
-    result = (2.0 * z.clip(0, 1) - 1.0)
-    result = xr.where(da <= floor, -1.0, result)
-    return result.fillna(-1.0).astype("float32")
 
 def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
     # TOMCAT emissions: non-negative
@@ -266,12 +188,6 @@ def fit_pca_denoise(
     recon = pca.inverse_transform(scores)      # (T, H*W)
     del scores
 
-    var_explained = pca.explained_variance_ratio_.sum() * 100
-    #print(
-    #    f"[PCA] {var_name}: kept {n_components} components → "
-    #    f"{var_explained:.2f}% variance explained"
-    #)
-
     result = recon.reshape(T, H, W).astype(np.float32)
     del recon
     return result, pca
@@ -355,13 +271,17 @@ def pca_denoise_dataset(
 # ---------------------------------------------------------------------------
 
 
+# =============================================================================
+# Active cond-normalisation path (used by the training pipeline)
+# =============================================================================
+
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
-    """
-    Load all EMISSIONS_PATHS and return the combined 1st–99th percentile range
-    for CO2 and SUL so that normalization covers the typical spatial range of
-    all experiments without being dominated by extreme emission hotspots.
-    Values outside [lo, hi] are clipped to [-1, 1] in normalize().
+    """Compute (1st, 99th) percentile range of CO2 and SUL across reference scenarios.
+
+    Cached: opens the EMISSIONS_PATHS NetCDFs once per process. The returned
+    (lo, hi) per variable defines the linear mapping in `normalize()`:
+    lo → -1, hi → +1, values outside are clipped to [-1, +1].
     """
     all_vals = {}  # var -> list of flat arrays
     for path in EMISSIONS_PATHS:
@@ -379,33 +299,28 @@ def _get_emissions_minmax():
 
 
 def normalize(ds: xr.DataArray) -> xr.DataArray:
-    """Normalizes a data array.
+    """Normalise a DataArray for model input.
 
-    CO2 and SUL use min-max scaling derived from the 5th–95th percentile of
-    the reference scenarios (ssp370 + hist).  The 5th percentile maps to -1,
-    the 95th to +1; values outside that range are clipped to [-1, 1].
-    This preserves spatial structure (higher emissions → higher value) while
-    preventing extreme hotspot gridpoints from collapsing most of the range
-    toward -1.
+    CO2 and SUL: min-max scaling derived from the 1st–99th percentile of the
+    reference scenarios in EMISSIONS_PATHS (hist + ssp370 + aaer + ghg; ssp126
+    excluded as OOD test). Percentile lo → -1, hi → +1; out-of-range values
+    are clipped. This preserves spatial structure while preventing extreme
+    hotspot gridpoints from dominating the range.
+
+    Other variables (e.g. TREFHT, pr): use the fixed lambdas in NORM_FN.
     """
-
     if ds.name in ["CO2", "SUL"]:
         minmax = _get_emissions_minmax()
         min_val, max_val = minmax[ds.name]
 
         range_val = max_val - min_val
         if range_val == 0:
-            norm = xr.zeros_like(ds)
-        else:
-            mean_val = (min_val + max_val) / 2
-            norm = (ds - mean_val) / (range_val / 2)
-
-        # Clip to [-1, 1]: values beyond the 5–95th pct range are saturated
+            return xr.zeros_like(ds).clip(-1, 1).fillna(-1)
+        mean_val = (min_val + max_val) / 2
+        norm = (ds - mean_val) / (range_val / 2)
         return norm.clip(-1, 1).fillna(-1)
 
-    # Other variables use predefined normalization functions
-    norm = NORM_FN[ds.name](ds)
-    return norm.fillna(0)
+    return NORM_FN[ds.name](ds).fillna(0)
 
 def denorm(ds: xr.DataArray) -> xr.DataArray:
     norm = DENORM_FN[ds.name](ds)
@@ -508,7 +423,6 @@ class ClimateDataset(Dataset):
         self.climatology: Optional[torch.Tensor] = external_climatology
 
         # Load an example realization right off the bat
-        #print(self.realizations[0])
         self.load_data(self.realizations[0])
 
     @staticmethod
@@ -571,7 +485,6 @@ class ClimateDataset(Dataset):
             self.lats = dataset.lat
             dataset = dataset[self.vars]
             self.xr_data = dataset.map(preprocess).map(normalize)
-           # print(self.xr_data)
             # Select target years robustly: handles both integer-year coords
             # (CESM2-LE "year" dim) and datetime/cftime coords (AAER/GHG/SSP files).
             # Also safe when a scenario doesn't cover the full 1850-2100 range.
@@ -614,12 +527,6 @@ class ClimateDataset(Dataset):
                     print(f"[DATASET] Could not compute climatology: {exc}")
                     print("[DATASET] Anomaly loss will fall back to per-batch mean.")
                     self.climatology = None
-            #else:
-                #print(
-                #    f"[DATASET] Using pre-supplied climatology  "
-                #    f"shape={tuple(self.climatology.shape)}  "
-                #    f"mean={self.climatology.mean().item():.4f}"
-                #)
 
         # ── Conditioning data (always loaded) ────────────────────────────────
         if getattr(self, "dataset_cond", None) is not None:
@@ -653,10 +560,7 @@ class ClimateDataset(Dataset):
             valid = sorted(selected_years & available)
             raw_cond = raw_cond.sel({self.time_dim: valid})
 
-        #print("WAR CONG")
-        #print(raw_cond)
         # Materialise into a float32 tensor and immediately close the dataset
-        #print(raw_cond)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
         # Keep a lightweight (no-data) reference for coordinate lookups
         _ds_cond = xr.open_dataset(cond_file)
@@ -746,7 +650,6 @@ class ClimateDataset(Dataset):
             save_path = os.path.join(diag_dir, f"cond_normalized_{var}.png")
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             plt.close()
-            #print(f"[DIAG] Saved {save_path}")
 
         # ── spatial-mean time series ──────────────────────────────────────────
         fig, axes = plt.subplots(len(self.cond_vars), 1,
@@ -781,7 +684,6 @@ class ClimateDataset(Dataset):
         save_path = os.path.join(diag_dir, "cond_timeseries.png")
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-        #print(f"[DIAG] Saved {save_path}")
 
         # ── PCA scree + before/after maps ────────────────────────────────────
         self._save_pca_diagnostics(diag_dir)
@@ -830,7 +732,6 @@ class ClimateDataset(Dataset):
                 scree_path = os.path.join(diag_dir, f"pca_scree_{tag}_{vname}.png")
                 plt.savefig(scree_path, dpi=120, bbox_inches='tight')
                 plt.close()
-                #print(f"[DIAG] Saved {scree_path}")
 
                 # ── before / after spatial map ────────────────────────────────
                 # Use the middle time-step for a representative snapshot
@@ -871,17 +772,14 @@ class ClimateDataset(Dataset):
                 map_path = os.path.join(diag_dir, f"pca_map_{tag}_{vname}.png")
                 plt.savefig(map_path, dpi=120, bbox_inches='tight')
                 plt.close()
-                #print(f"[DIAG] Saved {map_path}")
 
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
         """Generate a tensor of data from an xarray dataset"""
-        #print(ds)
         # Stacks the data variables ('pr', 'tas', ...) into a single dimension
         time_dim = getattr(self, "time_dim", "time")
         stacked_ds = ds.to_stacked_array(
             new_dim="var", sample_dims=[time_dim, "lon", "lat"]
         ).transpose("var", time_dim, "lat", "lon")
-        #print(stacked_ds.to_numpy())
         # Convert the numpy array to a torch tensor
         tensor_data = torch.tensor(stacked_ds.to_numpy(), dtype=torch.float32)
 
