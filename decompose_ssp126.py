@@ -135,6 +135,22 @@ def main():
     dT_add  = dT_ghg + dT_sul
     interaction = dT_full - dT_add
 
+    # Absolute null-cond output (climatology check). If the model is calibrated,
+    # gm["null"] should be ~constant across years (cond is identical for every
+    # year — variation is just diffusion sampling noise) AND match the expected
+    # pre-industrial baseline. A non-zero anomaly in the null pass = a baked-in
+    # offset bias independent of forcing.
+    null_abs = gm["null"]
+    print("\n[NULL-COND] absolute model output with NULL_COND on both channels:")
+    print(f"  mean across years: {null_abs.mean():+.3f}°C  "
+          f"std: {null_abs.std():.3f}°C  "
+          f"min: {null_abs.min():+.3f}  max: {null_abs.max():+.3f}")
+    print(f"  → if this differs much from the pre-industrial baseline (≈ hist 1850 model output),")
+    print(f"    that's the baked-in climatology offset.")
+    if "full" in gm:
+        # show year-1 of `full` for comparison (closest to "no forcing" within the scenario)
+        print(f"  for ref: full-cond at year {years[0]} = {gm['full'][0]:+.3f}°C")
+
     # Report over the WHOLE trajectory — judging additivity from a single year
     # (esp. 2100, where ssp126 aerosols have vanished) is misleading: the
     # interaction can be near-zero at the endpoint while large mid-century.
