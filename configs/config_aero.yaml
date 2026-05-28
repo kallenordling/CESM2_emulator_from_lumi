@@ -44,8 +44,8 @@ trainer:
     save_every: 100
     batch_size: 8        # must match batch_size in config_data.yaml
     save_dir: runs/
-    save_name: run_slope-tcre.pt
-    load_path: "newest"        # "0" = train from scratch, "newest" = auto-load latest checkpoint, or explicit path
+    save_name: run_normfix.pt
+    load_path: "newest"        # first link: no run_normfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.0
@@ -85,7 +85,7 @@ trainer:
     # scenario and a FIXED strong weight. A/B-tested via run_gmeantest.sh.
     gmean_loss_scaling: 0.0
 
-    reset_optimizer: false      # keep Adam momentum across resumes — required for short chained jobs (run2_aero.sh self-chaining). Set true only for a one-off momentum reset after a loss-function change.
+    reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.
     eval_script: run_eval_aero.sh
 
   optimizer:

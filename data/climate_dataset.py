@@ -119,8 +119,10 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 
 
 EMISSIONS_PATHS = [
-    "/scratch/project_462001328/emulator_data/emissions_ssp370_timefixed.nc",
-    "/scratch/project_462001328/emulator_data/emissions_hist_timefixed.nc",
+    "/scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc",
+    "/scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc",
+    "/scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc",
+    "/scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc",
 ]
 
 def scale_cumulative_linear(da: xr.DataArray):
@@ -356,7 +358,7 @@ def pca_denoise_dataset(
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
     """
-    Load all EMISSIONS_PATHS and return the combined 5th–95th percentile range
+    Load all EMISSIONS_PATHS and return the combined 1st–99th percentile range
     for CO2 and SUL so that normalization covers the typical spatial range of
     all experiments without being dominated by extreme emission hotspots.
     Values outside [lo, hi] are clipped to [-1, 1] in normalize().
@@ -372,7 +374,7 @@ def _get_emissions_minmax():
     combined = {}
     for var, arrays in all_vals.items():
         flat = np.concatenate(arrays)
-        combined[var] = (float(np.percentile(flat, 5)), float(np.percentile(flat, 95)))
+        combined[var] = (float(np.percentile(flat, 1)), float(np.percentile(flat, 99)))
     return combined
 
 
