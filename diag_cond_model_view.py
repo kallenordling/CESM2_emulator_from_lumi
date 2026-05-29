@@ -15,7 +15,8 @@ trainer is doing RIGHT NOW. Edit the config, rerun, see the difference.
 
 For each cond channel it writes a figure with rows:
     A normalized | B +smoothed | C +PCA (model input) | A−C removed total
-× columns = a few representative selected years (first, ~2015, ~2050, last).
+× columns = N evenly-spaced years (default 8, --n-cols), with the hist→ssp
+junction years force-included; or pass explicit --years.
 
 It also prints, per channel:
   - PCA components kept + explained variance,
@@ -112,7 +113,11 @@ def main():
                     help="experiment name in config_data.yaml (hist/ssp370/aaer/ghg)")
     ap.add_argument("--cond-file", default=None, help="explicit cond .nc (overrides --scenario)")
     ap.add_argument("--years", type=int, nargs="+", default=None,
-                    help="selected years to show as columns (default: first, ~2015, ~2050, last)")
+                    help="explicit selected years to show as columns (overrides --n-cols)")
+    ap.add_argument("--n-cols", type=int, default=8,
+                    help="number of evenly-spaced year columns when --years not given (default 8)")
+    ap.add_argument("--decades", action="store_true",
+                    help="one map column per decade (nearest available year); overrides --n-cols")
     ap.add_argument("--out-prefix", default=None,
                     help="output PNG prefix (default cond_model_view_<scenario>)")
     args = ap.parse_args()
@@ -166,13 +171,24 @@ def main():
     assert A.shape == B.shape == C.shape, (A.shape, B.shape, C.shape)
     assert A.shape[1] == len(years), (A.shape, len(years))
 
-    # Columns: requested years, else first / nearest-2015 / nearest-2050 / last.
+    # Columns: explicit --years, else N evenly-spaced selected years across the
+    # available range, with the hist→ssp junction years (last <2015, first ≥2015)
+    # always force-included so the regional reshuffle stays visible.
     if args.years:
-        col_years = [y for y in args.years if y in set(years)]
+        col_years = sorted({int(y) for y in args.years if y in set(years)})
+    elif args.decades:
+        lo = int(np.ceil(years.min() / 10.0) * 10)
+        hi = int(np.floor(years.max() / 10.0) * 10)
+        targets = list(range(lo, hi + 1, 10))           # one column per decade
+        col_years = sorted({int(years[np.argmin(np.abs(years - t))]) for t in targets})
     else:
-        want = [years[0], 2015, 2050, years[-1]]
-        col_years = sorted({int(years[np.argmin(np.abs(years - w))]) for w in want})
+        targets = list(np.linspace(years.min(), years.max(), args.n_cols))
+        pre_j, post_j = years[years < 2015], years[years >= 2015]
+        if len(pre_j) and len(post_j):
+            targets += [pre_j.max(), post_j.min()]      # straddle the junction
+        col_years = sorted({int(years[np.argmin(np.abs(years - t))]) for t in targets})
     col_idx = [int(np.where(years == y)[0][0]) for y in col_years]
+    print(f"[cfg] {len(col_years)} columns = {col_years}")
 
     # Index of the hist→ssp junction in selected space (last <2015 → first ≥2015).
     pre = np.where(years < 2015)[0]
