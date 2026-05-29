@@ -1083,6 +1083,9 @@ class UNetTrainer:
                 # Stash the target's area-weighted global mean for gmean_loss
                 # BEFORE clean_samples is freed (the loss is computed later, after
                 # the forward passes, by which point clean_samples is gone).
+                # Default to None so the (unconditional) _compute_gmean_loss call
+                # site always has a bound argument when gmean_loss is disabled.
+                target_gm = None
                 if self.gmean_loss_scaling > 0:
                     _wt = torch.cos(torch.deg2rad(torch.as_tensor(
                         self._ref_ds.lats.values,
