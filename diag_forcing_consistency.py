@@ -91,11 +91,23 @@ def decade_or_spread(years: np.ndarray, decades: bool, n_cols: int) -> list[int]
 
 def area_gmean(field_thw: np.ndarray, lat: np.ndarray) -> np.ndarray:
     w = np.cos(np.deg2rad(lat)); w = w / w.mean()
-    return (field_thw * w[None, :, None]).mean(axis=(1, 2))
+    return np.nanmean(field_thw * w[None, :, None], axis=(1, 2))
+
+
+def pos_percentile(x: np.ndarray, p: float) -> float:
+    """p-th percentile of |x| over finite, nonzero entries (0 if none).
+
+    Emission fields are hotspot-dominated (max can be ~100-1000x the bulk), so
+    scaling a colormap by the true max renders everything else invisible. A high
+    percentile (default 99) gives a readable scale.
+    """
+    v = np.abs(x[np.isfinite(x)])
+    v = v[v > 0]
+    return float(np.percentile(v, p)) if v.size else 0.0
 
 
 def compare(var, single_path, single_name, hist_path, ssp_path,
-            held_var, prefix, decades, n_cols):
+            held_var, prefix, decades, n_cols, vmax_pct=99.0):
     print(f"\n========== {var}:  {single_name}  vs  hist+ssp370 ==========")
     sy, sd, sda = load_var(single_path, var)
     ry, rd, _   = stitch_reference(hist_path, ssp_path, var)
@@ -113,17 +125,18 @@ def compare(var, single_path, single_name, hist_path, ssp_path,
     diff = S - R
 
     # ── summary ───────────────────────────────────────────────────────────────
-    abs = np.abs(diff)
-    scale = max(np.abs(R).max(), 1e-30)
+    absd = np.abs(diff)
+    dmax_abs, dmean_abs = np.nanmax(absd), np.nanmean(absd)
+    scale = max(np.nanmax(np.abs(R)), 1e-30)
     print(f"  overlap {common.min()}-{common.max()} ({common.size} yrs)  "
-          f"ref|max|={np.abs(R).max():.3e}")
-    print(f"  |diff|  max={abs.max():.3e}  mean={abs.mean():.3e}  "
-          f"(relative to ref|max|: {abs.max()/scale*100:.2f}% / {abs.mean()/scale*100:.3f}%)")
-    per_year_rms = np.sqrt((diff ** 2).mean(axis=(1, 2)))
+          f"ref|max|={np.nanmax(np.abs(R)):.3e}")
+    print(f"  |diff|  max={dmax_abs:.3e}  mean={dmean_abs:.3e}  "
+          f"(relative to ref|max|: {dmax_abs/scale*100:.2f}% / {dmean_abs/scale*100:.3f}%)")
+    per_year_rms = np.sqrt(np.nanmean(diff ** 2, axis=(1, 2)))
     worst = np.argsort(per_year_rms)[::-1][:5]
     print("  worst years (RMS diff): " +
           ", ".join(f"{int(common[i])}={per_year_rms[i]:.2e}" for i in worst))
-    if abs.max() / scale < 1e-4:
+    if dmax_abs / scale < 1e-4:
         print("  ✓ MATCH — single-forcing cond is identical to hist+ssp370.")
     else:
         print("  ✗ MISMATCH — the model sees DIFFERENT "
@@ -133,7 +146,7 @@ def compare(var, single_path, single_name, hist_path, ssp_path,
     try:
         _, hd_held, _ = load_var(single_path, held_var)
         print(f"  held-fixed {held_var} in {single_name}: "
-              f"|max|={np.abs(hd_held).max():.3e}  mean={hd_held.mean():.3e}  "
+              f"|max|={np.nanmax(np.abs(hd_held)):.3e}  mean={np.nanmean(hd_held):.3e}  "
               f"(expected ~0 for single-forcing)")
     except KeyError:
         print(f"  held-fixed {held_var}: not present in {single_name}")
@@ -144,8 +157,12 @@ def compare(var, single_path, single_name, hist_path, ssp_path,
     rows = [(f"{single_name}  {var}", S, False),
             (f"hist+ssp370  {var}", R, False),
             (f"diff ({single_name} − ref)", diff, True)]
-    vmax_data = max(np.abs(S[cidx]).max(), np.abs(R[cidx]).max(), 1e-30)
-    dmax = max(np.abs(diff[cidx]).max(), 1e-30)
+    # Percentile-based color scales — emission fields are hotspot-dominated, so
+    # the true max would render everything else invisible (see pos_percentile).
+    vmax_data = max(pos_percentile(S[cidx], vmax_pct),
+                    pos_percentile(R[cidx], vmax_pct), 1e-30)
+    dmax = max(pos_percentile(diff[cidx], vmax_pct), 1e-30)
+    print(f"  color scale (p{vmax_pct:g}): data vmax={vmax_data:.3e}  diff ±{dmax:.3e}")
     fig, axes = plt.subplots(3, len(cols), figsize=(3.6 * len(cols), 9), squeeze=False)
     for r, (label, arr, is_diff) in enumerate(rows):
         for c, (yr, ti) in enumerate(zip(cols, cidx)):
@@ -198,6 +215,9 @@ def main():
     ap.add_argument("--decades", action="store_true",
                     help="one map column per decade (default: 8 evenly-spaced)")
     ap.add_argument("--n-cols", type=int, default=8)
+    ap.add_argument("--vmax-pct", type=float, default=99.0,
+                    help="percentile of |field| used for the color scale (default 99; "
+                         "use 100 for true max). Emission maps are hotspot-dominated.")
     ap.add_argument("--out-prefix", default="forcing_consistency")
     args = ap.parse_args()
 
@@ -213,11 +233,11 @@ def main():
     # aerosol consistency: aaer.SUL vs hist+ssp370.SUL  (aaer holds CO2 fixed)
     compare("SUL", aaer, "aaer", hist, ssp370,
             held_var="CO2", prefix=args.out_prefix,
-            decades=args.decades, n_cols=args.n_cols)
+            decades=args.decades, n_cols=args.n_cols, vmax_pct=args.vmax_pct)
     # GHG consistency: ghg.CO2 vs hist+ssp370.CO2  (ghg holds SUL fixed)
     compare("CO2", ghg, "ghg", hist, ssp370,
             held_var="SUL", prefix=args.out_prefix,
-            decades=args.decades, n_cols=args.n_cols)
+            decades=args.decades, n_cols=args.n_cols, vmax_pct=args.vmax_pct)
 
 
 if __name__ == "__main__":
