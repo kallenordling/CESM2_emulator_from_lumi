@@ -1,41 +1,58 @@
 #!/bin/bash
-# Run diag_forcing_consistency.py — verify single-forcing cond files (aaer SUL,
-# ghg CO2) match the combined hist+ssp370 forcing the model is trained on.
+#SBATCH --job-name=forcing_consistency
+#SBATCH --output=forcing_consistency_%j.out
+#SBATCH --error=forcing_consistency_%j.err
+#SBATCH --time=00:20:00
+#SBATCH --partition=small
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
 #
-# This is a PURE xarray/numpy/matplotlib diagnostic (no torch/omegaconf), so it
-# runs locally against the mounted cond files — no LUMI container needed.
+# Run diag_forcing_consistency.py inside the LUMI container — verify the
+# single-forcing cond files match the combined hist+ssp370 forcing:
+#   aaer SUL  vs  hist(≤2014)+ssp370(≥2015) SUL
+#   ghg  CO2  vs  hist(≤2014)+ssp370(≥2015) CO2
 #
-# Usage:
-#   bash run_forcing_consistency.sh                 # 8 evenly-spaced year columns
-#   bash run_forcing_consistency.sh --decades       # one map column per decade
-#   EMU_DIR=/mnt/lumi_sc2/emulator_data bash run_forcing_consistency.sh
-#   PYTHON=~/miniconda3/envs/plotting/bin/python bash run_forcing_consistency.sh --decades
+# Usage (LUMI):
+#   sbatch run_forcing_consistency.sh                  # 8 evenly-spaced columns
+#   sbatch run_forcing_consistency.sh --decades        # one map column per decade
+#   bash   run_forcing_consistency.sh --decades        # run on the current node
 #
-# Any extra args (--decades, --n-cols N, --out-prefix X, --emu-dir DIR, ...) are
-# passed straight through to the python script.
-#
-# Outputs (in the repo dir):
+# Any extra args (--decades, --n-cols N, --out-prefix X, ...) pass straight
+# through to the python script. Outputs land in PROJECT_DIR:
 #   forcing_consistency_SUL_maps.png / _timeseries.png   (aaer vs hist+ssp370)
 #   forcing_consistency_CO2_maps.png / _timeseries.png   (ghg  vs hist+ssp370)
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# ── Modules ───────────────────────────────────────────────────────────────────
+module use /appl/local/laifs/modules
+module load lumi-aif-singularity-bindings
 
-# Python interpreter: override with PYTHON=... if your xarray env isn't the default.
-PYTHON="${PYTHON:-python}"
+# ── Container ────────────────────────────────────────────────────────────────
+SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
+echo "[CONTAINER] Using: ${SIF}"
 
-# Where the emissions_*_only_timefixed.nc cond files live (local mount of LUMI scratch).
-export EMU_DIR="${EMU_DIR:-/mnt/lumi_sc2/emulator_data}"
+# ── Project + data paths ─────────────────────────────────────────────────────
+PROJECT_DIR=/projappl/project_462001328/CESM2_emulator_from_lumi
+EMU_DIR="${EMU_DIR:-/scratch/project_462001328/emulator_data}"
 
-echo "[run] PYTHON=${PYTHON}"
-echo "[run] EMU_DIR=${EMU_DIR}"
-echo "[run] args=$*"
+# ── Inject host venv into container ──────────────────────────────────────────
+_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
+             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
+export PYTHONNOUSERSITE=1
+echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
+echo "[DATA] EMU_DIR=${EMU_DIR}"
+echo "[ARGS] $*"
 
-if [ ! -d "${EMU_DIR}" ]; then
-    echo "[error] EMU_DIR not found: ${EMU_DIR}" >&2
-    echo "        set EMU_DIR=... to the dir holding emissions_*_only_timefixed.nc" >&2
-    exit 1
-fi
-
-"${PYTHON}" diag_forcing_consistency.py "$@"
+# ── Run ──────────────────────────────────────────────────────────────────────
+singularity exec \
+    --bind /projappl/project_462001328 \
+    --bind /scratch/project_462001328 \
+    "${SIF}" \
+    bash -c "
+        cd ${PROJECT_DIR}
+        echo '[INSIDE CONTAINER]'; pwd
+        python diag_forcing_consistency.py --emu-dir '${EMU_DIR}' $*
+    "
