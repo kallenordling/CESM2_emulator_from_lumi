@@ -67,3 +67,4 @@ singularity exec \
         pwd
 
         python ${SCRIPT} --scenario ${SCENARIO}
+    "
