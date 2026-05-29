@@ -112,7 +112,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         main_aero.py \
         trainer.hyperparameters.save_name=run_normfix_debug.pt \
         trainer.hyperparameters.save_every=5 \
-        trainer.hyperparameters.max_epochs=6
+        trainer.hyperparameters.max_epochs=50
 '"
 
 srun bash -c "$RUN_CMD" || true
