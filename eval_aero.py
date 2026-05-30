@@ -68,6 +68,7 @@ EXPERIMENTS = [
         ],
         time_dim     = "time",
         map_years    = [1900, 2000, 2014],   # last available year instead of 2100
+        gen_cost     = 165,                  # ~year span; for shard load-balancing
         color        = "#1f77b4",
     ),
     dict(
@@ -81,6 +82,7 @@ EXPERIMENTS = [
         ],
         time_dim     = "time",
         map_years    = [2015, 2050, 2100],
+        gen_cost     = 86,                   # ~year span; for shard load-balancing
         color        = "#d62728",
     ),
     dict(
@@ -98,6 +100,7 @@ EXPERIMENTS = [
         time_dim     = "time",
         target_var   = "tas",
         map_years    = [2015, 2050, 2100],
+        gen_cost     = 86,                   # ~year span; for shard load-balancing
         color        = "#9467bd",
     ),
     dict(
@@ -108,6 +111,7 @@ EXPERIMENTS = [
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
         map_years    = [1900, 2000, 2050],
+        gen_cost     = 201,                  # ~year span; for shard load-balancing
         color        = "#ff7f0e",
     ),
     dict(
@@ -118,6 +122,7 @@ EXPERIMENTS = [
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
         map_years    = [1900, 2000, 2050],
+        gen_cost     = 201,                  # ~year span; for shard load-balancing
         color        = "#2ca02c",
     ),
 ]
@@ -1702,16 +1707,34 @@ def main():
         experiments_to_run = EXPERIMENTS
 
     # ── Shard experiments across srun tasks for multi-GPU eval ───────────────
-    # Each task takes experiments_to_run[rank::n_shards].  When n_shards==1
-    # this is a no-op.  All shards still compute the hist CESM2 baseline
-    # independently above, which is fine — it's cheap and keeps the shards
-    # fully independent (no inter-rank IPC).
+    # Cost-balanced assignment (replaces the old experiments_to_run[rank::n].
+    # The naive stride gave rank 0 indices [0, n, …] — for the 5-experiment /
+    # 4-shard case that was hist+ghg, i.e. the two LONGEST runs serially, while
+    # rank 0 is also the only rank that aggregates + writes the combined plots
+    # (global_mean_anomaly / tcre / tcre_summary.json). Rank 0 then blew the
+    # walltime mid-generation and none of the aggregate plots were produced.
+    #
+    # Instead: greedy longest-processing-time bin-packing by gen_cost (~year
+    # span), then hand the LIGHTEST bin to rank 0 so the aggregator finishes its
+    # own work first and only has to wait briefly on the others before plotting.
+    # All shards still compute the hist CESM2 baseline independently above
+    # (cheap, keeps shards IPC-free).
     if args.n_shards > 1:
         all_names = [e["name"] for e in experiments_to_run]
-        experiments_to_run = experiments_to_run[args.shard_rank :: args.n_shards]
+        bins = [[] for _ in range(args.n_shards)]
+        loads = [0] * args.n_shards
+        for exp in sorted(experiments_to_run,
+                          key=lambda e: e.get("gen_cost", 1), reverse=True):
+            j = min(range(args.n_shards), key=lambda i: loads[i])
+            bins[j].append(exp)
+            loads[j] += exp.get("gen_cost", 1)
+        # Lightest bin → rank 0 (the aggregator); rest by descending load.
+        order = sorted(range(args.n_shards), key=lambda i: loads[i])
+        experiments_to_run = bins[order[args.shard_rank]]
         print(f"[SHARD] rank={args.shard_rank}/{args.n_shards} "
               f"running={[e['name'] for e in experiments_to_run]} "
-              f"(of {all_names})")
+              f"(cost={sum(e.get('gen_cost', 1) for e in experiments_to_run)}, "
+              f"of {all_names})")
 
     for exp in experiments_to_run:
         name = exp["name"]
