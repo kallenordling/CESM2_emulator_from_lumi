@@ -114,3 +114,16 @@ srun --ntasks=${SLURM_NTASKS} --ntasks-per-node=${SLURM_NTASKS} --gpus-per-task=
         echo \"[BIND] rank=\${SLURM_PROCID}/\${SLURM_NTASKS} localid=\${SLURM_LOCALID} ROCR_VISIBLE_DEVICES=\${ROCR_VISIBLE_DEVICES:-unset} HIP_VISIBLE_DEVICES=\${HIP_VISIBLE_DEVICES:-unset}\"
         singularity exec ${SIF} bash -c 'cd ${WORK_DIR} && python eval_aero.py ${PY_ARGS}'
     "
+
+# ── Mirror lightweight summaries to the projappl repo ─────────────────────────
+# eval outputs (NetCDF + plots) land in OUTPUT_DIR on /scratch, which is NOT
+# mounted off-cluster. Copy just the small artefacts (tcre_summary.json + the
+# anomaly/TCRE PNGs) into the repo's eval_output/<basename> so they ride along
+# on the projappl mount and can be inspected locally. Best-effort; never fail
+# the job over a mirror hiccup.
+MIRROR_DST="${WORK_DIR}/eval_output/$(basename "${OUTPUT_DIR}")"
+mkdir -p "${MIRROR_DST}" || true
+cp -f "${OUTPUT_DIR}/tcre_summary.json" "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/anomaly_maps_*.png "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/tcre_*.png         "${MIRROR_DST}/" 2>/dev/null || true
+echo "[MIRROR] summaries → ${MIRROR_DST}"
