@@ -44,8 +44,14 @@ def find_run_logs(log_dir, run):
 def parse_training(files):
     per_epoch = defaultdict(lambda: defaultdict(list))   # ep -> key -> [vals]
     val = {}                                             # ep -> {VAL/*: v}
+    dur = {}                                             # ep -> seconds/epoch
     for f in files:
         for line in open(f, errors="ignore"):
+            # [EPOCH 46] duration: 2.6 min  (154s)  steps: 40
+            dm = re.search(r"\[EPOCH (\d+)\] duration:\s*[\d.]+\s*min\s*\((\d+)\s*s\)", line)
+            if dm:
+                dur.setdefault(int(dm.group(1)), float(dm.group(2)))
+                continue
             if "'Epoch'" not in line:
                 continue
             em = re.search(r"'Epoch':\s*(\d+)", line)
@@ -66,7 +72,7 @@ def parse_training(files):
                     per_epoch[ep][k].append(float(m.group(1)))
     train = {ep: {k: float(np.mean(v)) for k, v in d.items()}
              for ep, d in per_epoch.items()}
-    return train, val
+    return train, val, dur
 
 
 def parse_evals(eval_dir, run):
@@ -115,14 +121,15 @@ def main():
 
     logs = find_run_logs(args.log_dir, args.run)
     print(f"[{args.run}] {len(logs)} training log(s)")
-    train, val = parse_training(logs)
+    train, val, dur = parse_training(logs)
     evals = parse_evals(args.eval_dir, args.run)
     if not train:
         raise SystemExit(f"No training records found for {args.run} in {args.log_dir}")
     ep_max = max(train)
-    print(f"  epochs {min(train)}–{ep_max}; {len(evals)} eval checkpoints")
+    print(f"  epochs {min(train)}–{ep_max}; {len(evals)} eval checkpoints; "
+          f"{len(dur)} epoch durations")
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 9))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
     ax = axes.flatten()
 
     # 1 ── loss components (log y) ───────────────────────────────────────────
@@ -151,35 +158,47 @@ def main():
     ax[2].set_title("Adaptive loss scales"); ax[2].set_xlabel("epoch")
     ax[2].legend(fontsize=8); ax[2].grid(alpha=.3)
 
-    # 4 ── TCRE ratio model/CESM2 (=1 perfect) — the CESM2 sensitivity compare ─
+    # 4 ── epoch duration (throughput / Lustre stalls / low-t overhead) ───────
+    if dur:
+        de = np.array(sorted(dur)); dv = np.array([dur[e] for e in de]) / 60.0  # min
+        ax[3].plot(de, dv, lw=1.0, color="darkorange")
+        med = float(np.median(dv))
+        ax[3].axhline(med, color="grey", ls="--", lw=.8, label=f"median {med:.1f} min")
+        ax[3].set_ylim(0, max(dv.max() * 1.1, med * 1.5))
+        ax[3].legend(fontsize=8)
+    ax[3].set_title("Epoch duration (min)"); ax[3].set_xlabel("epoch"); ax[3].grid(alpha=.3)
+
+    # 5 ── TCRE ratio model/CESM2 (=1 perfect) — the CESM2 sensitivity compare ─
     for s in SCENARIOS:
         eps = sorted(e for e in evals if s in evals[e]["ratio"])
         if eps:
-            ax[3].plot(eps, [evals[e]["ratio"][s] for e in eps], "o-", ms=3,
+            ax[4].plot(eps, [evals[e]["ratio"][s] for e in eps], "o-", ms=3,
                        color=SCEN_COL[s], label=s)
-    ax[3].axhline(1.0, color="k", ls="--", lw=1, label="CESM2 (=1)")
-    ax[3].set_ylim(0.8, 2.2); ax[3].set_title("TCRE slope ratio  model / CESM2")
-    ax[3].set_xlabel("eval epoch"); ax[3].legend(fontsize=8); ax[3].grid(alpha=.3)
+    ax[4].axhline(1.0, color="k", ls="--", lw=1, label="CESM2 (=1)")
+    ax[4].set_ylim(0.8, 2.2); ax[4].set_title("TCRE slope ratio  model / CESM2")
+    ax[4].set_xlabel("eval epoch"); ax[4].legend(fontsize=8); ax[4].grid(alpha=.3)
 
-    # 5 ── per-scenario global-mean ΔT bias model−CESM2 (=0 perfect) ──────────
+    # 6 ── per-scenario global-mean ΔT bias model−CESM2 (=0 perfect) ──────────
     for s in SCENARIOS:
         eps = sorted(e for e in evals if s in evals[e]["bias"])
         if eps:
-            ax[4].plot(eps, [evals[e]["bias"][s] for e in eps], "o-", ms=3,
+            ax[5].plot(eps, [evals[e]["bias"][s] for e in eps], "o-", ms=3,
                        color=SCEN_COL[s], label=s)
-    ax[4].axhline(0.0, color="k", ls="--", lw=1, label="CESM2 (=0)")
-    ax[4].set_title("Global-mean ΔT bias  model − CESM2  (°C)")
-    ax[4].set_xlabel("eval epoch"); ax[4].legend(fontsize=8); ax[4].grid(alpha=.3)
+    ax[5].axhline(0.0, color="k", ls="--", lw=1, label="CESM2 (=0)")
+    ax[5].set_title("Global-mean ΔT bias  model − CESM2  (°C)")
+    ax[5].set_xlabel("eval epoch"); ax[5].legend(fontsize=8); ax[5].grid(alpha=.3)
 
-    # 6 ── held-out validation ───────────────────────────────────────────────
+    # 7 ── held-out validation ───────────────────────────────────────────────
     e, v = _series(val, "VAL/Skill")
     if len(e):
-        ax[5].plot(e, v, lw=1.1, color="purple", label="VAL/Skill")
+        ax[6].plot(e, v, lw=1.1, color="purple", label="VAL/Skill")
     e2, v2 = _series(val, "VAL/MSE")
     if len(e2):
-        axb = ax[5].twinx(); axb.plot(e2, v2, lw=1.0, color="teal", alpha=.6); axb.set_ylabel("VAL/MSE", color="teal")
-    ax[5].set_title("Held-out validation"); ax[5].set_xlabel("epoch")
-    ax[5].legend(fontsize=8, loc="upper left"); ax[5].grid(alpha=.3)
+        axb = ax[6].twinx(); axb.plot(e2, v2, lw=1.0, color="teal", alpha=.6); axb.set_ylabel("VAL/MSE", color="teal")
+    ax[6].set_title("Held-out validation"); ax[6].set_xlabel("epoch")
+    ax[6].legend(fontsize=8, loc="upper left"); ax[6].grid(alpha=.3)
+
+    ax[7].set_visible(False)   # 2×4 grid, 7 panels used
 
     fig.suptitle(f"Training dashboard — {args.run}  |  epoch {min(train)}–{ep_max}  "
                  f"|  {len(evals)} evals", fontsize=14, fontweight="bold")
