@@ -716,25 +716,12 @@ class UNetTrainer:
             target = self._tcre_target_fraction * self._ema_mse
             self.tcre_loss_scaling = float(max(0.001, min(0.5, target / self._ema_tcre)))
 
-        # ebm_loss: free range [0.001, 0.5] (only when explicitly enabled)
+        # ebm_loss: free range [0.001, 0.5] (only when explicitly enabled).
+        # EBM is DROPPED by default (ebm_loss_scaling: 0 in config); this branch
+        # is inert unless re-enabled. See memory ebm_term_near_inactive.
         if self.ebm_loss_scaling > 0 and self._ema_ebm is not None and self._ema_ebm > 1e-8:
             target = self._ebm_target_fraction * self._ema_mse
             self.ebm_loss_scaling = float(max(0.001, min(0.5, target / self._ema_ebm)))
-            # ── DEBUG (once/epoch): why is the EBM weight decaying instead of
-            # holding ebm_target_fraction? Surfaces the EMAs feeding the formula
-            # scale = clamp(target_frac · ema_mse / ema_ebm, 0.001, 0.5). If the
-            # logged scale ≠ this, ema_ebm/ema_mse aren't what the per-step log
-            # shows (stale/anchored state). Throttled, rank-0 only.
-            spe = max(1, getattr(self, "num_steps_per_epoch", 40))
-            if (self.accelerator.is_main_process
-                    and getattr(self, "global_step", 0) % spe == 0):
-                print(f"[EBM-DBG] step={getattr(self,'global_step',0)} "
-                      f"ema_mse={self._ema_mse:.3e} ema_ebm={self._ema_ebm:.3e} "
-                      f"target={target:.3e} (frac={self._ebm_target_fraction}) "
-                      f"raw_scale={target/self._ema_ebm:.3f} "
-                      f"ebm_scale={self.ebm_loss_scaling:.4f} "
-                      f"ema_tcre={self._ema_tcre if self._ema_tcre else float('nan'):.3e}",
-                      flush=True)
 
         # interaction_loss: free range [0.001, 0.5] (only when explicitly enabled)
         if (self.interaction_loss_scaling > 0 and self._ema_interaction is not None

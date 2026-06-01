@@ -71,11 +71,16 @@ trainer:
     # sync iter; uses full-anomaly scoring. See unified_sensitivity_overshoot.
     tcre_lowt: true
     tcre_lowt_level: 0.05
-    # ── Energy-balance constraint  N = F + λ·ΔT,  F = F_ghg + F_aero ─────
-    # Three learnable scalars (α_ghg, α_aero, λ) penalize the squared
-    # global-mean residual.  Ties SUL to ΔT alongside CO2; complements TCRE
-    # which only constrains CO2.  Scaling adapts via EMA toward target_fraction.
-    ebm_loss_scaling: 0.01
+    # ── Energy-balance constraint  N = F + λ·ΔT  — DROPPED (disabled) ─────
+    # Was: 3 learnable scalars (α_ghg, α_aero, λ) penalizing the squared
+    # global-mean residual. Found near-inactive and TCRE-redundant: it drove
+    # residual→0 (equilibrium N=0, not N_cesm=N_model), the coeffs are
+    # scale-degenerate, and without CESM2 TOA flux the constraint reduces to a
+    # λ-weighted ΔT match. Published feedbacks (Zelinka: CESM2 λ=-0.634, ECS=5.15)
+    # only bound EQUILIBRIUM — far too loose for the transient sensitivity bias
+    # (would need ~+170% over-warming to bind). Transient sensitivity is handled
+    # by TCRE (low-t B+C). See memory ebm_term_near_inactive. Set to 0 to drop.
+    ebm_loss_scaling: 0.0
     ebm_target_fraction: 0.05
     # ── Superposition (interaction) penalty  (strategy #2, ssp126 fix) ────
     # Enforces additive CO2+aerosol composition on hist (low-forcing) so the
