@@ -44,8 +44,8 @@ trainer:
     save_every: 100
     batch_size: 8        # must match batch_size in config_data.yaml
     save_dir: runs/
-    save_name: run_normfix.pt
-    load_path: "newest"        # first link: no run_normfix_*.pt exists → falls through to from-scratch; chained links resume newest
+    save_name: run_sensfix.pt  # retrain bundle: per-channel SUL clip (cec7576) + low-t TCRE B+C (a256670). Fresh name → starts from epoch 0, no run_normfix collision.
+    load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
     sample_steps: 250
     cfg_drop_prob: 0.0
