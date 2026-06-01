@@ -57,13 +57,20 @@ trainer:
     # Slope precomputed from hist + ssp370 ΔT vs cumCO2 (matches eval).
     # Applied to the model's full predicted anomaly on hist + ssp370 samples.
     tcre_loss_scaling: 0.01      # initial value; adaptive scaling overrides once EMA warms
-    tcre_target_fraction: 0.05
+    tcre_target_fraction: 0.12   # (C) raised 0.05→0.12 to pull harder on the ~+13% TCRE overshoot
     # Quantity the slope-match scores: false = CFG decomposition (cond − null);
     # true = FULL anomaly (cond − climatology, what eval measures). The target
     # slopes are CESM2 full anomaly, so the decomposition form mismatches when
     # pred_x0_null drifts above the 1850-1900 baseline → eval ΔT-vs-cumCO2 too
     # steep (ssp370 b≈1.33). A/B-tested via run_tcrefulltest.sh; default off.
     tcre_full_anomaly: false
+    # (B) Low-t TCRE: score the sensitivity constraint on an extra conditioned
+    # forward at fixed low noise (one-step x0 ≈ true sample) instead of the
+    # random-t one-step proxy that lets the sampled sensitivity overshoot ~+13%
+    # (ssp370 whole-run warm, ghg tail/polar). Adds 1 fwd/optimizer-step on the
+    # sync iter; uses full-anomaly scoring. See unified_sensitivity_overshoot.
+    tcre_lowt: true
+    tcre_lowt_level: 0.05
     # ── Energy-balance constraint  N = F + λ·ΔT,  F = F_ghg + F_aero ─────
     # Three learnable scalars (α_ghg, α_aero, λ) penalize the squared
     # global-mean residual.  Ties SUL to ΔT alongside CO2; complements TCRE

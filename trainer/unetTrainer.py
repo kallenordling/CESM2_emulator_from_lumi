@@ -268,6 +268,16 @@ class UNetTrainer:
         self.tcre_intercept    = None
         self.tcre_slopes       = {}          # {scenario_id: (slope, intercept)}
         self.tcre_full_anomaly = getattr(self, "tcre_full_anomaly", False)
+        # tcre_lowt: evaluate the TCRE sensitivity constraint on an EXTRA forward
+        # pass at a fixed LOW noise level (tcre_lowt_level) instead of the random-t
+        # one-step x0. At high t the one-step x0 is a poor estimate, so the random-t
+        # TCRE is only a weak proxy the model can satisfy while the *sampled*
+        # sensitivity still overshoots (~+13%). At low t one-step x0 ≈ the true
+        # sample, so this pins the sampled sensitivity. Adds one conditioned forward
+        # (with grad) per optimizer step on the sync iteration; uses full-anomaly
+        # (pred − climatology), matching what eval measures.
+        self.tcre_lowt       = getattr(self, "tcre_lowt", False)
+        self.tcre_lowt_level = float(getattr(self, "tcre_lowt_level", 0.05))
 
         # ── Superposition (interaction) penalty: f(CO2,SUL) ≈ f(CO2,0)+f(0,SUL)−f(0,0)
         # Applied to hist (low-forcing) samples; ssp370 excluded because the
@@ -871,21 +881,30 @@ class UNetTrainer:
     def _compute_tcre_loss(self, pred_x0_cond: torch.Tensor,
                            pred_anomaly: torch.Tensor,
                            cond_map: torch.Tensor,
-                           scenario_ids) -> torch.Tensor:
+                           scenario_ids,
+                           pred_x0_lowt: torch.Tensor = None) -> torch.Tensor:
         """Per-scenario slope-match: ΔT_norm ≈ slope · cumCO2_norm + intercept.
 
         Slopes precomputed from CESM2 hist + ssp370 trajectories
         (`_precompute_tcre_slope`). Only scenarios present in self.tcre_slopes
         contribute (hist=0, ssp370=1 by default).
+
+        pred_x0_lowt: when provided (tcre_lowt path), the constraint is scored on
+        this LOW-noise x0 prediction as a full anomaly (pred − climatology), where
+        one-step x0 ≈ the true sample — so it pins the *sampled* sensitivity rather
+        than the random-t one-step proxy.
         """
         if not (self.tcre_loss_scaling > 0 and self.tcre_slopes and scenario_ids is not None):
             return torch.zeros(1, device=self.device)
 
-        # Match the quantity eval reports: FULL anomaly (cond − climatology) when
-        # tcre_full_anomaly is True; otherwise the CFG decomposition (cond − null).
-        tcre_pred = (
-            pred_x0_cond - self.climatology.to(dtype=pred_x0_cond.dtype)
-        ) if self.tcre_full_anomaly else pred_anomaly
+        # Score the same quantity eval reports (full anomaly = pred − climatology)
+        # when on the low-t path or tcre_full_anomaly; else the CFG decomposition.
+        if pred_x0_lowt is not None:
+            tcre_pred = pred_x0_lowt - self.climatology.to(dtype=pred_x0_lowt.dtype)
+        elif self.tcre_full_anomaly:
+            tcre_pred = pred_x0_cond - self.climatology.to(dtype=pred_x0_cond.dtype)
+        else:
+            tcre_pred = pred_anomaly
 
         w_b = _area_weights_1d(
             self._ref_ds.lats, dtype=pred_anomaly.dtype, device=pred_anomaly.device,
@@ -1096,6 +1115,23 @@ class UNetTrainer:
             else:
                 true_anomaly = None
 
+            # ── Low-t TCRE: build a fixed low-noise input before clean_samples is
+            # freed. The forward pass runs later (in the sync block) so its grad
+            # graph only lives on the sync iteration. (tcre_lowt path only.)
+            tcre_lowt_active = (
+                _sync_with_cond and self.tcre_lowt and self.tcre_loss_scaling > 0
+            )
+            if tcre_lowt_active:
+                t_low = self.scheduler.log_snr(torch.full(
+                    (clean_samples.shape[0],), self.tcre_lowt_level,
+                    device=clean_samples.device,
+                ))
+                noisy_low = self.scheduler.add_noise(
+                    clean_samples, torch.randn_like(clean_samples), t_low,
+                )
+            else:
+                t_low = noisy_low = None
+
             del clean_samples  # no longer needed; free before forward passes
 
             # ── Conditioned forward pass (with gradients) ─────────────────────
@@ -1148,8 +1184,18 @@ class UNetTrainer:
 
                 # ── Aux losses (each helper returns zeros when its scaling is 0) ──
                 ebm_loss         = self._compute_ebm_loss(pred_anomaly, cond_map)
+                # Low-t TCRE: extra conditioned forward at fixed low noise, where
+                # one-step x0 ≈ the true sample → constrains the *sampled*
+                # sensitivity (escapes the random-t one-step proxy that lets the
+                # ~+13% overshoot survive). Same conditioning as the main pass.
+                pred_x0_lowt = None
+                if tcre_lowt_active:
+                    out_low = self.model(noisy_low, t_low, cond_map=cond_map_input)
+                    pred_x0_lowt = self.get_original_sample(noisy_low, out_low, t_low)
+                    del out_low, noisy_low
                 tcre_loss        = self._compute_tcre_loss(
                     pred_x0_cond, pred_anomaly, cond_map, scenario_ids,
+                    pred_x0_lowt=pred_x0_lowt,
                 )
                 interaction_loss = self._compute_interaction_loss(
                     pred_x0_cond, pred_x0_null, cond_map_input,
