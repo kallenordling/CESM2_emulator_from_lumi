@@ -275,13 +275,27 @@ def pca_denoise_dataset(
 # Active cond-normalisation path (used by the training pipeline)
 # =============================================================================
 
+# Per-channel clip percentiles (lo, hi) for the normalize() linear map.
+# CO2 and SUL are both heavy-tailed (rare hotspots), so the top anchor sets how
+# much the populated, signal-carrying gridpoints get compressed toward -1:
+#   - CO2 → (1, 99): wide top so high-emission futures (ssp370/ssp126) don't
+#     saturate at +1 (the af8bfcf fix; see cond_normalization_diag).
+#   - SUL → (5, 95): tighter top restores ~10× more usable aerosol contrast.
+#     Under (1, 99) the inhabited SUL field flattens onto the -1 floor (nonzero
+#     p90 → -0.94 vs -0.04 at 5-95), starving the aerosol-only (aaer) signal and
+#     making its response spiky/unstable. SUL gains nothing from the wider range.
+# Splitting the percentile per channel resolves that CO2-vs-SUL conflict.
+_CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95)}
+
+
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
-    """Compute (1st, 99th) percentile range of CO2 and SUL across reference scenarios.
+    """Compute the per-channel clip percentile range across reference scenarios.
 
     Cached: opens the EMISSIONS_PATHS NetCDFs once per process. The returned
     (lo, hi) per variable defines the linear mapping in `normalize()`:
-    lo → -1, hi → +1, values outside are clipped to [-1, +1].
+    lo → -1, hi → +1, values outside are clipped to [-1, +1]. Percentiles are
+    per-channel via _CLIP_PCTL (CO2 1-99, SUL 5-95).
     """
     all_vals = {}  # var -> list of flat arrays
     for path in EMISSIONS_PATHS:
@@ -294,7 +308,8 @@ def _get_emissions_minmax():
     combined = {}
     for var, arrays in all_vals.items():
         flat = np.concatenate(arrays)
-        combined[var] = (float(np.percentile(flat, 1)), float(np.percentile(flat, 99)))
+        plo, phi = _CLIP_PCTL.get(var, (1, 99))
+        combined[var] = (float(np.percentile(flat, plo)), float(np.percentile(flat, phi)))
     return combined
 
 
