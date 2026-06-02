@@ -42,6 +42,11 @@ trainer:
     max_epochs: 10000
     sample_every: 500
     save_every: 100
+    # Force an eval every N epochs regardless of best VAL/Skill (which is an
+    # unreliable gate — single-realization internal variability — so evals
+    # otherwise stop once it plateaus). Keeps TCRE/bias tracked past the skill
+    # peak. 0 = off (only best-skill evals).
+    force_eval_every: 25
     batch_size: 8        # must match batch_size in config_data.yaml
     save_dir: runs/
     save_name: run_sensfix.pt  # retrain bundle: per-channel SUL clip (cec7576) + low-t TCRE B+C (a256670). Fresh name → starts from epoch 0, no run_normfix collision.
