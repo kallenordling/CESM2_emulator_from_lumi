@@ -194,6 +194,12 @@ class UNetTrainer:
                 and "hist" in scen_names and "ssp370" in scen_names):
             self._precompute_tcre_slope()
 
+        # CESM2 interaction (sub-additivity) target for the ssp370 interaction
+        # match — only when enabled (interaction_match_ssp370). Deterministic.
+        self._int_co2_poly = None
+        if getattr(self, "interaction_match_ssp370", False):
+            self._precompute_interaction_target()
+
     # ── __init__ helpers ─────────────────────────────────────────────────────
 
     def _init_dataloader_mode(self, train_set) -> None:
@@ -294,6 +300,13 @@ class UNetTrainer:
         # joint response is genuinely sub-additive at high forcing.
         self.interaction_loss_scaling      = getattr(self, "interaction_loss_scaling", 0.0)
         self._interaction_target_fraction  = getattr(self, "interaction_target_fraction", 0.05)
+        # interaction_match_ssp370: also apply the interaction loss to ssp370, but
+        # match the model's global-mean interaction to CESM2's MEASURED interaction
+        # (ssp370−ghg−aaer, fit vs cumCO2) instead of forcing it →0 — because the
+        # joint response is genuinely sub-additive at high forcing, so →0 would
+        # mis-teach it. Aim: a compositional operator that generalizes to ssp126.
+        self.interaction_match_ssp370 = bool(getattr(self, "interaction_match_ssp370", False))
+        self._int_co2_poly = None
 
         # ── Global-mean supervision (per-sample, fixed scaling, all scenarios) ──
         self.gmean_loss_scaling = getattr(self, "gmean_loss_scaling", 0.0)
@@ -874,6 +887,62 @@ class UNetTrainer:
                   f"slope={self.tcre_slopes[sid][0]:.4f} "
                   f"intercept={self.tcre_slopes[sid][1]:.4f}")
 
+    def _precompute_interaction_target(self) -> None:
+        """Fit CESM2's global-mean INTERACTION (sub-additivity) vs cumulative CO2,
+        for the ssp370 interaction-match term (instead of forcing additivity →0).
+
+        Interaction (4-term, climatology cancels):
+            I_gm(t) = gmean(ssp370_anom) − gmean(ghg_anom) − gmean(aaer_anom)
+        evaluated on the year-overlap of the three CESM2 single-/joint-forcing runs
+        (ssp370 2015-2100 ∩ ghg/aaer 1850-2050 → 2015-2050). Fit I_gm vs
+        gmean(cumCO2_norm) with a quadratic to denoise the single-realization
+        difference. Stored as self._int_co2_poly (np.poly1d); None disables the term.
+        NOTE: first-realization (not full-ensemble) trajectories — a soft prior.
+        """
+        self._int_co2_poly = None
+        if not getattr(self, "_multi", False):
+            return
+        names = getattr(self.train_set, "scenario_names", [])
+        for req in ("ssp370", "ghg", "aaer"):
+            if req not in names:
+                print(f"[TRAINER] interaction target: '{req}' missing from {names} — ssp370 match disabled")
+                return
+        lats = torch.as_tensor(self._ref_ds.lats.values, dtype=torch.float32)
+        w = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+        w = (w / w.mean()).view(1, -1, 1)
+        clim0 = (self.climatology.detach().to("cpu").squeeze(0).squeeze(1)[0]
+                 if self.climatology is not None else None)
+
+        def _traj(nm):
+            ds = self.train_set.datasets[names.index(nm)]
+            if ds.tensor_data is None or ds.tensor_data_cond is None:
+                ds.load_data(list(ds.realizations)[0])
+            t = ds.tensor_data            # (n_target, T, H, W)
+            c = ds.tensor_data_cond       # (n_cond,   T, H, W); ch0 = cumCO2
+            cl = clim0 if clim0 is not None else torch.zeros(t.shape[2], t.shape[3])
+            dT  = ((t[0] - cl.unsqueeze(0)) * w).mean(dim=(1, 2))   # (T,) gmean ΔT_norm
+            co2 = (c[0] * w).mean(dim=(1, 2))                        # (T,) gmean cumCO2_norm
+            yrs = ds._time_values.astype(int)
+            return {int(y): (float(dT[i]), float(co2[i])) for i, y in enumerate(yrs)}
+
+        try:
+            S, G, A = _traj("ssp370"), _traj("ghg"), _traj("aaer")
+        except Exception as e:
+            print(f"[TRAINER] interaction target: load failed: {e} — ssp370 match disabled")
+            return
+        common = sorted(set(S) & set(G) & set(A))
+        if len(common) < 5:
+            print(f"[TRAINER] interaction target: only {len(common)} overlap years — disabled")
+            return
+        import numpy as _np
+        x = _np.array([S[y][1] for y in common])                       # cumCO2 (ssp370)
+        I = _np.array([S[y][0] - G[y][0] - A[y][0] for y in common])   # gmean interaction
+        self._int_co2_poly  = _np.poly1d(_np.polyfit(x, I, 2))
+        self._int_co2_range = (float(x.min()), float(x.max()))
+        print(f"[TRAINER] interaction target (ssp370 {common[0]}-{common[-1]}): "
+              f"I_gm ∈ [{I.min():+.3f}, {I.max():+.3f}] over cumCO2 [{x.min():.3f}, {x.max():.3f}] "
+              f"(quadratic fit; sub-additive = negative I)")
+
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         if isinstance(self.scheduler, ContinuousDDPM):
             return self.scheduler.predict_start_from_v(noisy_sample, timesteps, model_output)
@@ -969,37 +1038,66 @@ class UNetTrainer:
             return torch.zeros(1, device=self.device)
         return torch.cat(tcre_terms).mean()
 
-    def _compute_interaction_loss(self, pred_x0_cond: torch.Tensor,
-                                  pred_x0_null: torch.Tensor,
-                                  cond_map_input: torch.Tensor,
-                                  noisy_samples: torch.Tensor,
-                                  timesteps: torch.Tensor,
-                                  scenario_ids) -> torch.Tensor:
-        """Additivity penalty: interaction = f(CO2,SUL) − f(CO2,0) − f(0,SUL) + f(0,0).
-
-        Applied to hist samples only (low-forcing). Two extra NO-GRAD marginal
-        forward passes; gradient flows only through pred_x0_cond[lf_mask].
-        """
-        if not (self.interaction_loss_scaling > 0 and scenario_ids is not None):
-            return torch.zeros(1, device=self.device)
-        lf_mask = (scenario_ids == 0)                 # hist only
-        if lf_mask.sum() == 0:
-            return torch.zeros(1, device=self.device)
-
-        ci = cond_map_input[lf_mask]
-        ns = noisy_samples[lf_mask]
-        ts = timesteps[lf_mask]
+    def _interaction_term(self, mask, pred_x0_cond, pred_x0_null,
+                          cond_map_input, noisy_samples, timesteps):
+        """Model interaction field for masked samples:
+        f(CO2,SUL) − f(CO2,0) − f(0,SUL) + f(0,0). Two NO-GRAD marginal forward
+        passes; gradient flows only through pred_x0_cond[mask]."""
+        ci = cond_map_input[mask]; ns = noisy_samples[mask]; ts = timesteps[mask]
         co2only = ci.clone(); co2only[:, 1] = NULL_COND_VALUE       # SUL→null
         sulonly = ci.clone(); sulonly[:, 0] = NULL_COND_VALUE       # CO2→null
         with torch.no_grad():
             p_co2 = self.get_original_sample(ns, self.model(ns, ts, cond_map=co2only), ts)
             p_sul = self.get_original_sample(ns, self.model(ns, ts, cond_map=sulonly), ts)
-        interaction = (
-            pred_x0_cond[lf_mask]
-            - p_co2.detach() - p_sul.detach()
-            + pred_x0_null[lf_mask].detach()
-        )
-        return (interaction ** 2).mean().unsqueeze(0)
+        return (pred_x0_cond[mask] - p_co2.detach() - p_sul.detach()
+                + pred_x0_null[mask].detach())
+
+    def _compute_interaction_loss(self, pred_x0_cond: torch.Tensor,
+                                  pred_x0_null: torch.Tensor,
+                                  cond_map_input: torch.Tensor,
+                                  noisy_samples: torch.Tensor,
+                                  timesteps: torch.Tensor,
+                                  scenario_ids,
+                                  cond_map: torch.Tensor = None) -> torch.Tensor:
+        """Interaction (additivity) penalty.
+
+        - hist (low forcing): drive the interaction field →0 (additivity holds).
+        - ssp370 (high forcing, sub-additive): when interaction_match_ssp370, pin
+          the model's GLOBAL-MEAN interaction to CESM2's MEASURED interaction
+          (precomputed I_gm vs cumCO2), NOT →0 — so additivity is enforced where
+          it's true and the real sub-additivity is taught where it isn't. The aim
+          is a compositional operator that generalizes to the unseen ssp126.
+        """
+        if not (self.interaction_loss_scaling > 0 and scenario_ids is not None):
+            return torch.zeros(1, device=self.device)
+        terms = []
+
+        # ── hist: additivity → 0 (spatial field) ─────────────────────────────
+        lf_mask = (scenario_ids == 0)
+        if lf_mask.sum() > 0:
+            inter = self._interaction_term(lf_mask, pred_x0_cond, pred_x0_null,
+                                           cond_map_input, noisy_samples, timesteps)
+            terms.append((inter ** 2).mean())
+
+        # ── ssp370: match CESM2's measured sub-additive interaction (gmean) ───
+        if (self.interaction_match_ssp370 and self._int_co2_poly is not None):
+            hf = (scenario_ids == 1)
+            if hf.sum() > 0:
+                inter = self._interaction_term(hf, pred_x0_cond, pred_x0_null,
+                                               cond_map_input, noisy_samples, timesteps)
+                w_g = _area_weights_1d(self._ref_ds.lats, dtype=inter.dtype,
+                                       device=inter.device).view(1, 1, 1, -1, 1)
+                inter_gm = (inter * w_g).mean(dim=(1, 2, 3, 4))           # (n,)
+                src = cond_map if cond_map is not None else cond_map_input
+                lo, hi = self._int_co2_range
+                co2_gm = (src[hf][:, 0:1] * w_g).mean(dim=(1, 2, 3, 4)).clamp(lo, hi)
+                tgt = torch.as_tensor(self._int_co2_poly(co2_gm.detach().cpu().numpy()),
+                                      dtype=inter_gm.dtype, device=inter_gm.device)
+                terms.append(((inter_gm - tgt) ** 2).mean())
+
+        if not terms:
+            return torch.zeros(1, device=self.device)
+        return torch.stack(terms).mean().unsqueeze(0)
 
     def _compute_gmean_loss(self, pred_x0_cond: torch.Tensor,
                             target_gm: torch.Tensor,
@@ -1245,7 +1343,7 @@ class UNetTrainer:
                 )
                 interaction_loss = self._compute_interaction_loss(
                     pred_x0_cond, pred_x0_null, cond_map_input,
-                    noisy_samples, timesteps, scenario_ids,
+                    noisy_samples, timesteps, scenario_ids, cond_map=cond_map,
                 )
                 gmean_loss       = self._compute_gmean_loss(
                     pred_x0_cond, target_gm, cond_dropped,
