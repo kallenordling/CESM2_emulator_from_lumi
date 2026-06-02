@@ -1,17 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=diffusion_mseyb
+#SBATCH --job-name=diffusion_ybias
 #SBATCH --account=project_462001328
 #
-# ── MSE-only + year_bias A/B arm (isolated fork of run2_aero.sh) ─────────────
-# Tests the "alternative approach": drop ALL aux losses (mse_only=true → pure
-# denoising MSE, no cond/TCRE/low-t/EBM/interaction) AND fix the conditioning-
-# space imbalance (year_bias=1.0 via config_data_mseyb.yaml). Hypothesis: with
-# balanced high-emission sampling, plain MSE learns the right sensitivity
-# without the aux losses. NOTE: two variables at once — if it differs from
-# run_sensfix you won't know which; add a year_bias-only arm to disambiguate.
-#   save_name = run_mseyb (own checkpoints/evals, from epoch 0)
-# Compare against run_sensfix via plot_training_dashboard.py.
-# Submit:  CHAIN_REMAINING=12 sbatch run2_mseyb.sh
+# ── year_bias-ONLY A/B arm (isolated fork of run2_aero.sh) ───────────────────
+# Same as run_sensfix (ALL aux losses ON: cond/TCRE/low-t) but with
+# year_bias=1.0 (config_data_ybias.yaml) instead of the live 0.0 uniform. This
+# ISOLATES the sampling change — it's the disambiguating arm for the 3-way:
+#   run_sensfix : aux ON,  year_bias OFF   (present run)
+#   run_ybias   : aux ON,  year_bias ON    (this — isolates year_bias)
+#   run_mseyb   : aux OFF, year_bias ON    (isolates MSE-only vs run_ybias)
+#   save_name = run_ybias (own checkpoints/evals, from epoch 0)
+# Compare via plot_training_dashboard.py.
+# Submit:  CHAIN_REMAINING=12 sbatch run2_ybias.sh
 # Best run when run_sensfix is NOT concurrently chaining (shared eval watcher).
 #SBATCH --partition=small-g
 #SBATCH --nodes=1
@@ -152,14 +152,14 @@ fi
 # is registered even when this job is killed at the walltime limit (the normal
 # end-of-link case, where the post-training cleanup below never runs).
 # CHAIN_REMAINING bounds the chain length; override at first submission, e.g.
-#   CHAIN_REMAINING=20 sbatch run2_mseyb.sh
+#   CHAIN_REMAINING=20 sbatch run2_ybias.sh
 CHAIN_REMAINING="${CHAIN_REMAINING:-12}"
 if [[ "${CHAIN_REMAINING}" -gt 1 ]]; then
     NEXT_JOB=$(sbatch --parsable \
            --dependency="afterany:${SLURM_JOB_ID}" \
            --export="ALL,CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 ))" \
            --chdir="${SLURM_SUBMIT_DIR}" \
-           "${SLURM_SUBMIT_DIR}/run2_mseyb.sh" 2>/dev/null) || NEXT_JOB=""
+           "${SLURM_SUBMIT_DIR}/run2_ybias.sh" 2>/dev/null) || NEXT_JOB=""
     echo "[chain] queued next link ${NEXT_JOB:-FAILED} (afterany:${SLURM_JOB_ID}, CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )))"
 else
     echo "[chain] CHAIN_REMAINING=${CHAIN_REMAINING} — final link, not resubmitting"
@@ -178,8 +178,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         --main_process_ip=${MAIN_PROCESS_IP} \
         main_aero.py \
         data_config=config_data_ybias.yaml \
-        trainer.hyperparameters.save_name=run_mseyb.pt \
-        trainer.hyperparameters.mse_only=true
+        trainer.hyperparameters.save_name=run_ybias.pt
 '"
 
 srun bash -c "$RUN_CMD" || true
