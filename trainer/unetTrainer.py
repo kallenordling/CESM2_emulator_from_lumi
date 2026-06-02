@@ -229,6 +229,11 @@ class UNetTrainer:
         self.val_loader     = None        # set externally in main_aero.py
         self.val_every      = 10          # eval every N epochs
         self.best_val_skill = -float("inf")
+        # Periodic force-eval (bypasses the best-skill gate so evals keep firing
+        # past the VAL/Skill plateau). 0 = off. Set via config force_eval_every.
+        self.force_eval_every       = int(getattr(self, "force_eval_every", 0))
+        self._last_eval_epoch       = -1          # last epoch that triggered ANY eval
+        self._last_force_eval_epoch = -10**9      # last epoch a force-eval fired
 
         # ── Cond-loss warmup → linear ramp → adaptive (capped) schedule ──
         # Phase 1 (warmup, cond_warmup_epochs):  scaling = 0
@@ -607,6 +612,32 @@ class UNetTrainer:
                     f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
                 )
                 self._spawn_eval(best_path, epoch)
+                self._last_eval_epoch = epoch
+
+        # ── Periodic force-eval (bypasses the best-skill gate) ────────────────
+        # VAL/Skill is an unreliable gate (single-realization internal
+        # variability), so evals stop firing once it plateaus — and you then fly
+        # blind on sensitivity/bias past the skill peak. Force an eval every
+        # force_eval_every epochs on the current state, reusing the rotating
+        # {base}_{epoch}.pt checkpoint. Skipped if a best-eval already fired this
+        # epoch (it shares the same trigger / output dir).
+        fee = int(getattr(self, "force_eval_every", 0))
+        if (fee and epoch > 0 and self.accelerator.is_main_process
+                and self.save_name is not None
+                and epoch != getattr(self, "_last_eval_epoch", -1)
+                and epoch - getattr(self, "_last_force_eval_epoch", -10**9) >= fee):
+            base = self.save_name.split(".pt")[0]
+            ckpt = os.path.abspath(os.path.join(self.save_dir, f"{base}_{epoch}.pt"))
+            if not os.path.exists(ckpt):
+                os.makedirs(self.save_dir, exist_ok=True)
+                torch.save(self._build_save_dict(extra={"force_eval_epoch": epoch}),
+                           ckpt, _use_new_zipfile_serialization=False)
+            self.accelerator.print(
+                f"  [FORCE-EVAL] epoch {epoch} (best-skill gate bypassed) → {ckpt}"
+            )
+            self._spawn_eval(ckpt, epoch)
+            self._last_eval_epoch = epoch
+            self._last_force_eval_epoch = epoch
 
         self.ema_model.ema_model.train()
 
