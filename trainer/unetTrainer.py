@@ -244,6 +244,11 @@ class UNetTrainer:
         self.cond_ramp_epochs    = 30
         self.cond_max_scaling    = 0.4    # 1.0 crashed ANOM_SKILL by epoch 6; 0.3 also too high
         self._cached_sensitivity = 0.0
+        # MSE-only diagnostic arm: when True, hold cond_loss_scaling=0 so all aux
+        # losses (cond/TCRE/low-t/EBM/interaction) + null pass are skipped.
+        self.mse_only = bool(getattr(self, "mse_only", False))
+        if self.mse_only and getattr(self.accelerator, "is_main_process", True):
+            self.accelerator.print("[TRAINER] mse_only=True — aux losses disabled (pure denoising MSE)")
 
         # ── Per-channel CFG dropout (independent CO2 / SUL) ──
         # Drops cond_map channels to NULL_COND_VALUE for a random fraction of
@@ -719,6 +724,14 @@ class UNetTrainer:
         If adaptive_loss_scaling=True, tcre/ebm/cond scalings are nudged toward
         their target_fraction of MSE each sync step using EMAs of the raw losses.
         """
+        # ── MSE-only mode: hold cond_loss_scaling=0 so the whole _sync_with_cond
+        # block (null pass + cond/TCRE/low-t/EBM/interaction) is skipped → pure
+        # denoising MSE. Diagnostic arm (does balanced sampling let plain MSE
+        # learn the right sensitivity without the aux losses?).
+        if getattr(self, "mse_only", False):
+            self.cond_loss_scaling = 0.0
+            return
+
         # ── Phase 1: warmup ───────────────────────────────────────────────────
         if epoch < self.cond_warmup_epochs:
             self.cond_loss_scaling = 0.0
