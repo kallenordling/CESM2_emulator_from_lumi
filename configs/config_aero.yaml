@@ -98,6 +98,12 @@ trainer:
     # passes on the hist subset each sync step. Scaling adapts via EMA.
     interaction_loss_scaling: 0.01      # initial; adaptive scaling overrides once EMA warms
     interaction_target_fraction: 0.05
+    # Also apply the interaction loss to ssp370, matching the model's global-mean
+    # interaction to CESM2's MEASURED interaction (ssp370−ghg−aaer vs cumCO2)
+    # rather than forcing additivity →0 (which is wrong at high forcing — the
+    # joint response is genuinely sub-additive). Goal: a compositional operator
+    # that generalizes to the unseen ssp126. Off by default; run_intssp A/B arm.
+    interaction_match_ssp370: false
     # ── Global-mean supervision (direct, FIXED weight; default OFF) ──────────
     # Pins the predicted field's area-weighted global mean to the target's, per
     # sample, for ALL scenarios. Ordinary MSE under-weights the global mean, so
