@@ -348,9 +348,18 @@ def generate_timeseries(
             for step_idx, t_idx in enumerate(scheduler.timesteps):
                 t = scheduler.log_snr(steps[t_idx]).expand(B).to(dtype)
                 if use_cfg:
-                    pred_co2  = model(gen, t, cond_map=cond_co2_only)
-                    pred_sul  = model(gen, t, cond_map=cond_sul_only)
-                    pred_null = model(gen, t, cond_map=cond_null)
+                    # Batch the three CFG conditionings into ONE forward of 3*B
+                    # (concat along batch) instead of three separate launches.
+                    # The UNet has no cross-batch ops (no batchnorm / cross-batch
+                    # attention), so per-sample outputs are identical to running
+                    # the three passes separately — just one kernel launch.
+                    gen3  = gen.repeat(3, 1, 1, 1, 1)
+                    t3    = t.repeat(3)
+                    cond3 = torch.cat(
+                        [cond_co2_only, cond_sul_only, cond_null], dim=0
+                    )
+                    pred3 = model(gen3, t3, cond_map=cond3)
+                    pred_co2, pred_sul, pred_null = pred3.split(B, dim=0)
                     pred = (pred_null
                             + guidance_co2 * (pred_co2 - pred_null)
                             + guidance_sul * (pred_sul - pred_null))
@@ -1656,6 +1665,16 @@ def main():
     pca_cond   = pca_state.get("cond")   if pca_state else None
     pca_target = pca_state.get("target") if pca_state else None
 
+    # Each training scenario fit its OWN PCA basis, so applying one basis to
+    # every scenario's cond_file is a mismatch. When the checkpoint carries the
+    # per-scenario map (MultiExperimentDataset.get_pca_state), select the basis
+    # matching each experiment by name below; otherwise fall back to the flat
+    # reference basis (pca_cond) for every scenario (old-checkpoint behaviour).
+    pca_per_scenario = pca_state.get("per_scenario") if pca_state else None
+    if pca_per_scenario:
+        print(f"[PCA] per-scenario bases: {sorted(pca_per_scenario)} "
+              f"(ref={pca_state.get('ref_scenario')})")
+
     # Read n_components_cond from config_data.yaml so eval uses the same
     # number of EOFs the model was trained with (currently [30, 10]).
     cfg = OmegaConf.load(CONFIG_PATH)
@@ -1743,10 +1762,21 @@ def main():
 
         # -- conditioning --------------------------------------------------
         print("  Building conditioning tensor …")
+        # Prefer the basis fit on THIS scenario in training; fall back to the
+        # flat reference basis for OOD scenarios (e.g. ssp126, never trained)
+        # or old checkpoints without the per-scenario map.
+        exp_pca_cond = pca_cond
+        if pca_per_scenario is not None and N_COMP_COND is not None:
+            entry = pca_per_scenario.get(name)
+            if entry is not None:
+                exp_pca_cond = entry.get("cond")
+                print(f"  [PCA] using '{name}' scenario basis")
+            else:
+                print(f"  [PCA] no '{name}' basis in ckpt — using reference basis")
         try:
             cond_tensor, cond_years, lat_file, lon_file = build_cond_tensor(
                 exp["cond_file"], COND_VARS, exp["time_dim"],
-                pca_cond, N_COMP_COND, COND_SMOOTH_SIGMA, COND_SMOOTH_METHOD,
+                exp_pca_cond, N_COMP_COND, COND_SMOOTH_SIGMA, COND_SMOOTH_METHOD,
             )
         except Exception as e:
             print(f"  SKIP (conditioning failed): {e}")
