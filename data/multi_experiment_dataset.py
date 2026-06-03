@@ -204,6 +204,60 @@ class MultiExperimentDataset(Dataset):
     def n_experiments(self) -> int:
         return len(self.datasets)
 
+    # ------------------------------------------------------------------
+    # PCA persistence (per-scenario)
+    # ------------------------------------------------------------------
+
+    def get_pca_state(self) -> dict:
+        """Aggregate the per-scenario fitted PCA bases for checkpointing.
+
+        Each child ClimateDataset fits its OWN PCA basis (cond + target) on
+        its first ``load_data``. eval_aero.py applies a single ``pca_cond`` to
+        whichever scenario's cond_file it loads, so we persist:
+
+          * top-level ``"cond"`` / ``"target"`` — a single reference basis kept
+            for backward compatibility with the flat ``ckpt["PCA"]`` that eval
+            consumes (eval_aero.py:1656). The reference is the ``aaer`` scenario
+            when present (this is the channel whose train↔eval basis mismatch
+            speckled the maps), else the first scenario.
+          * ``"per_scenario"`` — ``{scenario_name: {"cond": [...], "target": [...]}}``
+            so eval can select the basis matching the scenario being evaluated
+            instead of forcing one basis onto all of them.
+        """
+        per_scenario = {
+            name: ds.get_pca_state()
+            for name, ds in zip(self.scenario_names, self.datasets)
+        }
+        # Pick the reference basis used by flat-key consumers.
+        ref_name = next(
+            (n for n in self.scenario_names if "aaer" in n.lower()),
+            self.scenario_names[0],
+        )
+        ref = per_scenario[ref_name]
+        return {
+            "cond":         ref.get("cond"),
+            "target":       ref.get("target"),
+            "ref_scenario": ref_name,
+            "per_scenario": per_scenario,
+        }
+
+    def set_pca_state(self, state: dict) -> None:
+        """Restore per-scenario PCA bases saved by :meth:`get_pca_state`.
+
+        Restores each child dataset from the matching entry in
+        ``state["per_scenario"]`` so a resumed run keeps the basis it was
+        trained with instead of re-fitting on the first realization. Falls
+        back to the flat reference basis for scenarios missing from the map
+        (e.g. a checkpoint saved before per-scenario persistence) so the
+        restore degrades gracefully rather than silently re-fitting.
+        """
+        if state is None:
+            return
+        per_scenario = state.get("per_scenario") or {}
+        flat = {"cond": state.get("cond"), "target": state.get("target")}
+        for name, ds in zip(self.scenario_names, self.datasets):
+            ds.set_pca_state(per_scenario.get(name, flat))
+
 
 # ---------------------------------------------------------------------------
 # MultiExperimentDataLoader

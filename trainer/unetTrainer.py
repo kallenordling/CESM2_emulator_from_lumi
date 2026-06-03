@@ -441,15 +441,30 @@ class UNetTrainer:
                         if self.global_step % self.save_every == 0:
                             self.save(epoch)
 
-                    avg_loss        = self.accelerator.gather_for_metrics(loss).mean()
-                    avg_mse_loss    = self.accelerator.gather_for_metrics(mse_loss).mean()
-                    avg_cond_loss   = self.accelerator.gather_for_metrics(cond_loss).mean()
-                    avg_tcre_loss   = self.accelerator.gather_for_metrics(tcre_loss).mean()
-                    avg_ebm_loss    = self.accelerator.gather_for_metrics(ebm_loss).mean()
-                    avg_anom_error  = self.accelerator.gather_for_metrics(anom_error).mean()
-                    avg_anom_signal = self.accelerator.gather_for_metrics(anom_signal).mean()
-                    avg_sens        = self.accelerator.gather_for_metrics(sens).mean()
-                    avg_scen_disc   = self.accelerator.gather_for_metrics(scen_disc).mean()
+                    # Fused metric gather: stack the nine logging scalars into one
+                    # (1, 9) tensor and issue a SINGLE gather_for_metrics collective
+                    # instead of nine. Each scalar is reshaped to 0-dim first (some
+                    # are 0-dim from .mean(), others 1-dim from torch.zeros(1)) so the
+                    # stack is well-defined; gather concatenates along dim 0 across
+                    # ranks → (world_size, 9), and .mean(dim=0) reproduces the exact
+                    # per-scalar cross-rank mean of the original nine calls.
+                    _metric_stack = torch.stack([
+                        loss.reshape(()),
+                        mse_loss.reshape(()),
+                        cond_loss.reshape(()),
+                        tcre_loss.reshape(()),
+                        ebm_loss.reshape(()),
+                        anom_error.reshape(()),
+                        anom_signal.reshape(()),
+                        sens.reshape(()),
+                        scen_disc.reshape(()),
+                    ]).unsqueeze(0)                                   # (1, 9)
+                    _metric_avg = self.accelerator.gather_for_metrics(
+                        _metric_stack
+                    ).mean(dim=0)                                     # (9,)
+                    (avg_loss, avg_mse_loss, avg_cond_loss, avg_tcre_loss,
+                     avg_ebm_loss, avg_anom_error, avg_anom_signal, avg_sens,
+                     avg_scen_disc) = _metric_avg.unbind(0)
 
                     log_dict = {
                         "Training/Loss":  avg_loss.detach().item(),
@@ -1493,6 +1508,10 @@ class UNetTrainer:
             "Unet":        self.accelerator.unwrap_model(self.model).state_dict(),
             "Optimizer":   self.optimizer.state_dict(),
             "Global Step": self.global_step,
+            # Per-scenario PCA bases (cond + target). Eval consumes the flat
+            # "cond"/"target" keys (eval_aero.py:1656); restored on resume in
+            # load() so a chained run keeps a stable basis instead of re-fitting.
+            "PCA":         self.train_set.get_pca_state(),
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
             sd[ckpt_key] = getattr(self, attr)
@@ -1656,6 +1675,15 @@ class UNetTrainer:
         print(f"[INFO] Restored cond_loss_scaling={self.cond_loss_scaling:.4f}  "
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
+
+        # Restore PCA projection BEFORE any load_data call (realizations are
+        # loaded later, during training/precompute), so a resumed/chained run
+        # keeps the basis it was trained with instead of re-fitting on the first
+        # realization — re-fitting would drift the cond projection and reintroduce
+        # the train↔eval mismatch this persistence fixes.
+        if checkpoint.get("PCA") is not None:
+            self.train_set.set_pca_state(checkpoint["PCA"])
+            print("[INFO] Restored PCA state from checkpoint")
 
         # Restore best val skill so a resumed run doesn't overwrite a better checkpoint
         if "best_val_skill" in checkpoint:
