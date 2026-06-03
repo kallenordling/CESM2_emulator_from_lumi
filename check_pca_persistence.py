@@ -36,9 +36,14 @@ cond_raw, years, _, _ = build_cond_tensor(
 # this is the basis training fed the model and that the fix now persists.
 from data.climate_dataset import pca_denoise_dataset
 # Re-derive the smoothed-but-unprojected tensor, fit, then reapply.
+# Note: the aaer CO2 channel is held flat (pre-industrial) → zero variance, so
+# fit_pca_denoise hits its constant-field guard (std<1e-8 → 1-comp PCA). sklearn
+# still emits a benign "invalid value encountered in divide" (total_var=0) while
+# computing explained_variance_ratio_; the channel is returned unchanged. This
+# matches training exactly and does not affect the SUL (index 1) field we diff.
 _, fitted = pca_denoise_dataset(cond_raw.clone(), n_components=N_COMP,
                                 var_names=COND_VARS, pca_objects=None)
-cond_pca, _ = build_cond_tensor(
+cond_pca, _, _, _ = build_cond_tensor(
     AAER_COND, COND_VARS, TIME_DIM, fitted, N_COMP, CS, CSM)
 
 t2015 = int(np.where(years == 2015)[0][0])
