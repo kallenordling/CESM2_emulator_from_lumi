@@ -3,13 +3,15 @@
 Each experiment gets its own y-axis so lines with very different magnitudes
 (e.g. aaer CO2 max=0.02 vs ssp370 CO2 max=28.3) are all clearly visible.
 """
+import os
 import numpy as np
 import xarray as xr
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-EMIS_DIR = "/scratch/project_462001328/emulator_data"
+EMIS_DIR = os.environ.get("EMIS_DIR", "/scratch/project_462001328/emulator_data")
+OUT_DIR  = os.environ.get("OUT_DIR",  "/scratch/project_462001328/eval_output")
 
 EXPERIMENTS = {
     "hist":   f"{EMIS_DIR}/emissions_hist_timefixed.nc",
@@ -97,6 +99,7 @@ for vi, var in enumerate(COND_VARS):
 fig.suptitle("Raw emissions per experiment — each panel has its own y-axis",
              fontsize=13, fontweight="bold")
 plt.tight_layout()
-out = "/scratch/project_462001328/eval_output/emissions.png"
+os.makedirs(OUT_DIR, exist_ok=True)
+out = f"{OUT_DIR}/emissions.png"
 plt.savefig(out, dpi=130, bbox_inches="tight")
 print(f"\nSaved → {out}")
