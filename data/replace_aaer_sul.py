@@ -35,6 +35,8 @@ def main() -> None:
     p.add_argument("--var",    default="SUL", help="Variable to replace (default: SUL)")
     p.add_argument("--y0",     type=int, default=1850, help="First year to replace")
     p.add_argument("--y1",     type=int, default=2050, help="Last year to replace (inclusive)")
+    p.add_argument("--zero_co2", action="store_true",
+                   help="Also overwrite the CO2 channel with zeros (AAER physics: GHGs held fixed)")
     args = p.parse_args()
 
     ds_a = xr.open_dataset(args.aaer)
@@ -74,6 +76,19 @@ def main() -> None:
         out[args.var].attrs.get("history", "") +
         f" | replaced years {args.y0}-{args.y1} from {args.ssp370}"
     ).strip(" |")
+
+    if args.zero_co2:
+        co2_name = "CO2" if "CO2" in out else ("co2" if "co2" in out else None)
+        if co2_name is None:
+            print("[warn] --zero_co2 set but no CO2/co2 var in AAER file; skipping")
+        else:
+            out[co2_name].values = np.zeros_like(out[co2_name].values)
+            out[co2_name].attrs["history"] = (
+                out[co2_name].attrs.get("history", "") +
+                " | zeroed for AAER single-forcing"
+            ).strip(" |")
+            print(f"[zero]    {co2_name}: set to 0 everywhere")
+
     out.to_netcdf(args.out)
 
     print(f"[load]    aaer:   {args.aaer}  years={years_a.min()}-{years_a.max()}")
