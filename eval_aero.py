@@ -130,6 +130,22 @@ EXPERIMENTS = [
 BASELINE_START = 1850
 BASELINE_END   = 1900
 
+# ── normalized (multiplicative) bias diagnostic ──────────────────────────────
+# A bias that is a constant FRACTION of local warming peaks at the poles purely
+# because the poles warm ~2× more (real polar amplification) — so a uniform
+# multiplicative over-sensitivity renders as a fake "polar mode" on the
+# absolute-°C bias map. The normalized field  (model/cesm - 1)  separates the
+# two cases: uniform overshoot → flat % sheet; genuine polar excess → a
+# high-latitude ring ON TOP of the sheet.
+# Threshold: only divide where CESM2 warming is comfortably above internal
+# variability. 0.25 K sits below mid-century warming everywhere yet masks the
+# low-warming bands / early decades where the ratio explodes on near-zero
+# denominators.
+NORM_BIAS_MIN_WARMING = 0.25     # K; mask |cesm anom| below this before dividing
+NORM_BIAS_VMAX_PCT    = 50.0     # symmetric ± colour range for the % panel
+NORM_BIAS_POLAR_LAT   = 60.0     # |lat| > this → polar band
+NORM_BIAS_TROPIC_LAT  = 30.0     # |lat| < this → tropical band
+
 # Two training members used as an internal-variability reference.
 # Their ΔT difference is shown as a grey band on bias panels so the
 # reader can judge whether model bias is within natural variability.
@@ -1305,6 +1321,55 @@ def _window_indices(years: np.ndarray, target: int, window: int = 10):
     return idx
 
 
+def _normalized_bias_field(anom_gen: np.ndarray, anom_cs: np.ndarray):
+    """Normalized multiplicative bias  (model/cesm - 1) * 100  [%].
+
+    Both inputs are ENSEMBLE-MEAN window-mean anomaly fields (H, W); the mean
+    is taken BEFORE the ratio so internal variability does not blow up the
+    denominator (per-member ratios explode on near-zero cells). Cells where
+    |cesm anom| < NORM_BIAS_MIN_WARMING are masked (np.nan) to avoid
+    divide-by-near-zero in low-warming bands / early decades.
+
+    Returns a masked-float (H, W) percent field (np.nan where masked).
+    """
+    valid = np.abs(anom_cs) >= NORM_BIAS_MIN_WARMING
+    out = np.full(anom_cs.shape, np.nan, dtype=np.float64)
+    out[valid] = (anom_gen[valid] / anom_cs[valid] - 1.0) * 100.0
+    return out
+
+
+def _normalized_bias_bands(pct_field: np.ndarray, lat: np.ndarray):
+    """Area-weighted (cos-lat) mean of the masked % field over polar / tropical
+    bands.  Reuses the same cos-lat weighting as area_weighted_gmean, but
+    restricted to a latitude band and skipping masked (np.nan) cells.
+
+    Returns dict with polar_pct / tropical_pct / polar_minus_tropical_pct
+    (values are None if a band has no valid cells).
+    """
+    w = np.cos(np.deg2rad(lat))[:, np.newaxis]           # (H, 1), as in area_weighted_gmean
+    w = w / w.mean()
+    w_full = np.broadcast_to(w, pct_field.shape)
+
+    def _band_mean(band_mask_1d):
+        m = band_mask_1d[:, np.newaxis] & np.isfinite(pct_field)
+        wsum = float(w_full[m].sum())
+        if wsum <= 0.0:
+            return None
+        return float((pct_field[m] * w_full[m]).sum() / wsum)
+
+    polar    = _band_mean(np.abs(lat) > NORM_BIAS_POLAR_LAT)
+    tropical = _band_mean(np.abs(lat) < NORM_BIAS_TROPIC_LAT)
+    pmt = (polar - tropical) if (polar is not None and tropical is not None) else None
+    return {
+        "polar_pct":               polar,
+        "tropical_pct":            tropical,
+        "polar_minus_tropical_pct": pmt,
+        "min_warming_K":           NORM_BIAS_MIN_WARMING,
+        "polar_lat":               NORM_BIAS_POLAR_LAT,
+        "tropical_lat":            NORM_BIAS_TROPIC_LAT,
+    }
+
+
 def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                       baseline_map: np.ndarray, map_years: list,
                       cesm_data: np.ndarray | None, cesm_years: np.ndarray | None,
@@ -1418,6 +1483,83 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  → saved {out_path}")
+
+    # ── ADDITIVE: normalized (multiplicative) bias diagnostic ────────────────
+    # Strictly separate figure + sibling JSON so the existing anomaly_maps_*.png
+    # and tcre_summary.json stay byte-for-byte unchanged. Scalars are computed
+    # on the LATEST window (the late-period warming where multiplicative
+    # over-sensitivity is largest and the ratio is best conditioned).
+    norm_scalars = None
+    if has_cesm:
+        try:
+            fig_n, axes_n = plt.subplots(
+                1, n_cols,
+                figsize=(5 * n_cols, 3.5),
+                subplot_kw={"projection": ccrs.PlateCarree()},
+                squeeze=False,
+            )
+            norm_pct = mcolors.TwoSlopeNorm(
+                vcenter=0, vmin=-NORM_BIAS_VMAX_PCT, vmax=NORM_BIAS_VMAX_PCT)
+
+            def _plot_pct(ax, data, title):
+                # Mirrors _plot_panel's RdBu_r/TwoSlopeNorm idiom but labels in
+                # % (not °C) and annotates a cos-lat band split instead of a GM.
+                data_cyc, lon_cyc = add_cyclic_point(data, coord=LON)
+                da = xr.DataArray(data_cyc, dims=["lat", "lon"],
+                                  coords={"lat": LAT, "lon": lon_cyc})
+                da.plot.pcolormesh(
+                    ax=ax, cmap=cmap, norm=norm_pct,
+                    transform=ccrs.PlateCarree(), add_colorbar=True,
+                    cbar_kwargs={"label": "%", "shrink": 0.75})
+                ax.add_feature(cfeature.COASTLINE, lw=0.5)
+                ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
+                gl = ax.gridlines(draw_labels=True, linewidth=0.3,
+                                  color="grey", alpha=0.5, linestyle="--")
+                gl.top_labels   = False
+                gl.right_labels = False
+                ax.set_title(title, fontsize=9)
+
+            for col, yr_target in enumerate(map_years):
+                idx_gen = _window_indices(gen_years, yr_target, win)
+                idx_cs  = _window_indices(cesm_years, yr_target, win)
+                win_gen = (int(gen_years[idx_gen[0]]), int(gen_years[idx_gen[-1]]))
+                anom_gen = gen_data[idx_gen].mean(axis=0) - baseline_map     # (H, W)
+                anom_cs  = cesm_data[idx_cs].mean(axis=0) - baseline_map     # (H, W)
+                pct = _normalized_bias_field(anom_gen, anom_cs)             # (H, W) % w/ nan
+                bands = _normalized_bias_bands(pct, LAT)
+                _plot_pct(axes_n[0, col],
+                          pct, f"{name} (model/CESM2−1)  ({win_gen[0]}–{win_gen[1]})")
+                # annotate the numeric artifact-vs-genuine split per window
+                if bands["polar_minus_tropical_pct"] is not None:
+                    axes_n[0, col].text(
+                        0.98, 0.03,
+                        f"P−T: {bands['polar_minus_tropical_pct']:+.1f}%",
+                        transform=axes_n[0, col].transAxes, fontsize=7.5,
+                        ha="right", va="bottom",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                                  alpha=0.7, ec="none"))
+                # scalars from the latest window column
+                if col == n_cols - 1:
+                    norm_scalars = bands
+                    norm_scalars["window"] = list(win_gen)
+            axes_n[0, 0].set_ylabel("Norm. bias [%]", fontsize=10)
+            fig_n.suptitle(
+                f"Normalized multiplicative bias (model/CESM2 − 1) [%] — {name}\n"
+                f"(masked where |CESM2 anom| < {NORM_BIAS_MIN_WARMING:g} K; "
+                "flat sheet = uniform over-sensitivity, polar ring = genuine excess)",
+                fontsize=11)
+            fig_n.tight_layout()
+            norm_out = os.path.join(os.path.dirname(out_path),
+                                    f"normalized_bias_{name}.png")
+            fig_n.savefig(norm_out, dpi=150)
+            plt.close(fig_n)
+            print(f"  → saved {norm_out}")
+        except Exception as e:
+            print(f"  [NORMBIAS] WARNING: skipping normalized-bias diagnostic "
+                  f"for {name}: {e}")
+            norm_scalars = None
+
+    return norm_scalars
 
 
 def _plot_loc_attribution(name: str, results: dict, out_path_prefix: str,
@@ -1863,10 +2005,11 @@ def main():
             )
 
         # -- anomaly maps --------------------------------------------------
+        norm_bias_scalars = None
         if baseline_map is not None:
             map_out = os.path.join(args.output_dir, f"anomaly_maps_{name}.png")
             print(f"  Plotting anomaly maps …")
-            plot_anomaly_maps(
+            norm_bias_scalars = plot_anomaly_maps(
                 name         = name,
                 gen_data     = gen_celsius,
                 gen_years    = cond_years,
@@ -1995,6 +2138,8 @@ def main():
             co2_annual    = co2_annual_raw,
             ref_diff      = ref_diff,
             ref_years     = ref_years_out,
+            norm_bias     = norm_bias_scalars,   # ADDITIVE: travels through the
+                                                 # shard pickle merge for free
         )
 
     # ── combined time series plot ──────────────────────────────────────────
@@ -2057,6 +2202,25 @@ def main():
             tcre_out = os.path.join(args.output_dir, "tcre.png")
             print(f"[PLOT] TCRE → {tcre_out}")
             plot_tcre(timeseries_results, tcre_out)
+
+            # ── ADDITIVE: normalized multiplicative-bias scalars (sibling JSON).
+            # Kept OUT of tcre_summary.json so that file stays byte-for-byte
+            # unchanged; tcre_summary holds global-mean TCRE slopes while these
+            # are spatial band scalars produced in the per-experiment loop.
+            nb_summary = {sc: d["norm_bias"]
+                          for sc, d in timeseries_results.items()
+                          if isinstance(d, dict) and d.get("norm_bias") is not None}
+            if nb_summary:
+                try:
+                    import json
+                    nb_path = os.path.join(args.output_dir,
+                                           "normalized_bias_summary.json")
+                    with open(nb_path, "w") as f:
+                        json.dump(nb_summary, f, indent=2)
+                    print(f"[NORMBIAS] → saved {nb_path}")
+                except Exception as e:
+                    print(f"[NORMBIAS] WARNING: failed to write "
+                          f"normalized_bias_summary.json: {e}")
 
     print("\n[DONE] All outputs saved to:", args.output_dir)
 
