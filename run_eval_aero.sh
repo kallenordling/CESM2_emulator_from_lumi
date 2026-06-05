@@ -65,6 +65,14 @@ RUN_XAI="${RUN_XAI:-0}"
 # Set FORCE_CFG=1 to use 3-pass CFG decomposition even at guidance scales 1.0/1.0.
 # Useful to isolate whether the additive decomposition itself introduces bias.
 FORCE_CFG="${FORCE_CFG:-0}"
+# Restrict the eval to specific experiments (space-separated), e.g.
+#   EXPERIMENTS=ssp126 sbatch run_eval_aero.sh        # focused re-eval, ~5× faster
+#   EXPERIMENTS="hist ssp370 ssp126" sbatch ...        # keep the TCRE comparison
+# Empty (default) = all experiments. Passed straight to eval_aero.py --experiments.
+# NOTE: with fewer experiments than --ntasks, the extra ranks just idle (the
+# cost-balanced sharding leaves their bins empty); the TCRE-comparison plot needs
+# hist+ssp370+ssp126 together, so use the 3-name form if you want it.
+EXPERIMENTS="${EXPERIMENTS:-}"
 # Number of diffusion ensemble members to generate per experiment.
 # Default 5: model field is an ensemble MEAN (matched to multi-member CESM2),
 # so per-checkpoint skill is no longer dominated by single-realization sampling
@@ -76,6 +84,8 @@ _XAI_FLAG=""
 [ "${RUN_XAI}" = "1" ] && _XAI_FLAG="--run-xai"
 _CFG_FLAG=""
 [ "${FORCE_CFG}" = "1" ] && _CFG_FLAG="--force-cfg"
+_EXP_FLAG=""
+[ -n "${EXPERIMENTS}" ] && _EXP_FLAG="--experiments ${EXPERIMENTS}"
 
 # Multi-GPU experiment sharding: srun launches one task per GPU; each task
 # runs experiments_to_run[$SLURM_PROCID::$SLURM_NTASKS] inside eval_aero.py
@@ -97,7 +107,7 @@ PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \
     --guidance-co2 ${GUIDANCE_CO2} \
     --guidance-sul ${GUIDANCE_SUL} \
     --members ${MEMBERS} \
-    ${_XAI_FLAG} ${_CFG_FLAG}"
+    ${_XAI_FLAG} ${_CFG_FLAG} ${_EXP_FLAG}"
 
 # All variables expand here (script-launch time) except $SLURM_LOCALID which
 # must be evaluated inside srun's spawned shell — hence the \$.
