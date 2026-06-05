@@ -1,3 +1,4 @@
+import math
 import os
 import random
 from typing import Any, Callable
@@ -347,6 +348,31 @@ class UNetTrainer:
             self.climatology = None
             print("[TRAINER] No climatology found on dataset — anomaly loss will use batch mean as baseline.")
 
+    def _lr_for_step(self, step: int) -> float:
+        """Learning rate as a PURE FUNCTION of the optimizer step.
+
+        Resume-invariant by construction: global_step is persisted/restored, so
+        the LR at a given step is identical whether reached fresh or via resume —
+        no scheduler state to serialize. Decays from the base `self.lr` to
+        `self.lr_floor` over `self.lr_decay_horizon_steps`. Mode `off` keeps the
+        constant base LR (inert, for clean A/B).
+        """
+        base = self.lr
+        mode = getattr(self, "lr_decay", "off")
+        if mode == "off" or mode is None or mode is False:
+            return base
+        horizon = getattr(self, "lr_decay_horizon_steps", 0)
+        floor = min(getattr(self, "lr_floor", base), base)  # never decay UP toward a misconfigured floor>base
+        if horizon <= 0:
+            return base
+        progress = min(step / horizon, 1.0)
+        if mode == "cosine":
+            return floor + 0.5 * (base - floor) * (1.0 + math.cos(math.pi * progress))
+        if mode == "linear":
+            return max(floor, base - (base - floor) * progress)
+        # Unknown mode → fail safe to constant base LR.
+        return base
+
     def _init_step_counters(self) -> None:
         """Compute step counters that depend on the (now-built) dataloader."""
         self.global_step = 0
@@ -480,6 +506,7 @@ class UNetTrainer:
                         "SENS":           avg_sens.detach().item(),
                         "ANOM SKILL":     (1.0 - avg_anom_error / (avg_anom_signal + 1e-6)).item(),
                         "SCEN DISC":      avg_scen_disc.detach().item(),
+                        "LR":             self.optimizer.param_groups[0]["lr"],
                         "COND SCALE":     self.cond_loss_scaling,
                         "TCRE SCALE":     self.tcre_loss_scaling,
                         "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
@@ -1427,6 +1454,17 @@ class UNetTrainer:
 
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+                # Apply the scheduled LR once per REAL optimizer update (sync iter
+                # only, matching the global_step += 1 in train()). NB: global_step
+                # is incremented in train() AFTER get_loss returns, so here it
+                # still holds the count of *completed* updates — i.e. the update
+                # that will become global_step N runs at _lr_for_step(N-1). This
+                # is a fixed 1-step lag and itself a pure fn of the restored
+                # global_step, so resume-invariance is preserved. No-op when
+                # lr_decay == "off".
+                _lr = self._lr_for_step(self.global_step)
+                for g in self.optimizer.param_groups:
+                    g["lr"] = _lr
             self.optimizer.step()
             self.optimizer.zero_grad()
         return (
@@ -1666,6 +1704,20 @@ class UNetTrainer:
         self.resume_global_step = (
                 self.global_step * self.accelerator.gradient_accumulation_steps
         )
+
+        # LR-decay resume guard: the schedule is a pure fn of global_step, so a
+        # node-count change (which alters steps/epoch and hence the step↔epoch
+        # mapping) is silent unless logged. Print the restored step, horizon,
+        # progress and resulting LR so a chained run's position on the curve is
+        # auditable. Only when decay is active.
+        if getattr(self, "lr_decay", "off") not in ("off", None, False):
+            _horizon = getattr(self, "lr_decay_horizon_steps", 0)
+            _progress = (self.global_step / _horizon) if _horizon > 0 else 0.0
+            print(
+                f"[INFO] LR-decay resume: mode={self.lr_decay} "
+                f"global_step={self.global_step} horizon={_horizon} "
+                f"progress={_progress:.4f} lr={self._lr_for_step(self.global_step):.3e}"
+            )
 
         # Restore aux-loss scalings / EMAs / tcre slope from the checkpoint.
         # Fields marked zero_disables=True in _PERSISTED_FIELDS keep the
