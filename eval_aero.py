@@ -2177,7 +2177,13 @@ def main():
         else:
             expected = [os.path.join(shard_dir, f"rank{r}.pkl")
                         for r in range(args.n_shards)]
-            deadline = time.time() + 1800  # 30 min
+            # 3h (well within the 4h eval walltime). Must cover the FULL
+            # generation time of the slowest data rank, because under an
+            # --experiments filter the aggregator (rank 0) is handed the
+            # lightest/empty bin and therefore idles for the entire generation
+            # of the one busy rank (~40 min for 5 members) — a 30-min deadline
+            # timed out before that rank wrote its pickle, dropping the CSV.
+            deadline = time.time() + 10800  # 3 h
             while True:
                 missing = [p for p in expected if not os.path.exists(p)]
                 if not missing:
