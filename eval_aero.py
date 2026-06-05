@@ -95,7 +95,11 @@ EXPERIMENTS = [
         data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126_ens"),
         # ssp126-only cond file (2015–2100); cumulative CO2 still integrated
         # from 1850 so magnitudes match the training distribution.
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed.nc"),
+        # CO2-FIXED build (concat_and_regrid_ssp126.py): drops the spurious
+        # "+ hist_endpoint" ramp so cumulative CO2 plateaus ~2070 (late slope
+        # +6.7→−0.5 /yr) instead of climbing to 2100. See
+        # ssp126_co2_cond_construction_bug. Old file: emissions_ssp126_only_timefixed.nc
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_co2fix.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
