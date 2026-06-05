@@ -2147,55 +2147,58 @@ def main():
         )
 
     # ── combined time series plot ──────────────────────────────────────────
-    # Skip combined plots when --experiments filter is in effect; otherwise
-    # we'd overwrite an existing global_mean_anomaly.png with only the
-    # filtered subset. Use replot_eval.py afterwards to regenerate combined
-    # plots from all TREFHT_*.nc files in output_dir.
+    # ALWAYS produce global_mean_anomaly.{png,csv} — including for an
+    # --experiments-filtered run (e.g. a focused ssp126 re-eval), so the
+    # per-year global-mean trajectory is never silently dropped.
     #
-    # When sharded across ranks, each rank only holds its own subset.  Dump
-    # the partial results to a per-rank pickle, then on rank 0 wait for the
-    # other ranks' pickles and merge before plotting.  Without this, each
-    # rank races to write the same global_mean_anomaly.png / tcre.png with
-    # only its subset — the last finisher wins and the TCRE plot fails
-    # entirely on ranks that lack hist or any projection.
-    if timeseries_results and not args.experiments:
-        if args.n_shards > 1:
-            import pickle, time
-            shard_dir = os.path.join(args.output_dir, "_shards")
-            os.makedirs(shard_dir, exist_ok=True)
-            shard_pkl = os.path.join(shard_dir, f"rank{args.shard_rank}.pkl")
-            tmp_pkl = shard_pkl + ".tmp"
-            with open(tmp_pkl, "wb") as f:
-                pickle.dump(timeseries_results, f)
-            os.replace(tmp_pkl, shard_pkl)
-            print(f"[SHARD] rank={args.shard_rank} wrote {shard_pkl}")
+    # When sharded across ranks, each rank only holds its own subset, so it
+    # dumps its (possibly EMPTY) subset to a per-rank pickle and rank 0 merges
+    # all shards before plotting. Writing even empty pickles is what lets a
+    # filtered run — which leaves some ranks with no experiments — finish
+    # without rank 0 waiting out the 30-min deadline for the missing pickles.
+    #
+    # The TCRE plot + normalized-bias summary need the full hist+projections
+    # set, so they stay gated on a non-filtered (full) run; use replot_eval.py
+    # to regenerate combined plots from all TREFHT_*.nc in output_dir.
+    if args.n_shards > 1:
+        import pickle, time
+        shard_dir = os.path.join(args.output_dir, "_shards")
+        os.makedirs(shard_dir, exist_ok=True)
+        shard_pkl = os.path.join(shard_dir, f"rank{args.shard_rank}.pkl")
+        tmp_pkl = shard_pkl + ".tmp"
+        with open(tmp_pkl, "wb") as f:
+            pickle.dump(timeseries_results, f)          # may be {} on empty ranks
+        os.replace(tmp_pkl, shard_pkl)
+        print(f"[SHARD] rank={args.shard_rank} wrote {shard_pkl} "
+              f"({len(timeseries_results)} experiment(s))")
 
-            if args.shard_rank != 0:
-                print(f"[SHARD] rank={args.shard_rank} done; rank 0 will aggregate")
-            else:
-                expected = [os.path.join(shard_dir, f"rank{r}.pkl")
-                            for r in range(args.n_shards)]
-                deadline = time.time() + 1800  # 30 min
-                while True:
-                    missing = [p for p in expected if not os.path.exists(p)]
-                    if not missing:
-                        break
-                    if time.time() > deadline:
-                        print(f"[SHARD] timeout waiting for {missing} — "
-                              f"aggregating partial results")
-                        break
-                    time.sleep(15)
+        if args.shard_rank != 0:
+            print(f"[SHARD] rank={args.shard_rank} done; rank 0 will aggregate")
+        else:
+            expected = [os.path.join(shard_dir, f"rank{r}.pkl")
+                        for r in range(args.n_shards)]
+            deadline = time.time() + 1800  # 30 min
+            while True:
+                missing = [p for p in expected if not os.path.exists(p)]
+                if not missing:
+                    break
+                if time.time() > deadline:
+                    print(f"[SHARD] timeout waiting for {missing} — "
+                          f"aggregating partial results")
+                    break
+                time.sleep(15)
 
-                merged = {}
-                for p in expected:
-                    if not os.path.exists(p):
-                        continue
-                    with open(p, "rb") as f:
-                        merged.update(pickle.load(f))
-                print(f"[SHARD] rank 0 merged experiments: {list(merged)}")
-                timeseries_results = merged
+            merged = {}
+            for p in expected:
+                if not os.path.exists(p):
+                    continue
+                with open(p, "rb") as f:
+                    merged.update(pickle.load(f))
+            print(f"[SHARD] rank 0 merged experiments: {list(merged)}")
+            timeseries_results = merged
 
-        if args.shard_rank == 0 or args.n_shards == 1:
+    if args.shard_rank == 0 or args.n_shards == 1:
+        if timeseries_results:
             ts_out  = os.path.join(args.output_dir, "global_mean_anomaly.png")
             csv_out = os.path.join(args.output_dir, "global_mean_anomaly.csv")
             print(f"\n[PLOT] Time series → {ts_out}")
@@ -2203,28 +2206,32 @@ def main():
             print(f"[CSV]  Global anomaly + bias → {csv_out}")
             save_csv(timeseries_results, csv_out)
 
-            tcre_out = os.path.join(args.output_dir, "tcre.png")
-            print(f"[PLOT] TCRE → {tcre_out}")
-            plot_tcre(timeseries_results, tcre_out)
+            # TCRE + normalized-bias need hist + projections → full runs only.
+            if not args.experiments:
+                tcre_out = os.path.join(args.output_dir, "tcre.png")
+                print(f"[PLOT] TCRE → {tcre_out}")
+                plot_tcre(timeseries_results, tcre_out)
 
-            # ── ADDITIVE: normalized multiplicative-bias scalars (sibling JSON).
-            # Kept OUT of tcre_summary.json so that file stays byte-for-byte
-            # unchanged; tcre_summary holds global-mean TCRE slopes while these
-            # are spatial band scalars produced in the per-experiment loop.
-            nb_summary = {sc: d["norm_bias"]
-                          for sc, d in timeseries_results.items()
-                          if isinstance(d, dict) and d.get("norm_bias") is not None}
-            if nb_summary:
-                try:
-                    import json
-                    nb_path = os.path.join(args.output_dir,
-                                           "normalized_bias_summary.json")
-                    with open(nb_path, "w") as f:
-                        json.dump(nb_summary, f, indent=2)
-                    print(f"[NORMBIAS] → saved {nb_path}")
-                except Exception as e:
-                    print(f"[NORMBIAS] WARNING: failed to write "
-                          f"normalized_bias_summary.json: {e}")
+                # ── ADDITIVE: normalized multiplicative-bias scalars (sibling JSON).
+                # Kept OUT of tcre_summary.json so that file stays byte-for-byte
+                # unchanged; tcre_summary holds global-mean TCRE slopes while these
+                # are spatial band scalars produced in the per-experiment loop.
+                nb_summary = {sc: d["norm_bias"]
+                              for sc, d in timeseries_results.items()
+                              if isinstance(d, dict) and d.get("norm_bias") is not None}
+                if nb_summary:
+                    try:
+                        import json
+                        nb_path = os.path.join(args.output_dir,
+                                               "normalized_bias_summary.json")
+                        with open(nb_path, "w") as f:
+                            json.dump(nb_summary, f, indent=2)
+                        print(f"[NORMBIAS] → saved {nb_path}")
+                    except Exception as e:
+                        print(f"[NORMBIAS] WARNING: failed to write "
+                              f"normalized_bias_summary.json: {e}")
+        else:
+            print("[PLOT] No timeseries results — skipping global-mean plot")
 
     print("\n[DONE] All outputs saved to:", args.output_dir)
 
