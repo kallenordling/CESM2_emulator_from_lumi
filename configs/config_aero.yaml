@@ -56,6 +56,14 @@ trainer:
     save_name: run_sensfix.pt  # retrain bundle: per-channel SUL clip (cec7576) + low-t TCRE B+C (a256670). Fresh name → starts from epoch 0, no run_normfix collision.
     load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
+    # ── LR decay (pure function of global_step → resume-invariant; default off) ─
+    # Cosine/linear decay from base `lr` (5e-5) to `lr_floor` (5e-6), reaching the
+    # floor at lr_decay_horizon_steps (~ep1000 at ~20 steps/epoch). Computed in
+    # _lr_for_step from self.global_step (already persisted/restored), so no new
+    # checkpoint state and old ckpts just work. A/B fork: run2_lrdecay.sh.
+    lr_decay: off            # off | cosine | linear  — enable via the fork scripts' CLI override (lr_decay=cosine); a bare yaml on/off parses as a BOOL, only "cosine"/"linear" strings activate decay
+    lr_floor: 0.000005       # 5e-6
+    lr_decay_horizon_steps: 20000
     sample_steps: 250
     cfg_drop_prob: 0.0
     cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
