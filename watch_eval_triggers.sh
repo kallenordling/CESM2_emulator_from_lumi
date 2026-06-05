@@ -22,18 +22,25 @@ POLL_INTERVAL=60   # seconds between checks
 mkdir -p "$TRIGGER_DIR" "$DONE_DIR"
 echo "[watcher] Started. Watching ${TRIGGER_DIR} every ${POLL_INTERVAL}s"
 
-# ── Startup purge: drop stale non-production triggers ────────────────────────
+# ── Startup purge: drop STALE non-production triggers ────────────────────────
 # A restart (e.g. after a walltime kill) would otherwise drain whatever piled
 # up while the watcher was down — including triggers from one-off A/B forks
-# (run_gmeantest, run_tcrefulltest, …). Only auto-dispatch evals for the
-# production run(s); move everything else to done/ so it can't fire.
+# (run_gmeantest, run_tcrefulltest, …). We purge only triggers that are BOTH
+# (a) not in PROD_RUN AND (b) STALE (mtime older than STALE_TRIGGER_SECS).
 #
-# PROD_RUN may be a SPACE-SEPARATED list of run names — a trigger is kept if it
-# matches ANY of them. This lets one shared watcher serve concurrent production
-# runs cleanly (e.g. PROD_RUN="run_sensfix run_sensfix_b12") so a restart's
-# startup-purge doesn't drop the other run's pending triggers. Override when a
-# production save_name changes or when running an A/B alongside production.
+# The staleness gate is what makes concurrent runs safe: a FRESH trigger from a
+# run not in this watcher's PROD_RUN (e.g. an A/B fork run_lrdecay alongside a
+# production watcher) SURVIVES the purge, so a restart no longer silently drops
+# the other run's pending evals. Only genuinely old pile-up (from forks that are
+# no longer running) gets dropped — the original purpose. The dispatch loop
+# below still fires any surviving trigger, so concurrent runs all get served.
+#
+# PROD_RUN may be a comma/space-separated list — a trigger matching ANY name is
+# always kept (never purged regardless of age). STALE_TRIGGER_SECS defaults to
+# 2h; raise it if eval cadence is sparse, lower it to purge old junk sooner.
 PROD_RUN="${PROD_RUN:-run_slope-tcre}"
+STALE_TRIGGER_SECS="${STALE_TRIGGER_SECS:-7200}"
+_now=$(date +%s)
 for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
     [[ -f "$trigger" ]] || continue
     keep=""
@@ -41,8 +48,13 @@ for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
         grep -q "$name" "$trigger" && { keep=1; break; }
     done
     if [[ -z "$keep" ]]; then
-        echo "[watcher] startup-purge: non-production trigger $(basename "$trigger") → done/"
-        mv "$trigger" "${DONE_DIR}/$(basename "$trigger").purged"
+        _age=$(( _now - $(stat -c %Y "$trigger" 2>/dev/null || echo "$_now") ))
+        if [[ "$_age" -gt "$STALE_TRIGGER_SECS" ]]; then
+            echo "[watcher] startup-purge: STALE non-production trigger $(basename "$trigger") (age ${_age}s) → done/"
+            mv "$trigger" "${DONE_DIR}/$(basename "$trigger").purged"
+        else
+            echo "[watcher] startup-purge: keeping fresh non-production trigger $(basename "$trigger") (age ${_age}s)"
+        fi
     fi
 done
 
