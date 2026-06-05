@@ -40,15 +40,29 @@ Usage:
 
 import argparse
 import xarray as xr
-import xesmf as xe
 import os
 import numpy as np
 
+# xesmf is optional: only needed for --regrid xesmf. The --regrid interp fallback
+# (xarray bilinear) needs no extra deps, so the script runs on a plain local mount.
+try:
+    import xesmf as xe
+    _HAVE_XESMF = True
+except Exception:
+    xe = None
+    _HAVE_XESMF = False
+
+# Default grid template + data dir on the local LUMI scratch mount, so this runs
+# locally with no args. (The target file is read only for its lat/lon.)
+_MOUNT = "/mnt/lumi_sc2/emulator_data"
+
 # ── Args ─────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Concat hist+ssp126 emissions and regrid (CO2-fixed)")
-parser.add_argument("--target", required=True, help="Path to a target NetCDF file to extract the grid from")
-parser.add_argument("--data_dir", default="/mnt/lumi_sc2/emulator_data/",
-                    help="Directory containing the CO2/SO2 files")
+parser.add_argument("--target", default=os.path.join(_MOUNT, "emissions_ssp126_only_timefixed.nc"),
+                    help="NetCDF file to read the target lat/lon grid from "
+                         "(default: the existing regridded ssp126 file on /mnt/lumi_sc2)")
+parser.add_argument("--data_dir", default=_MOUNT + "/",
+                    help="Directory containing the CO2/SO2 files (default: /mnt/lumi_sc2/emulator_data/)")
 parser.add_argument("--output_dir", default=None,
                     help="Output directory (default: same as --data_dir)")
 parser.add_argument("--scenarios", nargs="+", default=["ssp126"],
@@ -56,7 +70,17 @@ parser.add_argument("--scenarios", nargs="+", default=["ssp126"],
 parser.add_argument("--out-suffix", default="_co2fix",
                     help="Suffix on output filenames so the live cond file is not "
                          "clobbered. Pass '' to overwrite the live names (forces retrain).")
+parser.add_argument("--regrid", choices=["auto", "xesmf", "interp"], default="auto",
+                    help="Regridder: 'xesmf' (bilinear, periodic, needs xesmf), "
+                         "'interp' (xarray bilinear, periodic-padded, no extra deps), "
+                         "'auto' = xesmf if importable else interp (default).")
 args = parser.parse_args()
+
+REGRID = args.regrid if args.regrid != "auto" else ("xesmf" if _HAVE_XESMF else "interp")
+if REGRID == "xesmf" and not _HAVE_XESMF:
+    raise SystemExit("--regrid xesmf requested but xesmf is not importable. "
+                     "Use --regrid interp (no extra deps) or run in the LUMI container.")
+print(f"[regrid] method = {REGRID}" + ("" if _HAVE_XESMF else "  (xesmf not available)"))
 
 DATA_DIR = args.data_dir
 TARGET_FILE = args.target
@@ -94,6 +118,25 @@ def _global_sum_co2(ds):
     g = ds["CO2"].sum(dim=[d for d in ds["CO2"].dims if d != "year"]).values
     yr = ds["year"].values
     return yr, g
+
+
+def _interp_regrid(ds, tlat, tlon):
+    """Bilinear regrid via xarray linear interp — no xesmf/ESMF dependency.
+
+    Both source and target are regular lat/lon grids, so xarray's 2-D linear
+    interp == bilinear. We pad the source longitude periodically (one wrapped
+    column on each side) so points near the 0/360 (or ±180) seam interpolate
+    across the wrap instead of clamping. Matches the original xe.Regridder
+    (method="bilinear", periodic=True) intent; not conservative, same as before.
+    """
+    ds = ds.sortby("lat").sortby("lon")
+    lon = ds["lon"].values
+    span = 360.0
+    left = ds.isel(lon=-1).assign_coords(lon=float(lon[-1]) - span)
+    right = ds.isel(lon=0).assign_coords(lon=float(lon[0]) + span)
+    ds_pad = xr.concat([left, ds, right], dim="lon")
+    out = ds_pad.interp(lat=tlat, lon=tlon, method="linear")
+    return out
 
 
 def process_scenario(scenario: str) -> None:
@@ -160,11 +203,15 @@ def process_scenario(scenario: str) -> None:
             ds_merged = ds_merged.assign_coords(lon=((ds_merged.lon + 180) % 360 - 180)).sortby("lon")
 
     # ── 5. Regrid ─────────────────────────────────────────────────────────────
-    print("Building xesmf regridder (bilinear)...")
-    regridder = xe.Regridder(ds_merged, target_grid, method="bilinear", periodic=True)
-    ds_regridded = regridder(ds_merged, keep_attrs=True).compute()
+    if REGRID == "xesmf":
+        print("Regridding with xesmf (bilinear, periodic)...")
+        regridder = xe.Regridder(ds_merged, target_grid, method="bilinear", periodic=True)
+        ds_regridded = regridder(ds_merged, keep_attrs=True).compute()
+    else:
+        print("Regridding with xarray bilinear interp (periodic-padded; no xesmf)...")
+        ds_regridded = _interp_regrid(ds_merged, target_lat, target_lon).compute()
     ds_regridded = ds_regridded.sel(year=slice(1850, 2100))
-    print(f"  Output dims: {dict(ds_regridded.dims)}")
+    print(f"  Output dims: {dict(ds_regridded.sizes)}")
 
     regridded_file = os.path.join(OUTPUT_DIR, f"emissions_co2_so2_regridded_{scenario}{SUFFIX}.nc")
     ds_regridded.to_netcdf(regridded_file)
