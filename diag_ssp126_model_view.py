@@ -52,14 +52,30 @@ def remap(path: str) -> str:
     return path.replace(src, dst, 1) if path.startswith(src) else path
 
 
-def scenario_cfg(dc, name):
-    """Resolve (cond_file, data_dir, time_dim, realization) for a scenario."""
+def scenario_cfg(dc, name, fallback_from=None, cond_file_override=None):
+    """Resolve (cond_file, data_dir, time_dim, realization) for a scenario.
+
+    ssp126 is eval-only (defined in eval_aero.py, NOT config_data.yaml), so it
+    won't be in experiment_configs. For such scenarios pass ``fallback_from`` (a
+    scenario that IS in the config, e.g. aaer): we reuse its data_dir/time_dim/
+    realization (irrelevant under cond_only) and derive the cond file as
+    ``emissions_<name>_only_timefixed.nc`` in the same directory — matching
+    eval_aero.py's EMIS_DIR layout. ``cond_file_override`` wins if given.
+    """
     for ec in dc.get("experiment_configs", []):
         if ec.get("scenario_name") == name:
             reals = OmegaConf.to_container(ec.get("realizations", ["r1"]), resolve=True)
-            return (remap(ec.get("cond_file")), remap(ec.get("data_dir", ".")),
+            cond = cond_file_override or ec.get("cond_file")
+            return (remap(cond), remap(ec.get("data_dir", ".")),
                     ec.get("time_dim", "time"), reals[0] if reals else "r1")
-    raise SystemExit(f"scenario '{name}' not found in {CONFIG}")
+    if fallback_from is not None:
+        f_cond, f_data, f_time, f_real = scenario_cfg(dc, fallback_from)
+        cond = cond_file_override or os.path.join(
+            os.path.dirname(f_cond), f"emissions_{name}_only_timefixed.nc")
+        print(f"[cfg] '{name}' not in {CONFIG}; using cond {cond} "
+              f"(data_dir/time/real borrowed from '{fallback_from}', unused under cond_only)")
+        return remap(cond), f_data, f_time, f_real
+    raise SystemExit(f"scenario '{name}' not found in {CONFIG} and no fallback given")
 
 
 def build(cond_file, data_dir, time_dim, target_vars, cond_vars,
@@ -98,6 +114,8 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ref-scenario", default="aaer",
                     help="scenario whose PCA basis ssp126 is routed through (eval uses aaer)")
+    ap.add_argument("--ssp126-cond-file", default=None,
+                    help="explicit ssp126 cond .nc (default: derive from --ref-scenario's dir)")
     ap.add_argument("--out-prefix", default="ssp126_model_view")
     args = ap.parse_args()
 
@@ -111,7 +129,9 @@ def main():
     smooth_sigma = OmegaConf.to_container(smooth_sigma, resolve=True) if smooth_sigma is not None else None
     smooth_method = dc.get("cond_smooth_method", "gaussian")
 
-    s_cond, s_data, s_time, s_real = scenario_cfg(dc, "ssp126")
+    s_cond, s_data, s_time, s_real = scenario_cfg(
+        dc, "ssp126", fallback_from=args.ref_scenario,
+        cond_file_override=args.ssp126_cond_file)
     r_cond, r_data, r_time, r_real = scenario_cfg(dc, args.ref_scenario)
     print(f"[cfg] cond_vars={cond_vars}  n_components_cond={n_comp_cond}"
           f"  smooth σ={smooth_sigma} ({smooth_method})")
