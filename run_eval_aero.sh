@@ -80,6 +80,19 @@ EXPERIMENTS="${EXPERIMENTS:-}"
 # Override with `MEMBERS=1 sbatch ...` for a quick single-draw eval.
 MEMBERS="${members:-${MEMBERS:-5}}"
 
+# ── Echo the resolved config up front ────────────────────────────────────────
+# Make a misfire obvious in the first lines of the log instead of after a 4h run.
+# Env vars must reach the job via `sbatch --export=ALL,CHECKPOINT=...,...` — a
+# bare `VAR=val sbatch ...` prefix does NOT reliably propagate on LUMI.
+echo "[EVAL-CFG] CHECKPOINT=${CHECKPOINT:-<empty>}"
+echo "[EVAL-CFG] OUTPUT_DIR=${OUTPUT_DIR}"
+echo "[EVAL-CFG] EXPERIMENTS=${EXPERIMENTS:-<all>}  MEMBERS=${MEMBERS}  GUIDANCE_CO2=${GUIDANCE_CO2} GUIDANCE_SUL=${GUIDANCE_SUL}"
+if [ -z "${CHECKPOINT}" ]; then
+    echo "[EVAL-CFG] WARNING: CHECKPOINT empty → eval_aero.py will use find_latest (newest run_*.pt)."
+    echo "[EVAL-CFG]          If you meant a specific checkpoint, resubmit with:"
+    echo "[EVAL-CFG]          sbatch --export=ALL,CHECKPOINT=/path/run_xxx.pt,OUTPUT_DIR=...,EXPERIMENTS=ssp126 run_eval_aero.sh"
+fi
+
 _XAI_FLAG=""
 [ "${RUN_XAI}" = "1" ] && _XAI_FLAG="--run-xai"
 _CFG_FLAG=""
