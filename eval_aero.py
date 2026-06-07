@@ -294,7 +294,22 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
                                   cond_smooth_method, cond_vars)
         cond_tensor = torch.from_numpy(arr).contiguous()
 
-    if pca_objects is not None:
+    # PCA: a list of fitted objects → APPLY that basis (trained scenarios);
+    # the sentinel "fit" → FIT a fresh per-scenario basis on THIS cond (OOD
+    # scenarios with no persisted basis, e.g. ssp126); None → SKIP PCA.
+    # Fitting fresh uses the SAME [30,5]-EOF operation training ran per scenario
+    # (pca_denoise_dataset with pca_objects=None → fit_pca_denoise), so the cond
+    # keeps the low-rank character the model trained on (e.g. the 5-EOF SUL recon
+    # that drops the CEDS→IAMC 2015-junction EOF) — unlike skipping PCA, which
+    # would feed full-rank cond and reintroduce that junction texture.
+    if isinstance(pca_objects, str) and pca_objects == "fit":
+        cond_tensor, _ = pca_denoise_dataset(
+            cond_tensor,
+            n_components=n_components_cond,
+            var_names=cond_vars,
+            pca_objects=None,
+        )
+    elif pca_objects is not None:
         cond_tensor, _ = pca_denoise_dataset(
             cond_tensor,
             n_components=n_components_cond,
@@ -1908,9 +1923,9 @@ def main():
 
         # -- conditioning --------------------------------------------------
         print("  Building conditioning tensor …")
-        # Prefer the basis fit on THIS scenario in training; fall back to the
-        # flat reference basis for OOD scenarios (e.g. ssp126, never trained)
-        # or old checkpoints without the per-scenario map.
+        # Trained scenario → its own persisted basis. OOD scenario (no persisted
+        # basis, e.g. ssp126) → fit a fresh per-scenario basis ("fit" sentinel),
+        # NOT the aaer reference (which annihilates CO2). PCA-absent ckpt → None.
         exp_pca_cond = pca_cond
         if pca_per_scenario is not None and N_COMP_COND is not None:
             entry = pca_per_scenario.get(name)
@@ -1918,7 +1933,19 @@ def main():
                 exp_pca_cond = entry.get("cond")
                 print(f"  [PCA] using '{name}' scenario basis")
             else:
-                print(f"  [PCA] no '{name}' basis in ckpt — using reference basis")
+                # OOD scenario (e.g. ssp126, never trained → no persisted basis).
+                # Borrowing the aaer reference basis annihilates ssp126's
+                # cumulative CO2 (aaer has flat pre-industrial CO2, so its CO2
+                # EOFs carry no trend), flooring CONSUMED 2015 CO2 at -1 and
+                # cold-starting the run. Fit a FRESH per-scenario [30,5]-EOF
+                # basis on this scenario's own cond instead (the "fit" sentinel
+                # → build_cond_tensor fits via the same path training used per
+                # scenario): CO2 trend survives AND SUL keeps the 5-EOF denoise
+                # (drops the CEDS→IAMC 2015-junction EOF). Generalises to any
+                # future OOD scenario; trained scenarios are untouched.
+                exp_pca_cond = "fit"
+                print(f"  [PCA] no '{name}' basis in ckpt — fitting fresh "
+                      f"per-scenario basis (OOD)")
         try:
             cond_tensor, cond_years, lat_file, lon_file = build_cond_tensor(
                 exp["cond_file"], COND_VARS, exp["time_dim"],

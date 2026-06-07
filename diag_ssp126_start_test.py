@@ -111,13 +111,12 @@ def resolve_pca_basis(pca_state, name, n_comp_cfg):
     Returns (exp_pca_cond, N_COMP_COND) — the (pca_objects, n_components_cond)
     pair handed to build_cond_tensor for scenario `name`.
 
-    Branches, mirroring eval:
-      * pca_cond   = pca_state["cond"]          (reference basis, or None)
-      * N_COMP_COND = n_comp_cfg if pca_cond else None     (eval line 1829 gate)
+    Branches, mirroring the FIXED eval routing:
+      * N_COMP_COND = n_comp_cfg if pca_cond else None     (eval line gate)
       * per_scenario[name]["cond"] if present   (own basis, e.g. ssp370)
-        else pca_cond                            (reference fallback, e.g. ssp126)
+        else "fit"                               (OOD → fresh per-scenario fit, e.g. ssp126)
     When the checkpoint has NO PCA at all, pca_cond is None -> N_COMP_COND None
-    -> build_cond_tensor skips PCA (eval-on-mount-ckpt behaviour).
+    -> exp_pca_cond stays None -> build_cond_tensor skips PCA.
     """
     pca_cond = pca_state.get("cond") if pca_state else None
     N_COMP_COND = n_comp_cfg if (pca_cond and n_comp_cfg is not None) else None
@@ -131,8 +130,10 @@ def resolve_pca_basis(pca_state, name, n_comp_cfg):
             exp_pca_cond = entry.get("cond")
             routing = f"OWN '{name}' scenario basis"
         else:
-            ref = pca_state.get("ref_scenario") if pca_state else None
-            routing = f"reference basis (no '{name}' basis; ref_scenario={ref})"
+            # OOD scenario: mirror the FIXED eval routing — fit a fresh
+            # per-scenario basis ("fit" sentinel), not the aaer reference.
+            exp_pca_cond = "fit"
+            routing = f"fit FRESH per-scenario basis (no '{name}' basis, OOD)"
     print(f"    [PCA] {name}: {routing}; N_COMP_COND={N_COMP_COND}")
     return exp_pca_cond, N_COMP_COND
 
