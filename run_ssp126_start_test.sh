@@ -16,7 +16,7 @@
 #     srun --account=project_462001328 --partition=small-g --gpus-per-node=1 \
 #          --time=20 --nodes=1 --ntasks=1 \
 #          bash run_ssp126_start_test.sh \
-#          --checkpoint /projappl/project_462001328/CESM2_emulator_from_lumi/runs/run_mseyb_701.pt
+#          --checkpoint /projappl/project_462001328/CESM2_emulator_from_lumi/runs/run_mseyb_852.pt
 #
 # Any args after the script name are forwarded to the python script
 # (--checkpoint, --seed, --sample-steps, --test-a-only, --members).
