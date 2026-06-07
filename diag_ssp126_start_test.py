@@ -48,7 +48,7 @@ Usage:
   TEST A only (no GPU needed — pure cond diff):
       python diag_ssp126_start_test.py --test-a-only
   Full A+B (needs 1 GPU for the forward pass):
-      python diag_ssp126_start_test.py --checkpoint /projappl/.../runs/run_mseyb_701.pt
+      python diag_ssp126_start_test.py --checkpoint /projappl/.../runs/run_mseyb_852.pt
 
 See run_ssp126_start_test.sh for the LUMI container invocation.
 """
@@ -76,7 +76,7 @@ from eval_aero import (
 CONFIG_AERO = "configs/config_aero.yaml"
 CONFIG_DATA = "configs/config_data.yaml"
 DEFAULT_CKPT = (
-    "/projappl/project_462001328/CESM2_emulator_from_lumi/runs/run_mseyb_701.pt"
+    "/projappl/project_462001328/CESM2_emulator_from_lumi/runs/run_mseyb_852.pt"
 )
 
 
@@ -274,7 +274,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", default=DEFAULT_CKPT,
-                    help="checkpoint .pt on the mount (default: run_mseyb_701.pt)")
+                    help="checkpoint .pt on the mount (default: run_mseyb_852.pt)")
     ap.add_argument("--members", type=int, default=1,
                     help="members per scenario (single-member diagnostic; default 1)")
     ap.add_argument("--seed", type=int, default=0,
