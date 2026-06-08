@@ -59,28 +59,25 @@ CONFIG_PATH = "configs/config_aero.yaml"
 EXPERIMENTS = [
     dict(
         name         = "hist",
-        data_dir     = os.path.join(DATA_ROOT, "hist"),
+        # CESM2 reference = pre-built multi-member annual file (member dim) under
+        # cmip6/; load_cesm2_ensemble reads all members at once (realizations
+        # ignored). historical.nc = 11 members, 1850-2014.
+        data_dir     = os.path.join(SCRATCH, "cmip6", "historical.nc"),
         cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed.nc"),
-        realizations = [
-            "LE2-1001.001", "LE2-1011.001", "LE2-1021.002", "LE2-1031.002",
-            "LE2-1041.003", "LE2-1051.003", "LE2-1061.004", "LE2-1071.004",
-            "LE2-1081.005", "LE2-1091.005",
-        ],
+        realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
+        target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
         map_years    = [1900, 2000, 2014],   # last available year instead of 2100
         gen_cost     = 165,                  # ~year span; for shard load-balancing
         color        = "#1f77b4",
     ),
     dict(
         name         = "ssp370",
-        data_dir     = os.path.join(DATA_ROOT, "ssp370"),
+        data_dir     = os.path.join(SCRATCH, "cmip6", "ssp370.nc"),  # 3-member annual ref
         cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed.nc"),
-        realizations = [
-            "LE2-1001.001", "LE2-1011.001", "LE2-1021.002", "LE2-1031.002",
-            "LE2-1041.003", "LE2-1051.003", "LE2-1061.004", "LE2-1071.004",
-            "LE2-1081.005", "LE2-1091.005",
-        ],
+        realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
+        target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
         map_years    = [2015, 2050, 2100],
         gen_cost     = 86,                   # ~year span; for shard load-balancing
         color        = "#d62728",
@@ -92,7 +89,7 @@ EXPERIMENTS = [
         # member's two time-halves concatenated by_coords in the loader.
         # Only full-coverage members (2015-2100) are included — r11 is partial
         # (2065-2100) and would truncate the ensemble via year-intersection.
-        data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126_ens"),
+        data_dir     = os.path.join(SCRATCH, "cmip6", "ssp126.nc"),  # 3-member annual ref
         # ssp126-only cond file (2015–2100); cumulative CO2 still integrated
         # from 1850 so magnitudes match the training distribution.
         # CO2-FIXED build (concat_and_regrid_ssp126.py): drops the spurious
@@ -113,7 +110,7 @@ EXPERIMENTS = [
         # 3-member ensemble (r4/r10/r11, all full 2015-2100) symlinked into
         # CESM2_ssp245_ens/<member>/ (build_ssp126_ensemble.py --experiment ssp245
         # --out-name CESM2_ssp245_ens). Intermediate (SSP2-4.5) forcing scenario.
-        data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp245_ens"),
+        data_dir     = os.path.join(SCRATCH, "cmip6", "ssp245.nc"),  # 3-member annual ref
         # ssp245-only cond file (2015–2100), CO2-FIXED build (no spurious ramp;
         # concat_and_regrid_ssp126.py --scenarios ssp245). Cumulative CO2 still
         # integrated from 1850 so magnitudes match the training distribution.
@@ -474,6 +471,22 @@ def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str,
         years           : np.ndarray (T,) — years from first successfully loaded member
         cesm_ensemble   : np.ndarray (N, T, lat, lon) — all members on common years
     """
+    # Pre-built ensemble file with a `member` dim (annual, model grid), e.g.
+    # cmip6/historical.nc, ssp126.nc, ssp245.nc, ssp370.nc. Load all members at
+    # once — already annual (no monthly resample), and `realizations` is ignored.
+    if os.path.isfile(data_dir):
+        ds = xr.open_dataset(data_dir)
+        if "member" in ds.dims:
+            ydim = "year" if "year" in ds[target_var].dims else time_dim
+            tas = (ds[target_var] - 273.15).transpose("member", ydim, "lat", "lon")
+            years = extract_years(ds[ydim].values)
+            arr = tas.values.astype(np.float32)              # (N, T, lat, lon)
+            ds.close()
+            print(f"    [REF] {os.path.basename(data_dir)}: {arr.shape[0]} members, "
+                  f"{years[0]}-{years[-1]} (annual, single-file ensemble)")
+            return years, arr
+        ds.close()
+
     members = []
     common_years = None
     for real in realizations:
