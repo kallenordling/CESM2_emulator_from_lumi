@@ -173,6 +173,16 @@ REF_REALIZATIONS = {
     "hist":   ["LE2-1011.001", "LE2-1021.002"],
     "ssp370": ["LE2-1011.001", "LE2-1021.002"],
 }
+# CMIP6 multimodel-mean global-mean tas anomaly time series (cmip6/*_mmm.nc).
+# Already GLOBAL MEANS and already ~anomaly re 1850-1900. Drawn as a dotted
+# reference line on the global-mean plot.
+MMM_FILES = {
+    "hist":   "historical_mmm.nc",
+    "ssp126": "ssp126_mmm.nc",
+    "ssp245": "ssp245_mmm.nc",
+    "ssp370": "ssp370_mmm.nc",
+}
+_mmm_baseline = None   # cached historical_mmm 1850-1900 mean
 SAMPLE_STEPS   = 50           # fewer steps than training → faster inference
 BATCH_SIZE     = 16           # years per GPU batch
 N_ENSEMBLE     = 5            # diffusion samples per experiment (ensemble-MEAN model
@@ -1203,6 +1213,46 @@ def save_netcdf(
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
+def load_mmm_anomaly(scenario: str):
+    """CMIP6 multimodel-mean global-mean tas anomaly (re 1850-1900) for a scenario.
+
+    The cmip6/*_mmm.nc files are pre-computed GLOBAL MEANS (tas(time), monthly)
+    and already ~anomalies re 1850-1900; we re-subtract the historical_mmm
+    1850-1900 mean for exactness. Returns (years, anom) or None if unavailable.
+    """
+    global _mmm_baseline
+    fn = MMM_FILES.get(scenario)
+    if fn is None:
+        return None
+    path = os.path.join(SCRATCH, "cmip6", fn)
+    if not os.path.isfile(path):
+        return None
+
+    def _annual(p):
+        ds = xr.open_dataset(p)
+        t = ds["tas"]
+        if "time" in t.dims:
+            t = t.resample(time="YE").mean()
+            yrs = extract_years(t["time"].values)
+        else:
+            ydim = "year" if "year" in t.dims else list(t.dims)[0]
+            yrs = extract_years(ds[ydim].values)
+        vals = np.asarray(t.values, dtype=float).reshape(len(yrs))
+        ds.close()
+        return yrs, vals
+
+    try:
+        if _mmm_baseline is None:
+            hy, hv = _annual(os.path.join(SCRATCH, "cmip6", MMM_FILES["hist"]))
+            m = (hy >= BASELINE_START) & (hy <= BASELINE_END)
+            _mmm_baseline = float(hv[m].mean()) if m.any() else 0.0
+        yrs, vals = _annual(path)
+        return yrs, vals - _mmm_baseline
+    except Exception as e:
+        print(f"  [MMM] could not load {fn}: {e}")
+        return None
+
+
 def plot_timeseries(results: dict, out_path: str):
     """results[name] = dict(gen_anom, cesm_anom, gen_years, cesm_years, color)
 
@@ -1232,6 +1282,13 @@ def plot_timeseries(results: dict, out_path: str):
             ax_top.fill_between(gen_years, gen_lo, gen_hi, color=c, alpha=0.18)
             ax_top.plot(gen_years, gen_anom_mean, color=c, lw=2.0,
                         label=f"{name} (model mean ± spread, N={N_gen})")
+
+        # CMIP6 multimodel-mean reference (dotted, scenario colour)
+        mmm = load_mmm_anomaly(name)
+        if mmm is not None:
+            my, ma = mmm
+            ax_top.plot(my, ma, color=c, lw=1.3, ls=":", alpha=0.9,
+                        label=f"{name} (CMIP6 MMM)")
 
         if d.get("cesm_anom") is not None:
             cesm_anom_ens  = d["cesm_anom_ens"]    # (N_CESM, T)
