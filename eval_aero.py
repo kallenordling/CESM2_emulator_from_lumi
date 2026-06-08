@@ -108,6 +108,24 @@ EXPERIMENTS = [
         color        = "#9467bd",
     ),
     dict(
+        name         = "ssp245",
+        # CESM2 ssp245 monthly tas (K), native 192x288 grid (= model grid).
+        # 3-member ensemble (r4/r10/r11, all full 2015-2100) symlinked into
+        # CESM2_ssp245_ens/<member>/ (build_ssp126_ensemble.py --experiment ssp245
+        # --out-name CESM2_ssp245_ens). Intermediate (SSP2-4.5) forcing scenario.
+        data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp245_ens"),
+        # ssp245-only cond file (2015–2100), CO2-FIXED build (no spurious ramp;
+        # concat_and_regrid_ssp126.py --scenarios ssp245). Cumulative CO2 still
+        # integrated from 1850 so magnitudes match the training distribution.
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed.nc"),
+        realizations = ["r4i1p1f1", "r10i1p1f1", "r11i1p1f1"],
+        time_dim     = "time",
+        target_var   = "tas",
+        map_years    = [2015, 2050, 2100],
+        gen_cost     = 86,                   # ~year span; for shard load-balancing
+        color        = "#17becf",
+    ),
+    dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
         cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed.nc"),
@@ -182,6 +200,7 @@ IG_WINDOWS = {
     "hist":   [(1920, 1960, "1920–1960"), (1960, 1990, "1960–1990"), (1990, 2014, "1990–2014")],
     "ssp370": [(2020, 2050, "2020–2050"), (2050, 2080, "2050–2080"), (2080, 2100, "2080–2100")],
     "ssp126": [(2020, 2050, "2020–2050"), (2050, 2080, "2050–2080"), (2080, 2100, "2080–2100")],
+    "ssp245": [(2020, 2050, "2020–2050"), (2050, 2080, "2050–2080"), (2080, 2100, "2080–2100")],
     "aaer":   [(1920, 1960, "1920–1960"), (1960, 1990, "1960–1990"), (1990, 2100, "1990–2100")],
     "ghg":    [(1920, 1970, "1920–1970"), (1970, 2020, "1970–2020"), (2050, 2100, "2050–2100")],
 }
@@ -525,7 +544,7 @@ def plot_tcre(results: dict, out_path: str):
     Dashed lines = CESM2 ensemble mean  (shaded spread when N > 1).
     Linear regression slopes annotated for model and CESM2 per projection.
     """
-    PROJECTIONS = [p for p in ("ssp370", "ssp126")
+    PROJECTIONS = [p for p in ("ssp370", "ssp126", "ssp245")
                    if p in results and results[p].get("co2_annual") is not None]
 
     if "hist" not in results or not PROJECTIONS:
@@ -655,7 +674,7 @@ def plot_tcre(results: dict, out_path: str):
         xs = np.concatenate(xs);  ys = np.concatenate(ys)
         return np.polyfit(xs, ys, 1)
 
-    fit_line_styles = {"ssp370": "-", "ssp126": "-."}
+    fit_line_styles = {"ssp370": "-", "ssp126": "-.", "ssp245": "--"}
     for proj in PROJECTIONS:
         m_slope, m_int = _combined_regression(proj, "gen_anom_ens", "gen_years")
         c_slope, c_int = _combined_regression(proj, "cesm_anom_ens", "cesm_years")
@@ -741,7 +760,7 @@ def plot_tcre(results: dict, out_path: str):
         lookups["ghg"] = dict(zip(gy, np.cumsum(gc)))
 
     summary = {"per_scenario": {}, "combined": {}}
-    for sc in ("hist", "ssp370", "ssp126", "ghg"):
+    for sc in ("hist", "ssp370", "ssp126", "ssp245", "ghg"):
         if sc not in results:
             continue
         ms, _, n_m = _standalone_regression(sc, "gen_anom_ens", "gen_years")
