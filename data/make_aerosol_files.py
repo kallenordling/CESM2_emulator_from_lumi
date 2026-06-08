@@ -18,9 +18,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument("exp", help="Experiment name, e.g. hist or ssp370")
 args = parser.parse_args()
 
-exp = args.exp# ── Configure paths ──────────────────────────────────────────────────────────
-INPUT_DIR = "/scratch/project_462001328/emulator_data/emission_data/inputs4mips/"
-OUTPUT_DIR = "/scratch/project_462001328/emulator_data/"
+exp = args.exp
+# ── Configure paths ──────────────────────────────────────────────────────────
+# Override via env to run off a local mount (e.g. /mnt/lumi_sc2) instead of /scratch.
+INPUT_DIR = os.environ.get(
+    "EMUL_INPUT_DIR", "/scratch/project_462001328/emulator_data/emission_data/inputs4mips/")
+OUTPUT_DIR = os.environ.get(
+    "EMUL_OUTPUT_DIR", "/scratch/project_462001328/emulator_data/")
 
 if exp == "hist":
     #AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
@@ -30,6 +34,11 @@ if  exp =="ssp370":
     ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
 if exp == "ssp126":
     ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc")
+if exp == "ssp245":
+    # MESSAGE-GLOBIOM ssp245 also ships SO2-em-AIR-anthro, but the existing
+    # scenarios use only the surface anthro SO2 (AIR commented out above), so
+    # match that for consistency.
+    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc")
 R_EARTH = 6.371e6  # Earth radius in meters
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 KG_PER_GT = 1e12  # 1 Gt = 1e12 kg

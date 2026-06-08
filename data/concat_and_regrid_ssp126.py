@@ -173,7 +173,8 @@ def process_scenario(scenario: str) -> None:
           f"2015={at(2015):.1f} 2050={at(2050):.1f} 2070={at(2070):.1f} "
           f"2090={at(2090):.1f} 2100={at(2100):.1f}")
     print(f"  [check] late slope 2070->2100 = {(at(2100)-at(2070))/30:.3f}/yr "
-          f"(should be ~0 / declining for ssp126's net-negative emissions)")
+          f"(scenario-dependent: ~0/declining for net-negative ssp126; "
+          f"positive+rising for ssp245/ssp370 — just confirm NO spurious +const ramp)")
 
     # ── 2. SO2 (annual, NOT cumsum'd — instantaneous aerosol loading) ─────────
     print("Loading SO2 (annual)...")
