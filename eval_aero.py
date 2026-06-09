@@ -2278,9 +2278,15 @@ def main():
     # to regenerate combined plots from all TREFHT_*.nc in output_dir.
     if args.n_shards > 1:
         import pickle, time
+        # Stamp shard pickles with the SLURM job id so a REUSED output_dir's
+        # leftover _shards/ from a PREVIOUS run can't make rank 0 think every
+        # rank is already done and merge prematurely — which silently dropped the
+        # slowest rank's experiments (hist+ssp245) from the plot. All srun tasks
+        # of one job share SLURM_JOB_ID, so this is consistent across ranks.
+        run_tag = os.environ.get("SLURM_JOB_ID", str(os.getpid()))
         shard_dir = os.path.join(args.output_dir, "_shards")
         os.makedirs(shard_dir, exist_ok=True)
-        shard_pkl = os.path.join(shard_dir, f"rank{args.shard_rank}.pkl")
+        shard_pkl = os.path.join(shard_dir, f"rank{args.shard_rank}_{run_tag}.pkl")
         tmp_pkl = shard_pkl + ".tmp"
         with open(tmp_pkl, "wb") as f:
             pickle.dump(timeseries_results, f)          # may be {} on empty ranks
@@ -2291,7 +2297,7 @@ def main():
         if args.shard_rank != 0:
             print(f"[SHARD] rank={args.shard_rank} done; rank 0 will aggregate")
         else:
-            expected = [os.path.join(shard_dir, f"rank{r}.pkl")
+            expected = [os.path.join(shard_dir, f"rank{r}_{run_tag}.pkl")
                         for r in range(args.n_shards)]
             # 3h (well within the 4h eval walltime). Must cover the FULL
             # generation time of the slowest data rank, because under an
