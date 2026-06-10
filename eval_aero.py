@@ -1409,6 +1409,70 @@ def save_csv(results: dict, out_path: str):
     print(f"  → saved {out_path}")
 
 
+def save_decadal_csv(results: dict, out_path: str):
+    """Decadal means of the global-mean anomaly per experiment.
+
+    Columns: experiment, decade, model_anom_degC, cesm_anom_degC, bias_degC,
+             mmm_anom_degC, n_years.
+    `decade` is the start year (e.g. 2050 = mean over 2050-2059); edge decades
+    may be partial — `n_years` gives the count averaged. bias = model - cesm.
+    """
+    import csv
+    from collections import defaultdict
+    rows = []
+    for name, d in results.items():
+        gen_anom_mean = d["gen_anom_ens"].mean(axis=0)   # (T,)
+        gen_years     = d["gen_years"]
+
+        cesm_lookup = {}
+        if d.get("cesm_anom") is not None:
+            common, idx_gen, idx_cs = np.intersect1d(
+                gen_years, d["cesm_years"], return_indices=True
+            )
+            cesm_lookup = {int(yr): float(d["cesm_anom"][i])
+                           for yr, i in zip(common, idx_cs)}
+
+        mmm_lookup = {}
+        mmm = load_mmm_anomaly(name)
+        if mmm is not None:
+            mmm_lookup = {int(y): float(a) for y, a in zip(mmm[0], mmm[1])}
+
+        acc = defaultdict(lambda: {"m": [], "c": [], "mmm": []})
+        for i, yr in enumerate(gen_years):
+            yr = int(yr)
+            dec = (yr // 10) * 10
+            acc[dec]["m"].append(float(gen_anom_mean[i]))
+            if yr in cesm_lookup:
+                acc[dec]["c"].append(cesm_lookup[yr])
+            if yr in mmm_lookup:
+                acc[dec]["mmm"].append(mmm_lookup[yr])
+
+        for dec in sorted(acc):
+            a = acc[dec]
+            m  = float(np.mean(a["m"]))
+            c  = float(np.mean(a["c"]))   if a["c"]   else float("nan")
+            mm = float(np.mean(a["mmm"])) if a["mmm"] else float("nan")
+            bias = m - c if not np.isnan(c) else float("nan")
+            rows.append({
+                "experiment":      name,
+                "decade":          dec,
+                "model_anom_degC": round(m, 4),
+                "cesm_anom_degC":  round(c, 4)    if not np.isnan(c)    else "",
+                "bias_degC":       round(bias, 4) if not np.isnan(bias) else "",
+                "mmm_anom_degC":   round(mm, 4)   if not np.isnan(mm)   else "",
+                "n_years":         len(a["m"]),
+            })
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["experiment", "decade", "model_anom_degC",
+                           "cesm_anom_degC", "bias_degC", "mmm_anom_degC", "n_years"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"  → saved {out_path}")
+
+
 def _nearest_year(years: np.ndarray, target: int) -> int:
     """Return the year in `years` closest to `target`."""
     idx = np.argmin(np.abs(years - target))
@@ -2333,6 +2397,10 @@ def main():
             plot_timeseries(timeseries_results, ts_out)
             print(f"[CSV]  Global anomaly + bias → {csv_out}")
             save_csv(timeseries_results, csv_out)
+
+            dec_out = os.path.join(args.output_dir, "global_mean_anomaly_decadal.csv")
+            print(f"[CSV]  Decadal means → {dec_out}")
+            save_decadal_csv(timeseries_results, dec_out)
 
             # TCRE + normalized-bias need hist + projections → full runs only.
             if not args.experiments:
