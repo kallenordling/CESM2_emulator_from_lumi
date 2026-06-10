@@ -4,6 +4,8 @@ Reads <output_dir>/<VAR>_<exp>.nc (written by eval_aero.py) for the user-chosen
 experiments and overlays, per experiment:
   * emulator  = solid line, <VAR>_model_gmean_mean_anom (+ member min/max band)
   * CESM2     = dashed line, <VAR>_cesm_gmean_mean_anom  (+ member min/max band)
+  * CMIP6 MMM = dotted line, the multimodel-mean <scn>_mmm.nc (from the cmip6 dir;
+                --no-mmm to hide, --mmm-dir to point elsewhere)
 A bottom panel shows the bias (emulator − CESM2) on common years.
 
 Usage:
@@ -24,6 +26,51 @@ COLORS = {
     "hist": "#1f77b4", "ssp370": "#d62728", "ssp126": "#9467bd",
     "ssp245": "#17becf", "ghg": "#2ca02c", "aaer": "#ff7f0e",
 }
+
+# CMIP6 multimodel-mean global-mean tas anomaly files (in the cmip6 dir, NOT the
+# eval output dir). Drawn as a dotted line per experiment.
+MMM_FILES = {
+    "hist": "historical_mmm.nc", "ssp126": "ssp126_mmm.nc",
+    "ssp245": "ssp245_mmm.nc", "ssp370": "ssp370_mmm.nc",
+}
+# Default cmip6 locations to probe (local mount first, then LUMI scratch).
+_MMM_DIR_CANDIDATES = [
+    "/mnt/lumi_sc2/emulator_data/cmip6",
+    "/scratch/project_462001328/emulator_data/cmip6",
+]
+
+
+def load_mmm(mmm_dir, scenario, baseline_cache):
+    """CMIP6 multimodel-mean global-mean tas anomaly (re 1850-1900) → (years, anom)."""
+    fn = MMM_FILES.get(scenario)
+    if not fn or not mmm_dir:
+        return None
+    path = os.path.join(mmm_dir, fn)
+    if not os.path.isfile(path):
+        return None
+
+    def _ann(p):
+        ds = xr.open_dataset(p)
+        t = ds["tas"]
+        if "time" in t.dims:
+            t = t.resample(time="YE").mean()
+        yrs = _years(t)
+        return yrs, np.asarray(t.values, dtype=float).reshape(len(yrs))
+
+    try:
+        if baseline_cache[0] is None:
+            hp = os.path.join(mmm_dir, MMM_FILES["hist"])
+            if os.path.isfile(hp):
+                hy, hv = _ann(hp)
+                m = (hy >= 1850) & (hy <= 1900)
+                baseline_cache[0] = float(hv[m].mean()) if m.any() else 0.0
+            else:
+                baseline_cache[0] = 0.0
+        y, v = _ann(path)
+        return y, v - baseline_cache[0]
+    except Exception as e:
+        print(f"  [mmm] could not load {fn}: {e}")
+        return None
 
 
 def _years(da):
@@ -50,9 +97,15 @@ def main():
     ap.add_argument("--var", default="TREFHT")
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-spread", action="store_true", help="hide member min/max bands")
+    ap.add_argument("--no-mmm", action="store_true", help="hide the CMIP6 multimodel-mean line")
+    ap.add_argument("--mmm-dir", default=None,
+                    help="dir with the *_mmm.nc files (default: probe the cmip6 dir)")
     ap.add_argument("--title", default=None)
     args = ap.parse_args()
     V = args.var
+
+    mmm_dir = args.mmm_dir or next((d for d in _MMM_DIR_CANDIDATES if os.path.isdir(d)), None)
+    mmm_base = [None]   # cached historical_mmm 1850-1900 mean
 
     fig, (ax, axb) = plt.subplots(
         2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
@@ -91,6 +144,13 @@ def main():
             # bias on common years
             common, im, ic = np.intersect1d(my, cy, return_indices=True)
             axb.plot(common, mg.values[im] - cg.values[ic], color=c, lw=1.5, label=exp)
+
+        # CMIP6 multimodel mean (dotted)
+        if not args.no_mmm:
+            mmm = load_mmm(mmm_dir, exp, mmm_base)
+            if mmm is not None:
+                ax.plot(mmm[0], mmm[1], color=c, lw=1.3, ls=":", alpha=0.9,
+                        label=f"{exp} CMIP6 MMM")
         plotted += 1
         ds.close()
 
