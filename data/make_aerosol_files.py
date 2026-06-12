@@ -44,6 +44,8 @@ _ANTHRO_PATTERNS = {
     ("SO2", "ssp245"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc",
     ("BC",  "hist"):   "BC-em-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2025-04-18_gn_*.nc",
     ("BC",  "ssp370"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc",
+    ("BC",  "ssp126"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc",
+    ("BC",  "ssp245"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc",
 }
 if (SPECIES, exp) not in _ANTHRO_PATTERNS:
     raise SystemExit(f"No input glob configured for species={SPECIES} exp={exp}")

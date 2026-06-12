@@ -63,7 +63,7 @@ EXPERIMENTS = [
         # cmip6/; load_cesm2_ensemble reads all members at once (realizations
         # ignored). historical.nc = 11 members, 1850-2014.
         data_dir     = os.path.join(SCRATCH, "cmip6", "historical.nc"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -74,7 +74,7 @@ EXPERIMENTS = [
     dict(
         name         = "ssp370",
         data_dir     = os.path.join(SCRATCH, "cmip6", "ssp370.nc"),  # 3-member annual ref
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -96,7 +96,7 @@ EXPERIMENTS = [
         # "+ hist_endpoint" ramp so cumulative CO2 plateaus ~2070 (late slope
         # +6.7→−0.5 /yr) instead of climbing to 2100. See
         # ssp126_co2_cond_construction_bug. Old file: emissions_ssp126_only_timefixed.nc
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_co2fix_bc.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -114,7 +114,7 @@ EXPERIMENTS = [
         # ssp245-only cond file (2015–2100), CO2-FIXED build (no spurious ramp;
         # concat_and_regrid_ssp126.py --scenarios ssp245). Cumulative CO2 still
         # integrated from 1850 so magnitudes match the training distribution.
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1", "r11i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -125,7 +125,7 @@ EXPERIMENTS = [
     dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
@@ -136,7 +136,7 @@ EXPERIMENTS = [
     dict(
         name         = "ghg",
         data_dir     = os.path.join(DATA_ROOT, "GHG"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
@@ -2068,10 +2068,15 @@ def main():
     print(f"[TARGET] var={TARGET_VAR} channel={TARGET_CHANNEL}/{OUT_CHANNELS} "
           f"(denorm via DENORM_FN['{TARGET_VAR}'])")
     if TARGET_VAR != "TREFHT":
-        print("[TARGET] NOTE: the NetCDF writer var-names, °C axis labels and the "
-              "TCRE machinery are TREFHT-specific; a non-TREFHT pass selects the "
-              "right channel + denorm but reuses those temperature-labelled "
-              "outputs. PRECT-specific reference data / plotting is a follow-up.")
+        # No precip reference exists in cmip6/ yet, so every comparison this
+        # script makes (tas baseline_map, anomaly vs temperature refs, TCRE,
+        # pattern correlation) would silently produce temperature-labelled
+        # garbage for a PRECT pass. Fail loud until a PRECT reference + precip
+        # metrics land; the channel-select/denorm plumbing below already works.
+        sys.exit(f"[FATAL] --target-var {TARGET_VAR!r}: eval references/metrics "
+                 f"are TREFHT-only (cmip6/ has no PRECT files; baseline/anomaly/"
+                 f"TCRE would mix mm/day with °C). Add a PRECT reference and "
+                 f"precip metrics before evaluating this channel.")
     scheduler: ContinuousDDPM = instantiate(cfg.scheduler)
 
     # ── compute hist baseline map (H, W) for anomaly reference ─────────────
