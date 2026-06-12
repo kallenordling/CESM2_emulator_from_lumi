@@ -75,30 +75,35 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
 # ── Stage training data to /tmp on each node ─────────────────────────────────
 # Lustre I/O is the dominant bottleneck (~11.5 min/epoch); local /tmp avoids
 # repeated random reads across the cluster filesystem.  We stage:
-#   training_data/TREFHT/{hist,ssp370,AAER,GHG}    (~3.5 GB)
-#   emissions_*_timefixed.nc                       (~270 MB)
-# Total ~3.8 GB per node — trivial for compute-node /tmp.  The local copy is
+#   training_data/{TREFHT,PRECT}/{hist,ssp370,AAER,GHG}   (~7 GB)
+#   emissions_*_timefixed_bc.nc                           (~700 MB)
+# Total ~8 GB per node — trivial for compute-node /tmp.  The local copy is
 # bind-mounted over the original /scratch path inside the container so no
-# config edits are needed.
+# config edits are needed. NOTE the bind SHADOWS the whole emulator_data dir —
+# anything not copied here is INVISIBLE to training.
 SRC_DATA_ROOT=/scratch/project_462001328/emulator_data
 LOCAL_DATA_ROOT=/tmp/emulator_data_${SLURM_JOB_ID}
 
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     set -euo pipefail
-    mkdir -p ${LOCAL_DATA_ROOT}/training_data/TREFHT
     echo \"[stage] node \$(hostname): copying training data to /tmp …\"
     t0=\$(date +%s)
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/hist    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/ssp370  ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/AAER    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/GHG     ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    # Cond files: the four "_only_" scenario files needed by both EMISSIONS_PATHS
-    # (1-99 pct reference, see data/climate_dataset.py) and the per-scenario
-    # config_data.yaml inputs. ssp126 is the OOD test and is not staged here.
-    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed.nc  ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed.nc     ${LOCAL_DATA_ROOT}/
+    # Both target-var trees (config_data.yaml two-tree data_dir: TREFHT ch0, PRECT ch1).
+    for var in TREFHT PRECT; do
+        mkdir -p ${LOCAL_DATA_ROOT}/training_data/\${var}
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/hist    ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/ssp370  ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/AAER    ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/GHG     ${LOCAL_DATA_ROOT}/training_data/\${var}/
+    done
+    # Cond files: the four "_bc" scenario files (CO2+SUL+BC) needed by both
+    # EMISSIONS_PATHS (percentile reference, see data/climate_dataset.py) and
+    # the per-scenario config_data.yaml inputs. ssp126 is the OOD test and is
+    # not staged here.
+    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc.nc  ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc.nc     ${LOCAL_DATA_ROOT}/
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 
