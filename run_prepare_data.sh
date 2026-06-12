@@ -8,9 +8,9 @@
 #   lens2/LENS2/<VAR>/LE2-*/   and   sf/{AAER,GHG}/<VAR>/
 #
 # Usage on LUMI (from the repo dir, after `git pull`):
-#   bash run_prepare_data.sh [VARIABLE]      # default TREFHT; pass PRECT for precip
+#   bash run_prepare_data.sh [VARIABLE] [--overwrite]   # default TREFHT; pass PRECT for precip
 # e.g.
-#   bash run_prepare_data.sh PRECT
+#   bash run_prepare_data.sh PRECT --overwrite   # redo existing chunks (e.g. after re-download)
 #
 # This is heavy I/O over many members; run it inside a batch/interactive alloc,
 # NOT on the login node:
@@ -20,6 +20,7 @@
 set -euo pipefail
 
 VARIABLE="${1:-TREFHT}"
+OVERWRITE="${2:-}"   # pass --overwrite to redo members whose chunks already exist
 
 DATA_ROOT=/scratch/project_462001328/emulator_data
 LENS_DIR="${DATA_ROOT}/lens2"
@@ -45,13 +46,13 @@ echo "[prepare] LENS2 → ${OUT_DIR}/${VARIABLE}/{hist,ssp370} …"
 singularity exec "${SIF}" python prepare_data_lens.py \
     --data-dir   "${LENS_DIR}" \
     --output-dir "${OUT_DIR}" \
-    --variable   "${VARIABLE}"
+    --variable   "${VARIABLE}" ${OVERWRITE}
 
 echo "[prepare] SF (AAER,GHG) → ${OUT_DIR}/${VARIABLE}/{AAER,GHG} …"
 singularity exec "${SIF}" python prepare_data_sf.py \
     --data-dir   "${SF_DIR}" \
     --output-dir "${OUT_DIR}" \
     --variable   "${VARIABLE}" \
-    --ensembles  AAER GHG
+    --ensembles  AAER GHG ${OVERWRITE}
 
 echo "[prepare] done — ${OUT_DIR}/${VARIABLE}/"

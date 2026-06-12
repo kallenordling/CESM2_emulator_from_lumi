@@ -93,12 +93,34 @@ def load_and_concat(files: list[Path]) -> xr.Dataset:
     return ds
 
 
+def check_monthly_coverage(ds: xr.Dataset) -> None:
+    """
+    Fail loudly if interior years don't have 12 months. resample('1YE')
+    silently NaN-fills missing years AND averages partial years from a
+    single month at gap edges — this poisoned the first PRECT staging.
+    Edge years are exempt (CESM h0 month labels can shift them to 11/1).
+    """
+    counts = {}
+    for t in ds["time"].values:
+        counts[t.year] = counts.get(t.year, 0) + 1
+    y0, y1 = min(counts), max(counts)
+    bad = {y: counts.get(y, 0) for y in range(y0 + 1, y1)
+           if counts.get(y, 0) != 12}
+    if bad:
+        raise ValueError(
+            f"incomplete monthly coverage in {y0}-{y1} (year: n_months) "
+            f"{dict(sorted(bad.items()))} — missing source segments? "
+            f"Re-run run_download_data.sh before staging."
+        )
+
+
 def annual_mean(ds: xr.Dataset, start_year: int, end_year: int) -> xr.Dataset:
     ds = ds.sel(time=slice(f"{start_year}-01-01", f"{end_year}-12-31"))
     ds = ds.drop_vars(
         [v for v in ["time_bnds", "lat_bnds", "lon_bnds"] if v in ds],
         errors="ignore"
     )
+    check_monthly_coverage(ds)
     ds_annual = ds.resample(time="1YE").mean(dim="time")
     years = np.array([t.year for t in ds_annual.time.values])
     ds_annual = ds_annual.assign_coords(time=years)
