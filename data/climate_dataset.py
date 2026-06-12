@@ -23,13 +23,12 @@ from sklearn.decomposition import PCA
 # PRECT:  m/s → mm/day then log1p compression of the heavy positive tail + z-score
 
 # ── PRECT normalisation constants (log1p(mm/day) mean & std over hist+ssp370) ──
-# PLACEHOLDER ESTIMATES — the clean PRECT realization data does not exist yet
-# (NaN-poisoned re-download in progress). These MUST be re-estimated from a clean
-# realization with scripts/estimate_prect_norm.py and baked in BEFORE training,
-# otherwise the precip channel will not sit at ~unit variance (precip MSE will
-# dominate or vanish). Expected ballpark mu≈0.7, sigma≈0.9 — confirm from data.
-PRECT_LOG_MEAN = 0.7   # TODO: re-estimate from clean PRECT data before training
-PRECT_LOG_STD  = 0.9   # TODO: re-estimate from clean PRECT data before training
+# Estimated 2026-06-12 with scripts/estimate_prect_norm.py on the clean
+# re-downloaded realization LE2-1001.001, pooled hist (1850-2014) + ssp370
+# (2015-2100), n=13.9M gridpoint-years. If the staging recipe or member set
+# changes materially, re-run the script and update these.
+PRECT_LOG_MEAN = 1.0727
+PRECT_LOG_STD  = 0.5703
 
 MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0), "PRECT": (0.0, 50.0)}
 
