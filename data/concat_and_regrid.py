@@ -25,6 +25,11 @@ parser.add_argument("--output_dir", default=None,
                     help="Output directory (default: same as --data_dir)")
 parser.add_argument("--scenarios", nargs="+", default=["ssp370", "ssp126"],
                     help="SSP scenarios to process (default: ssp370 ssp126)")
+parser.add_argument("--build-bc", action="store_true",
+                    help="BC mode: regrid BC_per_gridpoint_*.nc to the target grid and "
+                         "inject it as a 3rd data_var into COPIES of the existing "
+                         "emissions_*_only_timefixed.nc files (written as *_bc.nc). "
+                         "CO2/SUL are carried through byte-identical; originals untouched.")
 args = parser.parse_args()
 
 DATA_DIR = args.data_dir
@@ -34,6 +39,7 @@ SCENARIOS = args.scenarios
 
 CO2_HIST = os.path.join(DATA_DIR, "CO2_cumulative_Gt_per_gridpoint_hist.nc")
 SO2_HIST = os.path.join(DATA_DIR, "SO2_cumulative_Gt_per_gridpoint_hist.nc")
+BC_HIST = os.path.join(DATA_DIR, "BC_per_gridpoint_hist.nc")  # 3rd cond channel (CEDS-2025, ≤2014 clipped upstream)
 
 # ── Load hist once (shared across scenarios) ─────────────────────────────────
 print("Loading hist files...")
@@ -179,7 +185,117 @@ def process_scenario(scenario: str) -> None:
         ds_aero.to_netcdf(aaer_only_file)
         ds_hist.to_netcdf(hist_only_file)  
 
-for scenario in SCENARIOS:
-    process_scenario(scenario)
+# ── BC (3rd cond channel) build path ─────────────────────────────────────────
+# Reconstructs the original CO2/SO2 recipe (concat hist≤2014 + ssp≥2015, lon
+# convention fix, xesmf bilinear periodic regrid to the f09 192x288 target grid —
+# :109-126) for BC, then INJECTS the regridded BC into copies of the existing
+# emissions_*_only_timefixed.nc cond files. CO2/SUL are carried through unchanged
+# so old TREFHT runs stay reproducible against the untouched originals.
+
+def _regrid_to_target(ds):
+    """Lon-convention fix + bilinear periodic regrid to target grid (mirror :109-126)."""
+    src_lon = ds.lon.values
+    src_is_360 = float(src_lon.max()) > 180
+    if src_is_360 != tgt_is_360:
+        if tgt_is_360 and not src_is_360:
+            print("  Converting source lon: -180..180 -> 0..360")
+            ds = ds.assign_coords(lon=(ds.lon % 360)).sortby("lon")
+        else:
+            print("  Converting source lon: 0..360 -> -180..180")
+            ds = ds.assign_coords(lon=((ds.lon + 180) % 360 - 180)).sortby("lon")
+    regridder = xe.Regridder(ds, target_grid, method="bilinear", periodic=True)
+    return regridder(ds, keep_attrs=True)
+
+
+def _build_bc_concat(scenario):
+    """hist CEDS BC (≤2014) + scenario IAMC BC (≥2015), regridded to target grid.
+    Mirrors the SO2 recipe EXACTLY: annual emissions, NO cumsum, and NO
+    hist-endpoint add (the :83-84 add was a CO2-cumulative-only artefact and must
+    NOT be applied to an annual aerosol channel). Returns the BC DataArray on the
+    target grid with a 'year' coord spanning 1850-2100."""
+    print(f"\n=== Building BC concat: {scenario} ===")
+    bc_hist = xr.open_dataset(BC_HIST).sel(year=slice(1850, 2014))
+    bc_ssp_path = os.path.join(DATA_DIR, f"BC_per_gridpoint_{scenario}.nc")
+    bc_ssp = xr.open_dataset(bc_ssp_path).sel(year=slice(2015, 2100))
+    bc_ssp = bc_ssp.interp(
+        year=np.arange(int(bc_ssp.year.values[0]), int(bc_ssp.year.values[-1]) + 1),
+        method="linear",
+    )
+    bc_ssp = bc_ssp.sel(year=bc_ssp.year > last_hist_year)
+    bc = xr.concat([bc_hist, bc_ssp], dim="year").sel(year=slice(1850, 2100))
+    # Measure the CEDS→IAMC 2015 junction on the NATIVE grid (do NOT smooth here;
+    # σ-smoothing + 5-EOF PCA downstream handle it, same as SUL — aaer_2015_spike).
+    g14 = float(bc["BC"].sel(year=2014).sum())
+    g15 = float(bc["BC"].sel(year=2015).sum())
+    print(f"  [{scenario}] BC global sum 2014->2015 junction: "
+          f"{g14:.5f} -> {g15:.5f} Gt/yr ({100 * (g15 - g14) / g14:+.2f}%)")
+    bc = _regrid_to_target(bc)
+    bc["BC"] = bc["BC"].fillna(0.0)  # unmapped pole points -> 0 (matches SO2/SUL path)
+    return bc["BC"]
+
+
+def _inject_bc(src_file, out_file, bc_da, *, zero_pin=False):
+    """Copy an existing cond file and add BC as a 3rd var on SUL's exact
+    dims/coords. CO2/SUL pass through untouched. bc_da: (T, lat, lon)
+    DataArray on the regrid target grid (coords used for alignment check)."""
+    ds = xr.open_dataset(src_file)
+    sul = ds["SUL"]
+    bc_arr = bc_da.values
+    assert bc_arr.shape == sul.shape, f"{out_file}: BC {bc_arr.shape} != SUL {sul.shape}"
+    # bc_da was regridded to TARGET_FILE's grid; stamping its values onto this
+    # file's coords is only valid if the grids are truly identical (rounding
+    # noise aside) — otherwise BC would be geographically misaligned with
+    # CO2/SUL while every shape/NaN check still passes.
+    if not (np.allclose(bc_da.lat.values, sul.lat.values, atol=1e-6)
+            and np.allclose(bc_da.lon.values, sul.lon.values, atol=1e-6)):
+        raise ValueError(
+            f"{out_file}: lat/lon differ from the BC regrid target grid "
+            f"(max lat diff {np.abs(bc_da.lat.values - sul.lat.values).max():g}, "
+            f"max lon diff {np.abs(bc_da.lon.values - sul.lon.values).max():g})"
+        )
+    if zero_pin:  # GHG holds ALL aerosols fixed -> constant year-0 field (mirror SUL)
+        bc_arr = np.broadcast_to(bc_arr[0:1], bc_arr.shape).copy()
+    ds["BC"] = xr.DataArray(bc_arr, dims=sul.dims, coords=sul.coords)
+    ds["BC"].attrs["units"] = "Gt BC / year / gridpoint"
+    ds["BC"].attrs["long_name"] = "Annual BC emissions per grid point (3rd cond channel)"
+    ds.to_netcdf(out_file)
+    print(f"  wrote {out_file}  (vars now {list(ds.data_vars)})")
+
+
+def build_bc_cond_files():
+    bc = {sc: _build_bc_concat(sc) for sc in ["ssp370", "ssp126", "ssp245"]}
+    bc370 = bc["ssp370"]
+    D = OUTPUT_DIR
+    j = lambda n: os.path.join(D, n)
+    print("\n=== Injecting BC into cond files ===")
+    # hist (year 1850-2014): CEDS hist is scenario-independent
+    _inject_bc(j("emissions_hist_only_timefixed.nc"),
+               j("emissions_hist_only_timefixed_bc.nc"),
+               bc370.sel(year=slice(1850, 2014)))
+    # ssp-only files (time 2015-2100). ssp126 eval uses the CO2-fixed base
+    # (ssp126_co2_cond_construction_bug → emissions_ssp126_only_timefixed_co2fix.nc,
+    # eval_aero.py:99), so inject BC into THAT so CO2 matches what eval consumes.
+    ssp_sources = {
+        "ssp370": ("emissions_ssp370_only_timefixed.nc",        "emissions_ssp370_only_timefixed_bc.nc"),
+        "ssp245": ("emissions_ssp245_only_timefixed.nc",        "emissions_ssp245_only_timefixed_bc.nc"),
+        "ssp126": ("emissions_ssp126_only_timefixed_co2fix.nc", "emissions_ssp126_only_timefixed_co2fix_bc.nc"),
+    }
+    for sc, (src, out) in ssp_sources.items():
+        _inject_bc(j(src), j(out), bc[sc].sel(year=slice(2015, 2100)))
+    # ghg (year 1850-2050): BC held fixed at year-0 (mirror SUL zero+pin)
+    _inject_bc(j("emissions_ghg_only_timefixed.nc"),
+               j("emissions_ghg_only_timefixed_bc.nc"),
+               bc370.sel(year=slice(1850, 2050)), zero_pin=True)
+    # aaer (year 1850-2050): BC kept varying (AAER varies ALL anthro aerosols incl BC)
+    _inject_bc(j("emissions_aaer_only_timefixed.nc"),
+               j("emissions_aaer_only_timefixed_bc.nc"),
+               bc370.sel(year=slice(1850, 2050)))
+
+
+if args.build_bc:
+    build_bc_cond_files()
+else:
+    for scenario in SCENARIOS:
+        process_scenario(scenario)
 
 print("\nDone!")

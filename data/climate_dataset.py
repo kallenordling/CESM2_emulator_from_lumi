@@ -67,10 +67,10 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 # baseline), matching what config_data.yaml feeds to training/eval.
 # ssp126 is intentionally excluded: it's the OOD test scenario.
 EMISSIONS_PATHS = [
-    "/scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc",
-    "/scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc",
-    "/scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc",
-    "/scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc",
+    "/scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc.nc",
+    "/scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed_bc.nc",
+    "/scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed_bc.nc",
+    "/scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed_bc.nc",
 ]
 
 
@@ -550,6 +550,19 @@ class ClimateDataset(Dataset):
                     ).sortby(self.time_dim)
                     per_var.append(d[[vname]])
                 dataset = xr.merge(per_var, join="inner")
+                # Inner join silently DROPS years absent from any tree (e.g. a
+                # partially-staged PRECT member) — that would quietly shrink the
+                # training set. Demand identical time axes across the trees.
+                n_merged = dataset.sizes[self.time_dim]
+                for vname, d in zip(self.vars, per_var):
+                    n_var = d.sizes[self.time_dim]
+                    if n_var != n_merged:
+                        raise ValueError(
+                            f"{realization}: time axis mismatch across target-var "
+                            f"trees — {vname} has {n_var} steps but the inner-join "
+                            f"intersection is {n_merged}. A tree is partially "
+                            f"staged; re-run run_prepare_data.sh for it."
+                        )
             self.lats = dataset.lat
             # Pin channel order to target_vars (ch0=TREFHT, ch1=PRECT, …) so the
             # stacked tensor / denoiser never silently transposes the channels.
