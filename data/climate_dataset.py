@@ -20,17 +20,38 @@ from sklearn.decomposition import PCA
 # =============================================================================
 # TREFHT: Kelvin → Celsius then z-score-style with fixed (mean=4.5°C, std=21°C)
 # pr:     kg/m²/s → mm/day then cube-root compression of the heavy positive tail
+# PRECT:  m/s → mm/day then log1p compression of the heavy positive tail + z-score
 
-MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0)}
+# ── PRECT normalisation constants (log1p(mm/day) mean & std over hist+ssp370) ──
+# PLACEHOLDER ESTIMATES — the clean PRECT realization data does not exist yet
+# (NaN-poisoned re-download in progress). These MUST be re-estimated from a clean
+# realization with scripts/estimate_prect_norm.py and baked in BEFORE training,
+# otherwise the precip channel will not sit at ~unit variance (precip MSE will
+# dominate or vanish). Expected ballpark mu≈0.7, sigma≈0.9 — confirm from data.
+PRECT_LOG_MEAN = 0.7   # TODO: re-estimate from clean PRECT data before training
+PRECT_LOG_STD  = 0.9   # TODO: re-estimate from clean PRECT data before training
 
-PREPROCESS_FN = {"TREFHT": lambda x: x - 273.15, "pr": lambda x: x * 86400}
+MIN_MAX_CONSTANTS = {"TREFHT": (-85.0, 60.0), "pr": (0.0, 6.0), "PRECT": (0.0, 50.0)}
+
+PREPROCESS_FN = {
+    "TREFHT": lambda x: x - 273.15,
+    "pr": lambda x: x * 86400,
+    # m/s → mm/day: ×1000 (m→mm) ×86400 (s→day) = 8.64e7
+    "PRECT": lambda x: x * 8.64e7,
+}
 NORM_FN = {
     "TREFHT": lambda x: (x - 4.5) / 21.0,
     "pr": lambda x: np.cbrt(x),
+    # log1p compresses the positive tail (no epsilon: log1p(0)=0, mm/day ≥ 0),
+    # then z-score so the channel sits at ~unit variance to balance the MSE
+    # against TREFHT's (x-4.5)/21.
+    "PRECT": lambda x: (np.log1p(x) - PRECT_LOG_MEAN) / PRECT_LOG_STD,
 }
 DENORM_FN = {
     "TREFHT": lambda x: x * 21.0 + 4.5,
     "pr": lambda x: x**3,
+    # returns mm/day
+    "PRECT": lambda x: np.expm1(x * PRECT_LOG_STD + PRECT_LOG_MEAN),
 }
 
 
@@ -285,7 +306,10 @@ def pca_denoise_dataset(
 #     p90 → -0.94 vs -0.04 at 5-95), starving the aerosol-only (aaer) signal and
 #     making its response spiky/unstable. SUL gains nothing from the wider range.
 # Splitting the percentile per channel resolves that CO2-vs-SUL conflict.
-_CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95)}
+#   - BC → (5, 95): heavy-tailed combustion emissions, same hotspot geography as
+#     SO2. SUL's 5-95 reasoning applies identically; do NOT use CO2's (1, 99).
+_CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95),
+              "BC": (5, 95)}
 
 
 @lru_cache(maxsize=1)
@@ -300,7 +324,7 @@ def _get_emissions_minmax():
     all_vals = {}  # var -> list of flat arrays
     for path in EMISSIONS_PATHS:
         ds_emis = xr.open_dataset(path)
-        for var in ["CO2", "SO2", "SUL", "sul"]:
+        for var in ["CO2", "SO2", "SUL", "sul", "BC"]:
             if var not in ds_emis.data_vars:
                 continue
             all_vals.setdefault(var, []).append(ds_emis[var].values.flatten())
@@ -324,7 +348,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
 
     Other variables (e.g. TREFHT, pr): use the fixed lambdas in NORM_FN.
     """
-    if ds.name in ["CO2", "SUL"]:
+    if ds.name in ["CO2", "SUL", "BC"]:
         minmax = _get_emissions_minmax()
         min_val, max_val = minmax[ds.name]
 
@@ -384,7 +408,17 @@ class ClimateDataset(Dataset):
     ):
         self.seq_len = seq_len
         self.realizations = realizations
-        self.data_dir = data_dir
+        # data_dir may be a single tree (one mfdataset holding ALL target vars,
+        # legacy) or a LIST of one tree per target var (e.g. TREFHT and PRECT
+        # staged in separate dirs). Normalise to a list; the first element is
+        # the "primary" dir used for diagnostics / relative cond_file resolution.
+        if isinstance(data_dir, (list, tuple)) or (
+            not isinstance(data_dir, str) and hasattr(data_dir, "__iter__")
+        ):
+            self._data_dirs = [str(d) for d in data_dir]
+        else:
+            self._data_dirs = [str(data_dir)]
+        self.data_dir = self._data_dirs[0]
         self.cond_only = cond_only
         self.time_dim = time_dim
 
@@ -492,12 +526,34 @@ class ClimateDataset(Dataset):
                 del self.tensor_data
             self.tensor_data = None
 
-            realization_dir = os.path.join(self.data_dir, realization, "*.nc")
-            # Open lazily; only materialise when we call convert_xarray_to_tensor
-            dataset = xr.open_mfdataset(
-                realization_dir, combine="by_coords", chunks={self.time_dim: 50}
-            ).sortby(self.time_dim)
+            if len(self._data_dirs) == 1:
+                # Legacy: one tree holds all target vars.
+                realization_dir = os.path.join(self._data_dirs[0], realization, "*.nc")
+                # Open lazily; only materialise when we call convert_xarray_to_tensor
+                dataset = xr.open_mfdataset(
+                    realization_dir, combine="by_coords", chunks={self.time_dim: 50}
+                ).sortby(self.time_dim)
+            else:
+                # One tree per target var (e.g. TREFHT, PRECT staged separately),
+                # paired by IDENTICAL realization dir name. Open each, select its
+                # var, and merge on shared coords (inner join on the time axis).
+                if len(self._data_dirs) != len(self.vars):
+                    raise ValueError(
+                        f"data_dir has {len(self._data_dirs)} trees but there are "
+                        f"{len(self.vars)} target_vars {self.vars} — supply one tree "
+                        f"per target var (paired by realization name)."
+                    )
+                per_var = []
+                for vname, ddir in zip(self.vars, self._data_dirs):
+                    d = xr.open_mfdataset(
+                        os.path.join(ddir, realization, "*.nc"),
+                        combine="by_coords", chunks={self.time_dim: 50},
+                    ).sortby(self.time_dim)
+                    per_var.append(d[[vname]])
+                dataset = xr.merge(per_var, join="inner")
             self.lats = dataset.lat
+            # Pin channel order to target_vars (ch0=TREFHT, ch1=PRECT, …) so the
+            # stacked tensor / denoiser never silently transposes the channels.
             dataset = dataset[self.vars]
             self.xr_data = dataset.map(preprocess).map(normalize)
             # Select target years robustly: handles both integer-year coords

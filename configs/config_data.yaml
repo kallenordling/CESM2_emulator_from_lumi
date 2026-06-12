@@ -12,16 +12,18 @@ _target_: multi_experiment_dataset.build_multi_experiment_loader
 seq_len: 1
 target_vars:
   - TREFHT
+  - PRECT                     # NEW — 2nd output channel (precip, mm/day, log1p+z-score normalised)
 cond_vars:
   - CO2
   - SUL
+  - BC                        # NEW — 3rd cond channel (black carbon, annual combustion emissions like SUL)
 n_components_target: null
-n_components_cond: [30, 5]    # [CO2, SUL]: 5 SUL EOFs (down from 10) — drops CEDS↔IAMC 2015-junction EOF that caused the aaer 2015 temperature spike after ep ~610
+n_components_cond: [30, 5, 5] # [CO2, SUL, BC]: BC shares SUL's combustion geography → 5 EOFs (drops the CEDS↔IAMC 2015-junction EOF, same as SUL)
 # Per-channel spatial gaussian σ (gridpoints) applied to normalised cond fields
 # before PCA. CO2 is already smooth (cumulative emissions); SUL needs smoothing
 # to suppress shipping-lane/flight-path inventory artefacts that the model would
 # otherwise reproduce as line features in the predicted TREFHT.
-cond_smooth_sigma: [0, 2]
+cond_smooth_sigma: [0, 2, 2]   # [CO2, SUL, BC]: BC has the same shipping-lane/flight-path inventory artefacts as SO2 → σ=2
 # Denoiser for the smoothing above: "gaussian" (blurs all scales — also erases
 # the regional aerosol fingerprint, see model_skill_diagnosis: aaer patcorr 0.42)
 # or "median" (k=2*round(sigma)+1 kernel; removes thin shipping/flight lines but
@@ -95,7 +97,11 @@ experiment_configs:
 
   - scenario_name: hist
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
+    # data_dir is a LIST of one tree per target_var (paired by identical realization
+    # dir name). PRECT trees must be staged before training (re-download in progress).
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/hist
     cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc
     realizations:
       - LE2-1001.001
@@ -122,7 +128,9 @@ experiment_configs:
 
   - scenario_name: ssp370
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/ssp370
     cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc
     realizations:
       - LE2-1001.001
@@ -149,7 +157,9 @@ experiment_configs:
 
   - scenario_name: aaer
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/AAER
     cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc
     realizations:
       - "001"
@@ -165,7 +175,9 @@ experiment_configs:
 
   - scenario_name: ghg
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/GHG
     cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc
     realizations:
       - "001"
@@ -184,28 +196,38 @@ val_experiment_configs:
 
   - scenario_name: hist
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
+    # data_dir is a LIST of one tree per target_var (paired by identical realization
+    # dir name). PRECT trees must be staged before training (re-download in progress).
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/hist
     cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: ssp370
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/ssp370
     cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: aaer
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/AAER
     cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed.nc
     realizations:
       - "010"
 
   - scenario_name: ghg
     time_dim: time
-    data_dir: /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
+    data_dir:
+      - /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
+      - /scratch/project_462001328/emulator_data/training_data/PRECT/GHG
     cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed.nc
     realizations:
       - "010"

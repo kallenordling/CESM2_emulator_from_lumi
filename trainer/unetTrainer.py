@@ -59,13 +59,21 @@ def _load_ema_state_dict(ema_obj, state):
     raise AttributeError("EMA object does not support load_state_dict().")
 
 
-def calc_mse_loss(model_output, target, lats):
+def calc_mse_loss(model_output, target, lats, channel_weights=None):
     """Cosine-latitude-weighted MSE.
 
     Per-pixel squared error is weighted by cos(latitude), clamped at 0.2 so
     poles still contribute. Returns scalar mean over batch / time / lat / lon.
+
+    ``channel_weights``: optional broadcast-ready tensor (e.g. (1, C, 1, 1, 1))
+    multiplying the per-channel squared error before the mean — used to down-
+    weight the noisier precip channel. None → equal weighting (unchanged).
     """
     spatial_loss = (model_output - target) ** 2
+    if channel_weights is not None:
+        spatial_loss = spatial_loss * channel_weights.to(
+            dtype=spatial_loss.dtype, device=spatial_loss.device,
+        )
     latitude = torch.as_tensor(
         lats.values, dtype=spatial_loss.dtype, device=spatial_loss.device,
     )
@@ -264,6 +272,21 @@ class UNetTrainer:
         self.cfg_drop_prob     = getattr(self, "cfg_drop_prob",     0.1)
         self.cfg_co2_drop_prob = getattr(self, "cfg_co2_drop_prob", self.cfg_drop_prob)
         self.cfg_sul_drop_prob = getattr(self, "cfg_sul_drop_prob", self.cfg_drop_prob)
+        # BC (cond ch 2): aerosol channel — drop independently like SUL so per-
+        # channel guidance can isolate it. Defaults to 0 so 2-channel configs
+        # (no BC) are unaffected.
+        self.cfg_bc_drop_prob  = getattr(self, "cfg_bc_drop_prob", 0.0)
+
+        # ── Per-target-channel MSE weights ([TREFHT, PRECT, …]) ──
+        # Down-weight the noisier precip channel so it can't dominate / destabilise
+        # the shared backbone. None or all-1 → unchanged equal weighting. Built into
+        # a broadcast-ready (1, C, 1, 1, 1) tensor lazily in get_loss once the
+        # device is known.
+        _tvw = getattr(self, "target_var_weights", None)
+        if _tvw is not None:
+            _tvw = [float(w) for w in _tvw]
+        self._target_var_weights = _tvw
+        self._target_weight_tensor = None   # lazily built (1, C, 1, 1, 1)
 
         # ── Adaptive loss-scaling EMAs (saved/restored with checkpoint) ──
         self._adaptive_loss_scaling = getattr(self, "adaptive_loss_scaling", False)
@@ -1024,6 +1047,9 @@ class UNetTrainer:
         """
         if self.ebm_loss_scaling <= 0:
             return torch.zeros(1, device=self.device)
+        # Energy balance is a TEMPERATURE constraint — use ch 0 (TREFHT) only so
+        # precip never leaks into ΔT (inert anyway: ebm_loss_scaling defaults 0).
+        pred_anomaly = pred_anomaly[:, 0:1]
         w_be = _area_weights_1d(
             self._ref_ds.lats, dtype=pred_anomaly.dtype, device=pred_anomaly.device,
         ).view(1, 1, 1, -1, 1)
@@ -1063,6 +1089,11 @@ class UNetTrainer:
         else:
             tcre_pred = pred_anomaly
 
+        # TCRE is CO2→ΔT only — restrict to ch 0 (TREFHT). Without this the
+        # dim=(1,2,3,4) reduction below would blend the precip channel into the
+        # temperature slope and silently corrupt it (precip has no TCRE).
+        tcre_pred = tcre_pred[:, 0:1]
+
         w_b = _area_weights_1d(
             self._ref_ds.lats, dtype=pred_anomaly.dtype, device=pred_anomaly.device,
         ).view(1, 1, 1, -1, 1)
@@ -1086,13 +1117,19 @@ class UNetTrainer:
         f(CO2,SUL) − f(CO2,0) − f(0,SUL) + f(0,0). Two NO-GRAD marginal forward
         passes; gradient flows only through pred_x0_cond[mask]."""
         ci = cond_map_input[mask]; ns = noisy_samples[mask]; ts = timesteps[mask]
-        co2only = ci.clone(); co2only[:, 1] = NULL_COND_VALUE       # SUL→null
-        sulonly = ci.clone(); sulonly[:, 0] = NULL_COND_VALUE       # CO2→null
+        # co2only nulls ALL aerosol channels (SUL ch1 + BC ch2 when present) so
+        # the additivity prior stays a clean CO2-vs-combined-aerosol split; the
+        # `1:` slice is identical to `[:, 1]` for the 2-channel (no-BC) case.
+        co2only = ci.clone(); co2only[:, 1:] = NULL_COND_VALUE      # all aerosols→null
+        sulonly = ci.clone(); sulonly[:, 0] = NULL_COND_VALUE       # CO2→null (aerosols kept)
         with torch.no_grad():
             p_co2 = self.get_original_sample(ns, self.model(ns, ts, cond_map=co2only), ts)
             p_sul = self.get_original_sample(ns, self.model(ns, ts, cond_map=sulonly), ts)
-        return (pred_x0_cond[mask] - p_co2.detach() - p_sul.detach()
-                + pred_x0_null[mask].detach())
+        # Restrict the additivity prior to the forced TEMPERATURE response (ch 0);
+        # precip has no clean CO2/aerosol additivity to enforce.
+        inter = (pred_x0_cond[mask] - p_co2.detach() - p_sul.detach()
+                 + pred_x0_null[mask].detach())
+        return inter[:, 0:1]
 
     def _compute_interaction_loss(self, pred_x0_cond: torch.Tensor,
                                   pred_x0_null: torch.Tensor,
@@ -1155,7 +1192,9 @@ class UNetTrainer:
         w_g = _area_weights_1d(
             self._ref_ds.lats, dtype=pred_x0_cond.dtype, device=pred_x0_cond.device,
         ).view(1, 1, 1, -1, 1)
-        pred_gm = (pred_x0_cond * w_g).mean(dim=(1, 2, 3, 4))
+        # Pin the TEMPERATURE (ch 0) global mean only; target_gm is computed on
+        # ch 0 at the call site to match. (Inert by default: gmean scaling 0.)
+        pred_gm = (pred_x0_cond[:, 0:1] * w_g).mean(dim=(1, 2, 3, 4))
         return ((pred_gm[intact] - target_gm[intact]) ** 2).mean().unsqueeze(0)
 
     def _log_null_drift(self, pred_x0_null: torch.Tensor) -> None:
@@ -1231,7 +1270,8 @@ class UNetTrainer:
             # constant channel teaches the model nothing useful and dropping
             # the varying channel collapses the only signal those samples carry.
             cond_dropped = torch.zeros(clean_samples.shape[0], device=self.device, dtype=torch.bool)
-            if self.cfg_co2_drop_prob > 0 or self.cfg_sul_drop_prob > 0:
+            if (self.cfg_co2_drop_prob > 0 or self.cfg_sul_drop_prob > 0
+                    or self.cfg_bc_drop_prob > 0):
                 cond_map_input = cond_map.clone()
                 if scenario_ids is not None:
                     if not hasattr(self, "_joint_scenario_ids"):
@@ -1259,6 +1299,16 @@ class UNetTrainer:
                     ) & joint_mask
                     cond_map_input[drop_sul, 1] = NULL_COND_VALUE
                     cond_dropped = cond_dropped | drop_sul
+                if self.cfg_bc_drop_prob > 0:
+                    # BC (ch 2): same joint_mask (hist+ssp370) as CO2/SUL — aaer has
+                    # constant CO2 and ghg has constant aerosols, so dropping BC
+                    # there teaches nothing. BC varies in hist/ssp370 → correct set.
+                    drop_bc = (
+                        torch.rand(clean_samples.shape[0], device=self.device)
+                        < self.cfg_bc_drop_prob
+                    ) & joint_mask
+                    cond_map_input[drop_bc, 2] = NULL_COND_VALUE
+                    cond_dropped = cond_dropped | drop_bc
             else:
                 cond_map_input = cond_map
 
@@ -1297,7 +1347,8 @@ class UNetTrainer:
                         dtype=clean_samples.dtype, device=clean_samples.device,
                     ))).clamp(min=0.2)
                     _wt = (_wt / _wt.mean()).view(1, 1, 1, -1, 1)
-                    target_gm = (clean_samples * _wt).mean(dim=(1, 2, 3, 4)).detach()
+                    # ch 0 (TREFHT) only — _compute_gmean_loss pins ch 0 to match.
+                    target_gm = (clean_samples[:, 0:1] * _wt).mean(dim=(1, 2, 3, 4)).detach()
             else:
                 true_anomaly = None
 
@@ -1324,7 +1375,27 @@ class UNetTrainer:
             model_output = self.model(noisy_samples, timesteps, cond_map=cond_map_input)
 
             # ── Primary denoising loss ────────────────────────────────────────
-            mse_loss = calc_mse_loss(model_output, target, self._ref_ds.lats)
+            # Build the (1, C, 1, 1, 1) per-channel weight tensor once (lazily, so
+            # C is known). Skipped entirely when no weights configured or all 1.
+            if (self._target_weight_tensor is None
+                    and self._target_var_weights is not None):
+                C = model_output.shape[1]
+                w = self._target_var_weights
+                if len(w) != C:
+                    raise ValueError(
+                        f"target_var_weights has {len(w)} entries but model has "
+                        f"{C} output channel(s)."
+                    )
+                if any(abs(x - 1.0) > 1e-12 for x in w):
+                    self._target_weight_tensor = torch.tensor(
+                        w, device=self.device, dtype=self.weight_dtype,
+                    ).view(1, C, 1, 1, 1)
+                else:
+                    self._target_var_weights = None   # all 1 → disable, no-op path
+            mse_loss = calc_mse_loss(
+                model_output, target, self._ref_ds.lats,
+                channel_weights=self._target_weight_tensor,
+            )
 
             # DDP sentinel: keep the EBM scalars in the autograd graph on every
             # iteration so DDP's reducer always sees a grad path for them.

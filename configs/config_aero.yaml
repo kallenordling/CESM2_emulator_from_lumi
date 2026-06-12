@@ -16,9 +16,9 @@ accelerator:
 
 model:
     _target_: models.video_net.UNetModel3D
-    in_channels: 1
-    out_channels: 1
-    cond_channels: 2
+    in_channels: 2        # was 1 — (TREFHT, PRECT) joint-denoised target
+    out_channels: 2       # was 1
+    cond_channels: 3      # was 2 — (CO2, SUL, BC)
     dim_mults: [1, 2, 3, 4]
     resnet_groups: 8
     attn_dim_head: 32
@@ -53,7 +53,7 @@ trainer:
     mse_only: false
     batch_size: 8        # must match batch_size in config_data.yaml
     save_dir: runs/
-    save_name: run_sensfix.pt  # retrain bundle: per-channel SUL clip (cec7576) + low-t TCRE B+C (a256670). Fresh name → starts from epoch 0, no run_normfix collision.
+    save_name: run_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
     load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
     # ── LR decay (pure function of global_step → resume-invariant; default off) ─
@@ -68,6 +68,11 @@ trainer:
     cfg_drop_prob: 0.0
     cfg_co2_drop_prob: 0.2      # increased from 0.1 — more null-CO2 batches, less CO2 sensitivity
     cfg_sul_drop_prob: 0.3      # 3× SUL dropout → more CO2-only training batches
+    cfg_bc_drop_prob: 0.3       # NEW — BC is an aerosol channel; match SUL so CO2-only batches stay frequent
+    # Per-target-channel weight in the primary denoising MSE: [TREFHT, PRECT].
+    # PRECT is noisier → downweight to 0.5 so it can't dominate / destabilise the
+    # shared backbone. Default [1.0, 1.0] (or absent) = unchanged equal weighting.
+    target_var_weights: [1.0, 0.5]
     adaptive_loss_scaling: true  # auto-tune cond/tcre scalings to fixed fractions of MSE loss
     cond_target_fraction: 0.30   # general conditioning loss target = 30% of MSE loss (bounded [0.1, 0.4])
     # ── TCRE regularization (physics prior) ──────────────────────────────

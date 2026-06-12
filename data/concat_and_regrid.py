@@ -148,6 +148,7 @@ def process_scenario(scenario: str) -> None:
     if scenario == 'ssp370':
         output_file = os.path.join(OUTPUT_DIR, f"emissions_co2_so2_regridded_{scenario}.nc")
         ds_regridded=xr.open_dataset(output_file)
+        has_bc = "BC" in ds_regridded.data_vars   # BC merged in upstream (3rd channel)
         #----splot file to ghg and hist only ans hist
         ds=ds_regridded.sel(year=slice(1850,2050))
         ds_ghg=ds.copy()
@@ -155,10 +156,19 @@ def process_scenario(scenario: str) -> None:
         ds_aero=ds.copy()
         ds_ghg['SUL'] *=0
         ds_ghg['SUL'] += ds['SUL'].isel(year=0)
-        
+
         ds_aero['CO2'] *=0
         ds_aero['CO2'] += ds['CO2'].isel(year=0)
-        
+
+        # BC (3rd cond channel): GHG holds ALL aerosols fixed → zero BC and pin to
+        # year-0 (mirror SUL above). AAER varies ALL anthropogenic aerosols incl.
+        # BC, so ds_aero KEEPS BC varying (only CO2 is zeroed). hist carries BC
+        # as-is. Guarded on has_bc so CO2/SUL stay byte-identical when BC is absent.
+        if has_bc:
+            ds_ghg['BC'] *= 0
+            ds_ghg['BC'] += ds['BC'].isel(year=0)
+            print("  [BC] ghg: zeroed + pinned to year-0; aaer: kept varying")
+
         ds_hist = ds_regridded.sel(year=slice(1850,2014))
     
         hist_only_file = os.path.join(OUTPUT_DIR, f"emissions_hist_only_timefixed.nc")
