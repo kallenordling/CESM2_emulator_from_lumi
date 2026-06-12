@@ -9,12 +9,13 @@
 #SBATCH --mem=128G
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/%x_%j.out
-# Smoke test for the new cond normalisation (1-99 pct, 4-scenario reference)
-# AND the unetTrainer refactor (Chunks 1-4). Goal: boot the trainer, run a
-# handful of training steps, persist one checkpoint, then exit cleanly.
+# Smoke test for the BC 3rd-cond-channel + PRECT 2nd-output-channel changes
+# (2-out/3-cond model, two-tree TREFHT+PRECT data_dir, *_bc.nc cond files).
+# Goal: boot the trainer, run a handful of training steps, persist one
+# checkpoint, then exit cleanly.
 #
 # NO self-chaining. NO eval watcher. Writes to a SEPARATE save_name so it
-# never collides with the production run_normfix.pt chain.
+# never collides with the production run_bcprect.pt chain.
 #
 # Submit:  sbatch run_debug_aero.sh
 # Logs:    logs/debug_aero_<jobid>.out
@@ -22,11 +23,12 @@
 # Pass / Fail criteria
 #   PASS: log shows "[TRAINER] Multi-experiment mode",
 #         "[EPOCH 0] duration: …" appears at least once,
-#         a single run_normfix_debug_<N>.pt file lands in runs/,
+#         a single run_bcprect_debug_<N>.pt file lands in runs/ and its
+#         ckpt["PCA"]["per_scenario"] entries have length 3 (CO2, SUL, BC),
 #         no Python exception in the log tail.
 #   FAIL: ImportError / NameError / shape mismatch on first forward pass,
-#         missing-file error from the staging step,
-#         OOM on the first step.
+#         missing-file error from the staging step (incl. the new fail-loud
+#         two-tree time-axis guard), OOM on the first step.
 
 set -euo pipefail
 mkdir -p logs
@@ -71,34 +73,37 @@ mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 # ── Stage data to /tmp ───────────────────────────────────────────────────────
 # Bind mount in the singularity exec below REPLACES /scratch/.../emulator_data
 # with this /tmp directory inside the container, so ONLY files copied here are
-# visible to training. Includes all four "_only_" cond files (the new
-# EMISSIONS_PATHS reference + config_data feed) renamed correctly (aaer, not aero).
+# visible to training. Stages BOTH target-var trees (config_data.yaml two-tree
+# data_dir: TREFHT ch0, PRECT ch1) and the four "_bc" cond files (CO2+SUL+BC —
+# the EMISSIONS_PATHS reference + config_data feed).
 SRC_DATA_ROOT=/scratch/project_462001328/emulator_data
 LOCAL_DATA_ROOT=/tmp/emulator_data_${SLURM_JOB_ID}
 
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     set -euo pipefail
-    mkdir -p ${LOCAL_DATA_ROOT}/training_data/TREFHT
     echo \"[stage] node \$(hostname): copying training data to /tmp …\"
     t0=\$(date +%s)
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/hist    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/ssp370  ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/AAER    ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    cp -r ${SRC_DATA_ROOT}/training_data/TREFHT/GHG     ${LOCAL_DATA_ROOT}/training_data/TREFHT/
-    # The four _only_ cond files needed by both EMISSIONS_PATHS (1-99 pct ref)
+    for var in TREFHT PRECT; do
+        mkdir -p ${LOCAL_DATA_ROOT}/training_data/\${var}
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/hist    ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/ssp370  ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/AAER    ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/GHG     ${LOCAL_DATA_ROOT}/training_data/\${var}/
+    done
+    # The four _bc cond files needed by both EMISSIONS_PATHS (percentile ref)
     # and config_data.yaml (per-scenario training cond inputs).
-    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed.nc  ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed.nc     ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc.nc  ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc.nc     ${LOCAL_DATA_ROOT}/
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 # Hydra overrides:
-#   trainer.hyperparameters.save_name=run_normfix_debug.pt   — isolated save bucket
+#   trainer.hyperparameters.save_name=run_bcprect_debug.pt   — isolated save bucket
 #   trainer.hyperparameters.save_every=5                     — checkpoint after ~5 sync steps
-#   trainer.hyperparameters.max_epochs=3                     — bounded run length
+#   trainer.hyperparameters.max_epochs=50                    — bounded run length
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
@@ -110,7 +115,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         --machine_rank=\${SLURM_NODEID} \
         --main_process_ip=${MAIN_PROCESS_IP} \
         main_aero.py \
-        trainer.hyperparameters.save_name=run_normfix_debug.pt \
+        trainer.hyperparameters.save_name=run_bcprect_debug.pt \
         trainer.hyperparameters.save_every=5 \
         trainer.hyperparameters.max_epochs=50
 '"
@@ -121,4 +126,4 @@ srun bash -c "$RUN_CMD" || true
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     bash -c "rm -rf ${LOCAL_DATA_ROOT} 2>/dev/null || true" || true
 
-echo "[debug] done — check runs/run_normfix_debug_*.pt and the log tail for errors."
+echo "[debug] done — check runs/run_bcprect_debug_*.pt and the log tail for errors."
