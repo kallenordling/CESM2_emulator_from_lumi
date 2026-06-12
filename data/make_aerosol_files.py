@@ -16,9 +16,16 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("exp", help="Experiment name, e.g. hist or ssp370")
+parser.add_argument("--species", default="SO2", choices=["SO2", "BC"],
+                    help="Aerosol species to process. SO2→var 'SUL' (existing), "
+                         "BC→var 'BC' (3rd cond channel). Drives the input glob, "
+                         "output var name, and output filename.")
 args = parser.parse_args()
 
 exp = args.exp
+SPECIES = args.species
+# Output variable name: SO2 keeps the legacy 'SUL' name; BC is its own channel.
+OUT_VAR = "SUL" if SPECIES == "SO2" else "BC"
 # ── Configure paths ──────────────────────────────────────────────────────────
 # Override via env to run off a local mount (e.g. /mnt/lumi_sc2) instead of /scratch.
 INPUT_DIR = os.environ.get(
@@ -26,19 +33,24 @@ INPUT_DIR = os.environ.get(
 OUTPUT_DIR = os.environ.get(
     "EMUL_OUTPUT_DIR", "/scratch/project_462001328/emulator_data/")
 
-if exp == "hist":
-    #AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")
-    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc")
-if  exp =="ssp370":
-    #AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
-    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc")
-if exp == "ssp126":
-    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc")
-if exp == "ssp245":
-    # MESSAGE-GLOBIOM ssp245 also ships SO2-em-AIR-anthro, but the existing
-    # scenarios use only the surface anthro SO2 (AIR commented out above), so
-    # match that for consistency.
-    ANTHRO_PATTERN = os.path.join(INPUT_DIR, "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc")
+# Per-(species, exp) surface-anthro input glob. AIR-anthro stays omitted for both
+# species (matches the existing SO2/SUL channel, which uses surface anthro only).
+# BC hist uses CEDS-2025 (runs to 2023) — clipped to ≤2014 below so the hist→ssp
+# junction matches the SO2 channel; ssp370 BC uses the IAMC-AIM scenario file.
+_ANTHRO_PATTERNS = {
+    ("SO2", "hist"):   "SO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc",
+    ("SO2", "ssp370"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc",
+    ("SO2", "ssp126"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc",
+    ("SO2", "ssp245"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc",
+    ("BC",  "hist"):   "BC-em-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2025-04-18_gn_*.nc",
+    ("BC",  "ssp370"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc",
+}
+if (SPECIES, exp) not in _ANTHRO_PATTERNS:
+    raise SystemExit(f"No input glob configured for species={SPECIES} exp={exp}")
+ANTHRO_PATTERN = os.path.join(INPUT_DIR, _ANTHRO_PATTERNS[(SPECIES, exp)])
+# Clip BC CEDS-2025 hist (runs to 2023) to ≤2014 so the hist channel ends where
+# the SO2 channel does; ssp370 IAMC BC supplies ≥2015 downstream.
+CLIP_HIST_2014 = (SPECIES == "BC" and exp == "hist")
 R_EARTH = 6.371e6  # Earth radius in meters
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 KG_PER_GT = 1e12  # 1 Gt = 1e12 kg
@@ -82,13 +94,13 @@ def find_dim(ds, candidates):
     raise ValueError(f"None of {candidates} found in dims: {list(ds.dims)}")
 
 
-def rename_to_co2(ds):
-    """Rename the main data variable to 'CO2'."""
+def rename_to_out(ds):
+    """Rename the main data variable to the output var name (OUT_VAR)."""
     data_vars = [v for v in ds.data_vars if "bnds" not in v and "bound" not in v]
     assert len(data_vars) >= 1, f"No data variables found: {list(ds.data_vars)}"
     var_name = data_vars[0]
-    print(f"  Renaming '{var_name}' -> 'SUL'")
-    return ds.rename({var_name: "SUL"})
+    print(f"  Renaming '{var_name}' -> '{OUT_VAR}'")
+    return ds.rename({var_name: OUT_VAR})
 
 
 # ── 1. AIR-anthro: open & sum along level ────────────────────────────────────
@@ -130,6 +142,12 @@ print("\nCalculating annual mean flux...")
 #ds_air_annual = ds_air_summed.groupby('time.year').mean()#.resample(time="YE").mean()
 ds_anthro_annual = ds_anthro_summed.groupby('time.year').mean()#.resample(time="YE").mean()
 
+# Clip BC CEDS-2025 hist (extends to 2023) to ≤2014 so it ends where the SO2
+# hist channel does; ssp370 IAMC BC supplies ≥2015 in concat_and_regrid.py.
+if CLIP_HIST_2014:
+    ds_anthro_annual = ds_anthro_annual.sel(year=ds_anthro_annual.year <= 2014)
+    print(f"  [BC] clipped hist to ≤2014 → {ds_anthro_annual.year.values[-1]}")
+
 #print(f"  AIR annual shape: {dict(ds_air_annual.dims)}")
 print(f"  Anthro annual shape: {dict(ds_anthro_annual.dims)}")
 
@@ -149,10 +167,10 @@ anthro_start = int(str(ds_anthro_annual.year.values[0])[:4])
 #print(f"  AIR time: {ds_air_annual.year.values[0]} to {ds_air_annual.year.values[-1]}")
 print(f"  Anthro time: {ds_anthro_annual.year.values[0]} to {ds_anthro_annual.year.values[-1]}")
 
-# ── 4. Rename to CO2 ────────────────────────────────────────────────────────
-print("\nRenaming variables to 'CO2'...")
-#ds_air_annual = rename_to_co2(ds_air_annual)
-ds_anthro_annual = rename_to_co2(ds_anthro_annual)
+# ── 4. Rename to output var ─────────────────────────────────────────────────
+print(f"\nRenaming variables to '{OUT_VAR}'...")
+#ds_air_annual = rename_to_out(ds_air_annual)
+ds_anthro_annual = rename_to_out(ds_anthro_annual)
 
 # ── 5. Sum AIR + anthro on shared time range ─────────────────────────────────
 print("\nCombining AIR + anthro emissions...")
@@ -160,8 +178,8 @@ print("\nCombining AIR + anthro emissions...")
 ds_total =  ds_anthro_annual#ds_anthro_aligned
 print(f"  Combined time range: {str(ds_total.year.values[0])[:10]} to {str(ds_total.year.values[-1])[:10]}")
 
-# ── 6. Convert kg/m²/s -> Gt CO2 per grid point per year ────────────────────
-print("\nConverting kg/m²/s -> Gt SUK per grid point...")
+# ── 6. Convert kg/m²/s -> Gt species per grid point per year ────────────────
+print(f"\nConverting kg/m²/s -> Gt {SPECIES} per grid point...")
 
 lat = ds_total.lat.values
 lon = ds_total.lon.values
@@ -172,23 +190,19 @@ area_da = xr.DataArray(area_m2, dims=["lat", "lon"], coords={"lat": lat, "lon": 
 
 # Conversion:
 #   kg/m²/s  *  m²  *  s/yr  /  (kg/Gt)  =  Gt/yr per grid cell
-ds_total["SUL"] = ds_total["SUL"] * area_da * SECONDS_PER_YEAR / KG_PER_GT
+ds_total[OUT_VAR] = ds_total[OUT_VAR] * area_da * SECONDS_PER_YEAR / KG_PER_GT
 
-ds_total["SUL"].attrs["units"] = "Gt SUK / year / gridpoint"
-ds_total["SUL"].attrs["long_name"] = "Annual SUK emissions per grid point"
+ds_total[OUT_VAR].attrs["units"] = f"Gt {SPECIES} / year / gridpoint"
+ds_total[OUT_VAR].attrs["long_name"] = f"Annual {SPECIES} emissions per grid point"
 
-print(f"  Global total first year: {float(ds_total['SUL'].isel(year=0).sum()):.4f} Gt SUL/yr")
-print(f"  Global total last year:  {float(ds_total['SUL'].isel(year=-1).sum()):.4f} Gt SUL/yr")
+print(f"  Global total first year: {float(ds_total[OUT_VAR].isel(year=0).sum()):.4f} Gt {SPECIES}/yr")
+print(f"  Global total last year:  {float(ds_total[OUT_VAR].isel(year=-1).sum()):.4f} Gt {SPECIES}/yr")
 
-# ── 7. Cumulative sum over time ─────────────────────────────────────────────
-print("\nComputing cumulative sum over time...")
+# ── 7. Cumulative sum over time (DISABLED — aerosols are annual, like SUL) ───
+# BC is NOT cumulative (annual emissions, same as SUL); cumsum stays commented.
+print("\n(annual emissions; cumulative sum intentionally disabled)")
 print(ds_total)
-#ds_total["CO2"] = ds_total["CO2"].cumsum(dim="year")
-
-ds_total["SUL"].attrs["units"] = "Gt SO2 (cumulative)"
-ds_total["SUL"].attrs["long_name"] = "Cumulative SO2 emissions per grid point"
-
-print(f"  Global cumulative at last timestep: {float(ds_total['SUL'].isel(year=-1).sum()):.4f} Gt SUL")
+#ds_total[OUT_VAR] = ds_total[OUT_VAR].cumsum(dim="year")
 
 # ── 8. Save ─────────────────────────────────────────────────────────────────
 # Drop any leftover cftime-based variables (time_bnds, etc.) that cause serialization errors
@@ -202,7 +216,11 @@ if drop_vars:
 #ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-out_path = os.path.join(OUTPUT_DIR, "SO2_cumulative_Gt_per_gridpoint_"+exp+".nc")
+# SO2 keeps its legacy filename; BC writes BC_per_gridpoint_<exp>.nc.
+if SPECIES == "SO2":
+    out_path = os.path.join(OUTPUT_DIR, "SO2_cumulative_Gt_per_gridpoint_" + exp + ".nc")
+else:
+    out_path = os.path.join(OUTPUT_DIR, "BC_per_gridpoint_" + exp + ".nc")
 print(ds_total)
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")

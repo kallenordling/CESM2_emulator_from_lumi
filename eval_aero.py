@@ -190,8 +190,8 @@ N_ENSEMBLE     = 5            # diffusion samples per experiment (ensemble-MEAN 
                              # N=1 gave a single noisy realization → large random
                              # patcorr/GMbias swings between checkpoints (aaer 0.08↔0.80,
                              # ssp370 +0.42↔+0.89) that swamped real A/B effects.
-COND_VARS      = ["CO2", "SUL"]
-TARGET_VAR     = "TREFHT"
+COND_VARS      = ["CO2", "SUL"]   # overridden from config_data.yaml cond_vars in main()
+TARGET_VAR     = "TREFHT"          # overridden from --target-var in main()
 LAT  = None   # set from first conditioning file in main()
 LON  = None   # set from first conditioning file in main()
 
@@ -201,6 +201,7 @@ NULL_COND = -1.0   # CFG null value (pre-industrial baseline under normalisation
 # Set both to 1.0 to disable and use direct conditioning (original behaviour).
 GUIDANCE_CO2 = 1.0
 GUIDANCE_SUL = 1.0
+GUIDANCE_BC  = 1.0   # 3rd cond channel (BC); 1.0 = direct conditioning (no anti-guidance)
 
 # Time windows for spatial IG maps, keyed by experiment name
 IG_WINDOWS = {
@@ -357,27 +358,37 @@ def generate_timeseries(
     seed: int | None = None,
     guidance_co2: float = 1.0,
     guidance_sul: float = 1.0,
+    guidance_bc: float = 1.0,
     force_cfg: bool = False,
     autocast_dtype: torch.dtype | None = None,
+    out_channels: int = 1,
+    target_channel: int = 0,
 ) -> np.ndarray:
     """Diffusion sampling for every year in cond_tensor.
 
     Args:
-        cond_tensor: (n_vars, T, H, W) normalised conditioning on CPU
+        cond_tensor: (n_cond, T, H, W) normalised conditioning on CPU
         seed: optional RNG seed for reproducible ensemble members
         guidance_co2: per-channel CFG scale for CO2 (< 1.0 = anti-guidance)
         guidance_sul: per-channel CFG scale for SUL (< 1.0 = anti-guidance)
-            formula: pred = pred_null + w_co2*(pred_co2 - pred_null)
-                                      + w_sul*(pred_sul - pred_null)
-            Both 1.0 → direct conditioning (original behaviour, 1 forward pass).
+        guidance_bc:  per-channel CFG scale for BC (only used when cond has a
+            3rd channel). formula:
+                pred = pred_null + w_co2*(pred_co2 - pred_null)
+                                 + w_sul*(pred_sul - pred_null)
+                                 + w_bc *(pred_bc  - pred_null)
+            All 1.0 → direct conditioning (original behaviour, 1 forward pass).
+        out_channels:   number of diffusion target channels the model denoises
+            jointly (TREFHT=1, TREFHT+PRECT=2).
+        target_channel: which output channel to RETURN (0=TREFHT, 1=PRECT).
     Returns:
-        numpy array (T, H, W) in *normalised* model output space
+        numpy array (T, H, W) for ``target_channel`` in *normalised* model space
     """
-    use_cfg = force_cfg or (guidance_co2 != 1.0) or (guidance_sul != 1.0)
+    use_cfg = (force_cfg or (guidance_co2 != 1.0) or (guidance_sul != 1.0)
+               or (guidance_bc != 1.0))
 
     if seed is not None:
         torch.manual_seed(seed)
-    _, T, H, W = cond_tensor.shape
+    n_cond, T, H, W = cond_tensor.shape
     scheduler.set_timesteps(sample_steps)
     steps = torch.linspace(1.0, 0.0, sample_steps + 1, device=device)
 
@@ -387,14 +398,28 @@ def generate_timeseries(
         B = chunk.shape[1]
         # model expects (B, C, 1, H, W)
         cond_b = chunk.permute(1, 0, 2, 3).unsqueeze(2).to(device=device, dtype=dtype)
-        gen    = torch.randn(B, 1, 1, H, W, device=device, dtype=dtype)
+        # Diffusion denoises ALL target channels jointly; we select target_channel
+        # for the return after sampling.
+        gen    = torch.randn(B, out_channels, 1, H, W, device=device, dtype=dtype)
 
         if use_cfg:
+            # Per-channel "only" conditionings: keep one channel, null the rest.
             cond_co2_only = cond_b.clone()
-            cond_co2_only[:, 1] = NULL_COND          # SUL nulled
+            cond_co2_only[:, 1:] = NULL_COND         # keep CO2 (ch0), null aerosols
             cond_sul_only = cond_b.clone()
             cond_sul_only[:, 0] = NULL_COND          # CO2 nulled
+            if n_cond >= 3:
+                cond_sul_only[:, 2:] = NULL_COND     # also null BC → keep only SUL
+            # Ordered list of (cond, weight) for the additive CFG decomposition.
+            cfg_conds   = [cond_co2_only, cond_sul_only]
+            cfg_weights = [guidance_co2, guidance_sul]
+            if n_cond >= 3:
+                cond_bc_only = cond_b.clone()
+                cond_bc_only[:, 0:2] = NULL_COND     # keep only BC (ch2)
+                cfg_conds.append(cond_bc_only)
+                cfg_weights.append(guidance_bc)
             cond_null = torch.full_like(cond_b, NULL_COND)
+            n_pass = len(cfg_conds) + 1              # + the null pass
 
         # Mixed-precision context: ops auto-cast to autocast_dtype where the
         # backend supports it; unsupported ones (e.g. Conv3d shapes MIOpen
@@ -409,28 +434,28 @@ def generate_timeseries(
             for step_idx, t_idx in enumerate(scheduler.timesteps):
                 t = scheduler.log_snr(steps[t_idx]).expand(B).to(dtype)
                 if use_cfg:
-                    # Batch the three CFG conditionings into ONE forward of 3*B
-                    # (concat along batch) instead of three separate launches.
-                    # The UNet has no cross-batch ops (no batchnorm / cross-batch
-                    # attention), so per-sample outputs are identical to running
-                    # the three passes separately — just one kernel launch.
-                    gen3  = gen.repeat(3, 1, 1, 1, 1)
-                    t3    = t.repeat(3)
-                    cond3 = torch.cat(
-                        [cond_co2_only, cond_sul_only, cond_null], dim=0
-                    )
-                    pred3 = model(gen3, t3, cond_map=cond3)
-                    pred_co2, pred_sul, pred_null = pred3.split(B, dim=0)
-                    pred = (pred_null
-                            + guidance_co2 * (pred_co2 - pred_null)
-                            + guidance_sul * (pred_sul - pred_null))
+                    # Batch the N CFG conditionings into ONE forward of n_pass*B
+                    # (concat along batch) instead of separate launches. The UNet
+                    # has no cross-batch ops (no batchnorm / cross-batch attention),
+                    # so per-sample outputs are identical to running the passes
+                    # separately — just one kernel launch.
+                    gen_r = gen.repeat(n_pass, 1, 1, 1, 1)
+                    t_r   = t.repeat(n_pass)
+                    cond_r = torch.cat(cfg_conds + [cond_null], dim=0)
+                    preds  = model(gen_r, t_r, cond_map=cond_r).split(B, dim=0)
+                    pred_null = preds[-1]
+                    pred = pred_null
+                    for p_only, w in zip(preds[:-1], cfg_weights):
+                        pred = pred + w * (p_only - pred_null)
                 else:
                     pred = model(gen, t, cond_map=cond_b)
                 # Scheduler step expects fp32; autocast may return bf16, so
                 # cast pred back to gen's dtype before the update.
                 gen  = scheduler.step(pred.to(gen.dtype), timestep=t_idx, sample=gen).prev_sample
 
-        results.append(gen.squeeze(1).squeeze(1).cpu().float())   # (B, H, W)
+        # Select the requested target channel; squeeze the (now leading) time dim.
+        # gen: (B, out_channels, 1, H, W) → [:, target_channel] → (B, 1, H, W).
+        results.append(gen[:, target_channel].squeeze(1).cpu().float())   # (B, H, W)
 
     return torch.cat(results, dim=0).numpy()   # (T, H, W)
 
@@ -1872,6 +1897,10 @@ def plot_saliency_per_location(name: str, sal_results: dict, out_path_prefix: st
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    # COND_VARS / TARGET_VAR are module-level defaults overridden below from
+    # config_data.yaml (cond_vars) and --target-var. Declared global up front so
+    # the argparse default reference and the later reassignment agree.
+    global COND_VARS, TARGET_VAR
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-dir",    default=RUNS_DIR)
     parser.add_argument("--checkpoint",  default=None,
@@ -1898,6 +1927,15 @@ def main():
     parser.add_argument("--guidance-sul", type=float, default=GUIDANCE_SUL,
                         help="Per-channel CFG scale for SUL (default: %(default)s). "
                              "> 1.0 amplifies aerosol cooling; enables 3-pass CFG.")
+    parser.add_argument("--guidance-bc", type=float, default=GUIDANCE_BC,
+                        help="Per-channel CFG scale for BC (default: %(default)s). "
+                             "Only applied when the model has a 3rd cond channel; "
+                             "!= 1.0 enables the 4-pass CFG decomposition.")
+    parser.add_argument("--target-var", default=TARGET_VAR,
+                        help="Which model OUTPUT channel to evaluate "
+                             "(default: %(default)s). Must be one of target_vars in "
+                             "config_data.yaml; selects the diffusion output channel "
+                             "and the matching per-channel denormalisation.")
     parser.add_argument("--force-cfg", action="store_true",
                         help="Always use the 3-pass CFG decomposition even when both "
                              "guidance scales are 1.0.  Useful to isolate the bias from "
@@ -2005,6 +2043,35 @@ def main():
     COND_SMOOTH_SIGMA = OmegaConf.to_container(_cs, resolve=True) if _cs is not None else None
     COND_SMOOTH_METHOD = data_cfg.get("cond_smooth_method", "gaussian")
     print(f"[COND] cond_smooth_sigma={COND_SMOOTH_SIGMA} method={COND_SMOOTH_METHOD}")
+
+    # ── Conditioning vars must match the model's cond_channels (CO2, SUL[, BC]) ─
+    _cv = data_cfg.get("cond_vars", None)
+    if _cv is not None:
+        COND_VARS = OmegaConf.to_container(_cv, resolve=True)
+    print(f"[COND] cond_vars={COND_VARS}")
+
+    # ── Output channel selection (TREFHT=0, PRECT=1, …) ────────────────────────
+    # The diffusion process denoises ALL target channels jointly; --target-var
+    # picks which one we evaluate + the matching per-channel denormalisation.
+    OUT_CHANNELS = int(cfg.model.get("out_channels", 1))
+    _tv = data_cfg.get("target_vars", None)
+    target_vars = OmegaConf.to_container(_tv, resolve=True) if _tv is not None else [TARGET_VAR]
+    TARGET_VAR = args.target_var
+    if TARGET_VAR not in target_vars:
+        sys.exit(f"[FATAL] --target-var {TARGET_VAR!r} not in config target_vars "
+                 f"{target_vars}")
+    TARGET_CHANNEL = target_vars.index(TARGET_VAR)
+    if TARGET_CHANNEL >= OUT_CHANNELS:
+        sys.exit(f"[FATAL] target channel {TARGET_CHANNEL} ({TARGET_VAR}) >= model "
+                 f"out_channels {OUT_CHANNELS}")
+    denorm_fn = DENORM_FN[TARGET_VAR]
+    print(f"[TARGET] var={TARGET_VAR} channel={TARGET_CHANNEL}/{OUT_CHANNELS} "
+          f"(denorm via DENORM_FN['{TARGET_VAR}'])")
+    if TARGET_VAR != "TREFHT":
+        print("[TARGET] NOTE: the NetCDF writer var-names, °C axis labels and the "
+              "TCRE machinery are TREFHT-specific; a non-TREFHT pass selects the "
+              "right channel + denorm but reuses those temperature-labelled "
+              "outputs. PRECT-specific reference data / plotting is a follow-up.")
     scheduler: ContinuousDDPM = instantiate(cfg.scheduler)
 
     # ── compute hist baseline map (H, W) for anomaly reference ─────────────
@@ -2129,10 +2196,14 @@ def main():
                 model, scheduler, cond_tensor,
                 device, dtype, args.sample_steps, args.batch_size, seed=m,
                 guidance_co2=args.guidance_co2, guidance_sul=args.guidance_sul,
+                guidance_bc=args.guidance_bc,
                 force_cfg=args.force_cfg,
                 autocast_dtype=autocast_dt,
+                out_channels=OUT_CHANNELS, target_channel=TARGET_CHANNEL,
             )
-            members.append(gen_norm * 21.0 + 4.5)   # denormalise → °C
+            # Per-channel denormalisation: TREFHT → °C (×21 +4.5), PRECT → mm/day
+            # (expm1). Identical to the old `*21+4.5` when TARGET_VAR == TREFHT.
+            members.append(denorm_fn(gen_norm))
 
         gen_ensemble = np.stack(members, axis=0)     # (N_ENS, T, H, W)
         gen_celsius  = gen_ensemble.mean(axis=0)     # (T, H, W) ensemble mean
@@ -2174,7 +2245,9 @@ def main():
 
         # -- save NetCDF ---------------------------------------------------
         if baseline_map is not None:
-            nc_out = os.path.join(args.output_dir, f"TREFHT_{name}.nc")
+            # Prefix by TARGET_VAR so a --target-var PRECT pass writes PRECT_*.nc
+            # instead of clobbering the TREFHT outputs (default stays TREFHT_*.nc).
+            nc_out = os.path.join(args.output_dir, f"{TARGET_VAR}_{name}.nc")
             print(f"  Saving NetCDF …")
             save_netcdf(
                 name             = name,
