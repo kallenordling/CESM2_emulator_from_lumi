@@ -52,6 +52,7 @@ PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
 SCRATCH     = "/scratch/project_462001328/emulator_data"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 DATA_ROOT   = os.path.join(SCRATCH, "training_data/TREFHT")
+PRECT_ROOT  = os.path.join(SCRATCH, "training_data/PRECT")
 EMIS_DIR    = SCRATCH
 CONFIG_PATH = "configs/config_aero.yaml"
 
@@ -148,6 +149,34 @@ EXPERIMENTS = [
 
 BASELINE_START = 1850
 BASELINE_END   = 1900
+
+# ── precipitation (PRECT) reference — CESM2 training trees ────────────────────
+# cmip6/ has no precip files, so the PRECT output channel is evaluated against
+# the CESM2 PRECT training trees (annual means, m/s, native f09 grid — same
+# member-dir/chunk layout as training_data/TREFHT). ssp126/ssp245 have no CESM2
+# PRECT data → model-only precip plots for those scenarios.
+# LENS2 members: a 5-member subset (loading all 30 would dominate eval I/O);
+# excludes the held-out validation member LE2-1231.001.
+_PRECT_LENS2_MEMBERS = ["LE2-1001.001", "LE2-1011.001", "LE2-1021.002",
+                        "LE2-1031.002", "LE2-1041.003"]
+PRECT_REFS = {
+    "hist":   dict(data_dir=os.path.join(PRECT_ROOT, "hist"),
+                   realizations=_PRECT_LENS2_MEMBERS, time_dim="time"),
+    "ssp370": dict(data_dir=os.path.join(PRECT_ROOT, "ssp370"),
+                   realizations=_PRECT_LENS2_MEMBERS, time_dim="time"),
+    "aaer":   dict(data_dir=os.path.join(PRECT_ROOT, "AAER"),
+                   realizations=["001", "002", "003", "004", "005",
+                                 "006", "007", "008", "009", "010"],
+                   time_dim="time"),
+    "ghg":    dict(data_dir=os.path.join(PRECT_ROOT, "GHG"),
+                   realizations=["001", "002", "003", "004", "005",
+                                 "006", "007", "008", "009", "010"],
+                   time_dim="time"),
+}
+# Precip anomaly map colour ranges (mm/day). Regional 10-yr-mean precip
+# anomalies are O(1) mm/day even under strong forcing.
+PRECIP_VMAX_ANOM = 2.0
+PRECIP_VMAX_DIFF = 1.0
 
 # ── normalized (multiplicative) bias diagnostic ──────────────────────────────
 # A bias that is a constant FRACTION of local warming peaks at the poles purely
@@ -362,7 +391,7 @@ def generate_timeseries(
     force_cfg: bool = False,
     autocast_dtype: torch.dtype | None = None,
     out_channels: int = 1,
-    target_channel: int = 0,
+    target_channel: int | None = 0,
 ) -> np.ndarray:
     """Diffusion sampling for every year in cond_tensor.
 
@@ -380,8 +409,11 @@ def generate_timeseries(
         out_channels:   number of diffusion target channels the model denoises
             jointly (TREFHT=1, TREFHT+PRECT=2).
         target_channel: which output channel to RETURN (0=TREFHT, 1=PRECT).
+            None → return ALL channels (T, C, H, W) so one sampling pass can
+            feed both the TREFHT and PRECT evaluations.
     Returns:
-        numpy array (T, H, W) for ``target_channel`` in *normalised* model space
+        numpy array (T, H, W) for ``target_channel``, or (T, C, H, W) when
+        ``target_channel is None`` — in *normalised* model space
     """
     use_cfg = (force_cfg or (guidance_co2 != 1.0) or (guidance_sul != 1.0)
                or (guidance_bc != 1.0))
@@ -455,16 +487,21 @@ def generate_timeseries(
 
         # Select the requested target channel; squeeze the (now leading) time dim.
         # gen: (B, out_channels, 1, H, W) → [:, target_channel] → (B, 1, H, W).
-        results.append(gen[:, target_channel].squeeze(1).cpu().float())   # (B, H, W)
+        if target_channel is None:
+            results.append(gen.squeeze(2).cpu().float())                  # (B, C, H, W)
+        else:
+            results.append(gen[:, target_channel].squeeze(1).cpu().float())   # (B, H, W)
 
-    return torch.cat(results, dim=0).numpy()   # (T, H, W)
+    return torch.cat(results, dim=0).numpy()   # (T, H, W) or (T, C, H, W)
 
 
 def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str,
-                              target_var: str = TARGET_VAR) -> tuple:
-    """Load CESM2 `target_var` for one realization, return (years, data_celsius array).
+                              target_var: str = TARGET_VAR,
+                              convert: str = "K_to_C") -> tuple:
+    """Load CESM2 `target_var` for one realization, return (years, data array).
 
-    data_celsius shape: (T, lat, lon)
+    data shape: (T, lat, lon), in °C (convert="K_to_C") or mm/day
+    (convert="ms_to_mmday", for PRECT stored in m/s).
 
     If `data_dir` is a direct .nc file path, it is opened as-is and `realization`
     is ignored (useful for pre-regridded single-member files).
@@ -476,8 +513,12 @@ def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str,
     ds = xr.open_mfdataset(path, combine="by_coords",
                            chunks={time_dim: 50})[target_var]
 
-    # Convert K → °C
-    ds = ds - 273.15
+    if convert == "K_to_C":
+        ds = ds - 273.15
+    elif convert == "ms_to_mmday":
+        ds = ds * 8.64e7          # m/s → mm/day (×1000 m→mm, ×86400 s→day)
+    else:
+        raise ValueError(f"unknown convert={convert!r}")
 
     # Resample to annual mean if sub-annual (monthly/daily)
     if time_dim == "time":
@@ -499,7 +540,8 @@ def load_cesm2_annual_single(data_dir: str, realization: str, time_dim: str,
 
 
 def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str,
-                         target_var: str = TARGET_VAR) -> tuple:
+                         target_var: str = TARGET_VAR,
+                         convert: str = "K_to_C") -> tuple:
     """Load CESM2 `target_var` for multiple realizations.
 
     Returns:
@@ -513,7 +555,9 @@ def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str,
         ds = xr.open_dataset(data_dir)
         if "member" in ds.dims:
             ydim = "year" if "year" in ds[target_var].dims else time_dim
-            tas = (ds[target_var] - 273.15).transpose("member", ydim, "lat", "lon")
+            scale, offset = ((1.0, -273.15) if convert == "K_to_C"
+                             else (8.64e7, 0.0))
+            tas = (ds[target_var] * scale + offset).transpose("member", ydim, "lat", "lon")
             years = extract_years(ds[ydim].values)
             arr = tas.values.astype(np.float32)              # (N, T, lat, lon)
             ds.close()
@@ -526,7 +570,8 @@ def load_cesm2_ensemble(data_dir: str, realizations: list, time_dim: str,
     common_years = None
     for real in realizations:
         try:
-            yrs, data = load_cesm2_annual_single(data_dir, real, time_dim, target_var)
+            yrs, data = load_cesm2_annual_single(data_dir, real, time_dim,
+                                                 target_var, convert)
             if common_years is None:
                 common_years = yrs
                 members.append(data)
@@ -1107,24 +1152,26 @@ def save_netcdf(
     out_path: str,
     ckpt_path: str,
     gen_baseline_map: np.ndarray | None = None,
+    var: str = "TREFHT",
+    units: str = "degC",
 ):
     """Save ensemble model output (and optionally CESM2 reference) to NetCDF.
 
-    Variables written
+    Variables written (prefix = `var`, e.g. TREFHT or PRECT; units = `units`)
     -----------------
-    TREFHT_model_mean          (year, lat, lon)  — ensemble mean [°C]
-    TREFHT_model_mean_anom     (year, lat, lon)  — ensemble mean anomaly [°C]
-    TREFHT_model_gmean_mean    (year,)           — ensemble mean global-mean [°C]
-    TREFHT_model_gmean_mean_anom (year,)         — ensemble mean global-mean anomaly [°C]
-    TREFHT_model_mN            (year, lat, lon)  — member N absolute [°C]
-    TREFHT_model_mN_anom       (year, lat, lon)  — member N anomaly [°C]
-    TREFHT_model_gmean_mN      (year,)           — member N global-mean [°C]
-    TREFHT_model_gmean_mN_anom (year,)           — member N global-mean anomaly [°C]
-    baseline_map               (lat, lon)        — 1850-1900 CESM2 climatology [°C]
-    TREFHT_model_baseline      (lat, lon)        — 1850-1900 model climatology [°C]
+    {var}_model_mean          (year, lat, lon)  — ensemble mean
+    {var}_model_mean_anom     (year, lat, lon)  — ensemble mean anomaly
+    {var}_model_gmean_mean    (year,)           — ensemble mean global-mean
+    {var}_model_gmean_mean_anom (year,)         — ensemble mean global-mean anomaly
+    {var}_model_mN            (year, lat, lon)  — member N absolute
+    {var}_model_mN_anom       (year, lat, lon)  — member N anomaly
+    {var}_model_gmean_mN      (year,)           — member N global-mean
+    {var}_model_gmean_mN_anom (year,)           — member N global-mean anomaly
+    baseline_map              (lat, lon)        — 1850-1900 CESM2 climatology
+    {var}_model_baseline      (lat, lon)        — 1850-1900 model climatology
 
     If cesm_data is provided, also writes:
-    TREFHT_cesm / _anom / _gmean / _gmean_anom
+    {var}_cesm / _anom / _gmean / _gmean_anom
     """
     N_ENS = gen_ensemble.shape[0]
     gen_mean = gen_ensemble.mean(axis=0)           # (T, H, W) ensemble mean
@@ -1140,21 +1187,21 @@ def save_netcdf(
 
     ds = xr.Dataset(
         {
-            "TREFHT_model_mean": xr.DataArray(
+            f"{var}_model_mean": xr.DataArray(
                 gen_mean, dims=["year", "lat", "lon"], coords=coords_model,
-                attrs={"units": "degC", "long_name": f"Ensemble mean model TREFHT (N={N_ENS})"}),
-            "TREFHT_model_mean_anom": xr.DataArray(
+                attrs={"units": units, "long_name": f"Ensemble mean model {var} (N={N_ENS})"}),
+            f"{var}_model_mean_anom": xr.DataArray(
                 anom_mean, dims=["year", "lat", "lon"], coords=coords_model,
-                attrs={"units": "degC", "long_name": "Ensemble mean TREFHT anomaly re 1850-1900"}),
-            "TREFHT_model_gmean_mean": xr.DataArray(
+                attrs={"units": units, "long_name": f"Ensemble mean {var} anomaly re 1850-1900"}),
+            f"{var}_model_gmean_mean": xr.DataArray(
                 gmean_mean, dims=["year"], coords={"year": gen_years},
-                attrs={"units": "degC", "long_name": "Ensemble mean global-mean TREFHT"}),
-            "TREFHT_model_gmean_mean_anom": xr.DataArray(
+                attrs={"units": units, "long_name": f"Ensemble mean global-mean {var}"}),
+            f"{var}_model_gmean_mean_anom": xr.DataArray(
                 gmean_mean_anom, dims=["year"], coords={"year": gen_years},
-                attrs={"units": "degC", "long_name": "Ensemble mean global-mean TREFHT anomaly re 1850-1900"}),
+                attrs={"units": units, "long_name": f"Ensemble mean global-mean {var} anomaly re 1850-1900"}),
             "baseline_map": xr.DataArray(
                 baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
-                attrs={"units": "degC", "long_name": "1850-1900 climatological mean (CESM2)"}),
+                attrs={"units": units, "long_name": "1850-1900 climatological mean (CESM2)"}),
         },
         attrs={
             "experiment":        name,
@@ -1172,23 +1219,23 @@ def save_netcdf(
         gmean_m     = (mem * w).mean(axis=(-2, -1))
         gmean_m_anom = gmean_m - bl_scalar
         tag = f"m{m + 1}"
-        ds[f"TREFHT_model_{tag}"] = xr.DataArray(
+        ds[f"{var}_model_{tag}"] = xr.DataArray(
             mem, dims=["year", "lat", "lon"], coords=coords_model,
-            attrs={"units": "degC", "long_name": f"Model TREFHT member {m + 1}"})
-        ds[f"TREFHT_model_{tag}_anom"] = xr.DataArray(
+            attrs={"units": units, "long_name": f"Model {var} member {m + 1}"})
+        ds[f"{var}_model_{tag}_anom"] = xr.DataArray(
             anom_m, dims=["year", "lat", "lon"], coords=coords_model,
-            attrs={"units": "degC", "long_name": f"Model TREFHT anomaly member {m + 1}"})
-        ds[f"TREFHT_model_gmean_{tag}"] = xr.DataArray(
+            attrs={"units": units, "long_name": f"Model {var} anomaly member {m + 1}"})
+        ds[f"{var}_model_gmean_{tag}"] = xr.DataArray(
             gmean_m, dims=["year"], coords={"year": gen_years},
-            attrs={"units": "degC", "long_name": f"Global-mean TREFHT member {m + 1}"})
-        ds[f"TREFHT_model_gmean_{tag}_anom"] = xr.DataArray(
+            attrs={"units": units, "long_name": f"Global-mean {var} member {m + 1}"})
+        ds[f"{var}_model_gmean_{tag}_anom"] = xr.DataArray(
             gmean_m_anom, dims=["year"], coords={"year": gen_years},
-            attrs={"units": "degC", "long_name": f"Global-mean TREFHT anomaly member {m + 1}"})
+            attrs={"units": units, "long_name": f"Global-mean {var} anomaly member {m + 1}"})
 
     if gen_baseline_map is not None:
-        ds["TREFHT_model_baseline"] = xr.DataArray(
+        ds[f"{var}_model_baseline"] = xr.DataArray(
             gen_baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
-            attrs={"units": "degC",
+            attrs={"units": units,
                    "long_name": f"Model {BASELINE_START}-{BASELINE_END} climatological mean"})
 
     if cesm_ensemble is not None and cesm_years is not None:
@@ -1198,18 +1245,18 @@ def save_netcdf(
         gmean_cesm      = (cesm_data * w).mean(axis=(-2, -1))
         anom_cesm       = cesm_data - baseline_map
         gmean_cesm_anom = gmean_cesm - bl_scalar
-        ds["TREFHT_cesm_mean"] = xr.DataArray(
+        ds[f"{var}_cesm_mean"] = xr.DataArray(
             cesm_data, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-            attrs={"units": "degC", "long_name": f"CESM2 TREFHT ensemble mean (N={N_CESM})"})
-        ds["TREFHT_cesm_mean_anom"] = xr.DataArray(
+            attrs={"units": units, "long_name": f"CESM2 {var} ensemble mean (N={N_CESM})"})
+        ds[f"{var}_cesm_mean_anom"] = xr.DataArray(
             anom_cesm, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-            attrs={"units": "degC", "long_name": "CESM2 ensemble mean TREFHT anomaly re 1850-1900"})
-        ds["TREFHT_cesm_gmean_mean"] = xr.DataArray(
+            attrs={"units": units, "long_name": f"CESM2 ensemble mean {var} anomaly re 1850-1900"})
+        ds[f"{var}_cesm_gmean_mean"] = xr.DataArray(
             gmean_cesm, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-            attrs={"units": "degC", "long_name": "CESM2 ensemble mean global-mean TREFHT"})
-        ds["TREFHT_cesm_gmean_mean_anom"] = xr.DataArray(
+            attrs={"units": units, "long_name": f"CESM2 ensemble mean global-mean {var}"})
+        ds[f"{var}_cesm_gmean_mean_anom"] = xr.DataArray(
             gmean_cesm_anom, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-            attrs={"units": "degC", "long_name": "CESM2 ensemble mean global-mean TREFHT anomaly re 1850-1900"})
+            attrs={"units": units, "long_name": f"CESM2 ensemble mean global-mean {var} anomaly re 1850-1900"})
         # per-member CESM2 variables
         for m in range(N_CESM):
             mem = cesm_ensemble[m]
@@ -1217,18 +1264,18 @@ def save_netcdf(
             gmean_m = (mem * w).mean(axis=(-2, -1))
             gmean_m_anom = gmean_m - bl_scalar
             tag = f"m{m + 1}"
-            ds[f"TREFHT_cesm_{tag}"] = xr.DataArray(
+            ds[f"{var}_cesm_{tag}"] = xr.DataArray(
                 mem, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-                attrs={"units": "degC", "long_name": f"CESM2 TREFHT member {m + 1}"})
-            ds[f"TREFHT_cesm_{tag}_anom"] = xr.DataArray(
+                attrs={"units": units, "long_name": f"CESM2 {var} member {m + 1}"})
+            ds[f"{var}_cesm_{tag}_anom"] = xr.DataArray(
                 anom_m, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-                attrs={"units": "degC", "long_name": f"CESM2 TREFHT anomaly member {m + 1}"})
-            ds[f"TREFHT_cesm_gmean_{tag}"] = xr.DataArray(
+                attrs={"units": units, "long_name": f"CESM2 {var} anomaly member {m + 1}"})
+            ds[f"{var}_cesm_gmean_{tag}"] = xr.DataArray(
                 gmean_m, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-                attrs={"units": "degC", "long_name": f"CESM2 global-mean TREFHT member {m + 1}"})
-            ds[f"TREFHT_cesm_gmean_{tag}_anom"] = xr.DataArray(
+                attrs={"units": units, "long_name": f"CESM2 global-mean {var} member {m + 1}"})
+            ds[f"{var}_cesm_gmean_{tag}_anom"] = xr.DataArray(
                 gmean_m_anom, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-                attrs={"units": "degC", "long_name": f"CESM2 global-mean TREFHT anomaly member {m + 1}"})
+                attrs={"units": units, "long_name": f"CESM2 global-mean {var} anomaly member {m + 1}"})
 
     ds.to_netcdf(out_path)
     print(f"  → saved {out_path}")
@@ -1278,11 +1325,17 @@ def load_mmm_anomaly(scenario: str):
         return None
 
 
-def plot_timeseries(results: dict, out_path: str):
+def plot_timeseries(results: dict, out_path: str,
+                    var: str = "TREFHT", units: str = "°C",
+                    title_word: str = "temperature",
+                    include_mmm: bool = True):
     """results[name] = dict(gen_anom, cesm_anom, gen_years, cesm_years, color)
 
     Top panel : anomaly time series — model (solid) vs CESM2 member (dashed)
     Bottom panel : bias = model − CESM2 on common years
+
+    var/units/title_word label the axes; include_mmm draws the CMIP6
+    multimodel-mean overlay (tas-only — disable for precip).
     """
     fig, (ax_top, ax_bot) = plt.subplots(
         2, 1, figsize=(12, 8), sharex=True,
@@ -1309,7 +1362,7 @@ def plot_timeseries(results: dict, out_path: str):
                         label=f"{name} (model mean ± spread, N={N_gen})")
 
         # CMIP6 multimodel-mean reference (dotted, scenario colour)
-        mmm = load_mmm_anomaly(name)
+        mmm = load_mmm_anomaly(name) if include_mmm else None
         if mmm is not None:
             my, ma = mmm
             ax_top.plot(my, ma, color=c, lw=1.3, ls=":", alpha=0.9,
@@ -1363,9 +1416,9 @@ def plot_timeseries(results: dict, out_path: str):
     ax_top.axhline(0, color="k", lw=0.6, ls=":")
     ax_top.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12, label="baseline period")
     ax_top.set_xlabel("")
-    ax_top.set_ylabel("TREFHT anomaly (°C)")
+    ax_top.set_ylabel(f"{var} anomaly ({units})")
     ax_top.set_title(
-        f"Global-mean temperature anomaly vs 1850–1900  "
+        f"Global-mean {title_word} anomaly vs 1850–1900  "
         f"(model solid, CESM2 dashed — {n_gen_label}-member ensemble)"
     )
     ax_top.legend(fontsize=8, ncol=2)
@@ -1374,7 +1427,7 @@ def plot_timeseries(results: dict, out_path: str):
     ax_bot.axhline(0, color="k", lw=0.9)
     ax_bot.axvspan(BASELINE_START, BASELINE_END, color="grey", alpha=0.12)
     ax_bot.set_xlabel("Year")
-    ax_bot.set_ylabel("Bias: model − CESM2 (°C)")
+    ax_bot.set_ylabel(f"Bias: model − CESM2 ({units})")
     ax_bot.set_title(
         "Model bias relative to CESM2 ensemble mean"
         + (" (shaded = model min/max spread)" if n_gen_label > 1 else "")
@@ -1388,10 +1441,11 @@ def plot_timeseries(results: dict, out_path: str):
     print(f"  → saved {out_path}")
 
 
-def save_csv(results: dict, out_path: str):
+def save_csv(results: dict, out_path: str, unit_tag: str = "degC"):
     """Save global-mean anomaly and bias to a CSV file.
 
-    Columns: experiment, year, model_anom_degC, cesm_anom_degC, bias_degC
+    Columns: experiment, year, model_anom_<unit_tag>, cesm_anom_<unit_tag>,
+    bias_<unit_tag> (unit_tag: degC for TREFHT, mmday for PRECT).
     bias = model_anom - cesm_anom on common years; NaN where CESM2 unavailable.
     """
     import csv
@@ -1419,28 +1473,30 @@ def save_csv(results: dict, out_path: str):
             rows.append({
                 "experiment":     name,
                 "year":           yr,
-                "model_anom_degC": round(model_anom, 4),
-                "cesm_anom_degC":  round(cesm_anom, 4) if not np.isnan(cesm_anom) else "",
-                "bias_degC":       round(bias, 4)       if not np.isnan(bias)      else "",
+                f"model_anom_{unit_tag}": round(model_anom, 4),
+                f"cesm_anom_{unit_tag}":  round(cesm_anom, 4) if not np.isnan(cesm_anom) else "",
+                f"bias_{unit_tag}":       round(bias, 4)       if not np.isnan(bias)      else "",
             })
 
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["experiment", "year", "model_anom_degC",
-                           "cesm_anom_degC", "bias_degC"]
+            f, fieldnames=["experiment", "year", f"model_anom_{unit_tag}",
+                           f"cesm_anom_{unit_tag}", f"bias_{unit_tag}"]
         )
         writer.writeheader()
         writer.writerows(rows)
     print(f"  → saved {out_path}")
 
 
-def save_decadal_csv(results: dict, out_path: str):
+def save_decadal_csv(results: dict, out_path: str, unit_tag: str = "degC",
+                     include_mmm: bool = True):
     """Decadal means of the global-mean anomaly per experiment.
 
-    Columns: experiment, decade, model_anom_degC, cesm_anom_degC, bias_degC,
-             mmm_anom_degC, n_years.
+    Columns: experiment, decade, model_anom_<unit_tag>, cesm_anom_<unit_tag>,
+             bias_<unit_tag>, mmm_anom_<unit_tag>, n_years.
     `decade` is the start year (e.g. 2050 = mean over 2050-2059); edge decades
     may be partial — `n_years` gives the count averaged. bias = model - cesm.
+    include_mmm: CMIP6 multimodel-mean column (tas-only — disable for precip).
     """
     import csv
     from collections import defaultdict
@@ -1458,7 +1514,7 @@ def save_decadal_csv(results: dict, out_path: str):
                            for yr, i in zip(common, idx_cs)}
 
         mmm_lookup = {}
-        mmm = load_mmm_anomaly(name)
+        mmm = load_mmm_anomaly(name) if include_mmm else None
         if mmm is not None:
             mmm_lookup = {int(y): float(a) for y, a in zip(mmm[0], mmm[1])}
 
@@ -1481,17 +1537,18 @@ def save_decadal_csv(results: dict, out_path: str):
             rows.append({
                 "experiment":      name,
                 "decade":          dec,
-                "model_anom_degC": round(m, 4),
-                "cesm_anom_degC":  round(c, 4)    if not np.isnan(c)    else "",
-                "bias_degC":       round(bias, 4) if not np.isnan(bias) else "",
-                "mmm_anom_degC":   round(mm, 4)   if not np.isnan(mm)   else "",
+                f"model_anom_{unit_tag}": round(m, 4),
+                f"cesm_anom_{unit_tag}":  round(c, 4)    if not np.isnan(c)    else "",
+                f"bias_{unit_tag}":       round(bias, 4) if not np.isnan(bias) else "",
+                f"mmm_anom_{unit_tag}":   round(mm, 4)   if not np.isnan(mm)   else "",
                 "n_years":         len(a["m"]),
             })
 
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["experiment", "decade", "model_anom_degC",
-                           "cesm_anom_degC", "bias_degC", "mmm_anom_degC", "n_years"]
+            f, fieldnames=["experiment", "decade", f"model_anom_{unit_tag}",
+                           f"cesm_anom_{unit_tag}", f"bias_{unit_tag}",
+                           f"mmm_anom_{unit_tag}", "n_years"]
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -1572,13 +1629,24 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                       cesm_data: np.ndarray | None, cesm_years: np.ndarray | None,
                       out_path: str,
                       gen_ensemble: np.ndarray | None = None,
-                      cesm_ensemble: np.ndarray | None = None):
+                      cesm_ensemble: np.ndarray | None = None,
+                      var: str = "TREFHT",
+                      units: str = "°C",
+                      cmap=None,
+                      vmax_anom: float = 4.0,
+                      vmax_diff: float = 2.0,
+                      do_norm_bias: bool = True):
     """Spatial anomaly maps at requested years.
 
-    gen_data    : (T, H, W)       generated temperature ensemble mean [°C]
+    gen_data    : (T, H, W)       generated field ensemble mean [`units`]
     baseline_map: (H, W)          time-mean over 1850-1900 from hist
     gen_ensemble : (N, T, H, W)   individual model members (optional)
     cesm_ensemble: (M, T, H, W)   individual CESM2 members (optional)
+    var/units/cmap/vmax_*         : field label, unit label, colormap and
+                                    symmetric colour ranges (TREFHT defaults;
+                                    PRECT uses BrBG + mm/day ranges)
+    do_norm_bias : the normalized multiplicative-bias diagnostic only makes
+                   sense for warming fields — disabled for precip
 
     Rows:
       0 — Model anomaly  (re 1850-1900)
@@ -1602,9 +1670,8 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
         squeeze=False,
     )
 
-    vmax_anom = 4.0
-    vmax_diff = 2.0
-    cmap = plt.cm.RdBu_r
+    if cmap is None:
+        cmap = plt.cm.RdBu_r
     norm_anom = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_anom, vmax=vmax_anom)
     norm_diff = mcolors.TwoSlopeNorm(vcenter=0, vmin=-vmax_diff, vmax=vmax_diff)
 
@@ -1613,13 +1680,13 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
         da = xr.DataArray(
             data_cyc, dims=["lat", "lon"],
             coords={"lat": LAT, "lon": lon_cyc},
-            attrs={"units": "°C"},
+            attrs={"units": units},
         )
         da.plot.pcolormesh(
             ax=ax, cmap=cmap, norm=norm,
             transform=ccrs.PlateCarree(),
             add_colorbar=True,
-            cbar_kwargs={"label": "°C", "shrink": 0.75},
+            cbar_kwargs={"label": units, "shrink": 0.75},
         )
         ax.add_feature(cfeature.COASTLINE, lw=0.5)
         ax.add_feature(cfeature.BORDERS, lw=0.3, linestyle=":")
@@ -1630,7 +1697,7 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
         ax.set_title(title, fontsize=9)
         # Global mean annotation in bottom-right corner
         gmean = float(area_weighted_gmean(data[np.newaxis], LAT)[0])
-        ax.text(0.98, 0.03, f"GM: {gmean:+.2f}°C",
+        ax.text(0.98, 0.03, f"GM: {gmean:+.2f}{units}",
                 transform=ax.transAxes, fontsize=7.5, ha="right", va="bottom",
                 bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7, ec="none"))
 
@@ -1675,7 +1742,7 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     for row, label in enumerate(row_labels):
         axes[row, 0].set_ylabel(label, fontsize=10)
 
-    fig.suptitle(f"TREFHT anomaly vs 1850–1900 — {name} (10-yr mean centered on target)", fontsize=12)
+    fig.suptitle(f"{var} anomaly vs 1850–1900 — {name} (10-yr mean centered on target)", fontsize=12)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -1687,7 +1754,7 @@ def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
     # on the LATEST window (the late-period warming where multiplicative
     # over-sensitivity is largest and the ratio is best conditioned).
     norm_scalars = None
-    if has_cesm:
+    if has_cesm and do_norm_bias:
         try:
             fig_n, axes_n = plt.subplots(
                 1, n_cols,
@@ -1936,6 +2003,11 @@ def main():
                              "(default: %(default)s). Must be one of target_vars in "
                              "config_data.yaml; selects the diffusion output channel "
                              "and the matching per-channel denormalisation.")
+    parser.add_argument("--skip-precip", action="store_true",
+                        help="Skip the PRECT side-evaluation (PRECT_*.nc, "
+                             "anomaly_maps_prect_*, global_mean_anomaly_precip.*) "
+                             "that otherwise runs automatically when the model "
+                             "has a PRECT output channel.")
     parser.add_argument("--force-cfg", action="store_true",
                         help="Always use the 3-pass CFG decomposition even when both "
                              "guidance scales are 1.0.  Useful to isolate the bias from "
@@ -2068,15 +2140,26 @@ def main():
     print(f"[TARGET] var={TARGET_VAR} channel={TARGET_CHANNEL}/{OUT_CHANNELS} "
           f"(denorm via DENORM_FN['{TARGET_VAR}'])")
     if TARGET_VAR != "TREFHT":
-        # No precip reference exists in cmip6/ yet, so every comparison this
-        # script makes (tas baseline_map, anomaly vs temperature refs, TCRE,
-        # pattern correlation) would silently produce temperature-labelled
-        # garbage for a PRECT pass. Fail loud until a PRECT reference + precip
-        # metrics land; the channel-select/denorm plumbing below already works.
-        sys.exit(f"[FATAL] --target-var {TARGET_VAR!r}: eval references/metrics "
-                 f"are TREFHT-only (cmip6/ has no PRECT files; baseline/anomaly/"
-                 f"TCRE would mix mm/day with °C). Add a PRECT reference and "
-                 f"precip metrics before evaluating this channel.")
+        # The TREFHT-anchored metrics (tas baseline_map, TCRE, normalized bias)
+        # would silently produce temperature-labelled garbage for a PRECT-led
+        # pass. PRECT is instead evaluated ALONGSIDE the default TREFHT pass
+        # (same sampling; separate PRECT_*.nc / anomaly_maps_prect_* /
+        # global_mean_anomaly_precip outputs) — just run without --target-var.
+        sys.exit(f"[FATAL] --target-var {TARGET_VAR!r}: the primary eval pass "
+                 f"is TREFHT-anchored. Precip is evaluated automatically in "
+                 f"the default pass when the model has a PRECT channel "
+                 f"(disable with --skip-precip).")
+
+    # ── precipitation channel: evaluated alongside TREFHT from the SAME
+    # sampling pass (the diffusion denoises all channels jointly, so keeping
+    # the PRECT channel is free). Reference = CESM2 PRECT training trees
+    # (PRECT_REFS); ssp126/ssp245 have none → model-only precip plots.
+    EVAL_PRECIP = (not args.skip_precip and "PRECT" in target_vars
+                   and target_vars.index("PRECT") < OUT_CHANNELS
+                   and target_vars.index("PRECT") != TARGET_CHANNEL)
+    PRECT_CHANNEL = target_vars.index("PRECT") if EVAL_PRECIP else None
+    print(f"[PRECIP] eval_precip={EVAL_PRECIP}"
+          + (f" (channel {PRECT_CHANNEL})" if EVAL_PRECIP else ""))
     scheduler: ContinuousDDPM = instantiate(cfg.scheduler)
 
     # ── compute hist baseline map (H, W) for anomaly reference ─────────────
@@ -2096,6 +2179,25 @@ def main():
         print(f"  WARNING: could not load CESM2 hist data ({exc})")
         print("  Will use model-generated hist 1850–1900 mean as baseline instead.")
         baseline_map = None   # computed later from generated hist
+
+    # ── precip baseline map (mm/day) from the CESM2 PRECT hist tree ─────────
+    precip_baseline_map = None
+    if EVAL_PRECIP:
+        print("\n[BASELINE] Loading hist CESM2 PRECT ensemble for 1850–1900 mean …")
+        pref = PRECT_REFS["hist"]
+        try:
+            pr_yrs, pr_ens = load_cesm2_ensemble(
+                pref["data_dir"], pref["realizations"], pref["time_dim"],
+                "PRECT", convert="ms_to_mmday",
+            )
+            pr_mask = (pr_yrs >= BASELINE_START) & (pr_yrs <= BASELINE_END)
+            precip_baseline_map = pr_ens.mean(axis=0)[pr_mask].mean(axis=0)  # (H, W)
+            print(f"  precip baseline map  mean={precip_baseline_map.mean():.3f} mm/day"
+                  f"  (from {pr_ens.shape[0]} members)")
+            del pr_ens
+        except Exception as exc:
+            print(f"  WARNING: could not load CESM2 PRECT hist data ({exc})")
+            print("  Will use model-generated hist 1850–1900 precip mean instead.")
 
     # ── loop over experiments ───────────────────────────────────────────────
     timeseries_results = {}
@@ -2195,6 +2297,7 @@ def main():
               f"({len(cond_years)} years each, "
               f"batch={args.batch_size}, steps={args.sample_steps}) …")
         members = []
+        members_pr = []
         for m in range(args.members):
             print(f"    member {m + 1}/{args.members} …")
             gen_norm = generate_timeseries(
@@ -2204,11 +2307,17 @@ def main():
                 guidance_bc=args.guidance_bc,
                 force_cfg=args.force_cfg,
                 autocast_dtype=autocast_dt,
-                out_channels=OUT_CHANNELS, target_channel=TARGET_CHANNEL,
+                out_channels=OUT_CHANNELS,
+                # keep ALL channels when the PRECT side-eval rides this pass
+                target_channel=None if EVAL_PRECIP else TARGET_CHANNEL,
             )
             # Per-channel denormalisation: TREFHT → °C (×21 +4.5), PRECT → mm/day
             # (expm1). Identical to the old `*21+4.5` when TARGET_VAR == TREFHT.
-            members.append(denorm_fn(gen_norm))
+            if EVAL_PRECIP:
+                members.append(denorm_fn(gen_norm[:, TARGET_CHANNEL]))
+                members_pr.append(DENORM_FN["PRECT"](gen_norm[:, PRECT_CHANNEL]))
+            else:
+                members.append(denorm_fn(gen_norm))
 
         gen_ensemble = np.stack(members, axis=0)     # (N_ENS, T, H, W)
         gen_celsius  = gen_ensemble.mean(axis=0)     # (T, H, W) ensemble mean
@@ -2310,6 +2419,106 @@ def main():
             cesm_anom     = cesm_anom_ens.mean(axis=0)   # ensemble mean
             cesm_years_out = cesm_years_exp
 
+        # -- precipitation channel: separate PRECT nc + maps + timeseries ----
+        # Mirrors the TREFHT flow above in mm/day. Reference = CESM2 PRECT
+        # training trees (PRECT_REFS); scenarios without one (ssp126/ssp245)
+        # get model-only panels, like TREFHT does when its reference fails.
+        precip_entry = None
+        if EVAL_PRECIP:
+            gen_ens_pr = np.stack(members_pr, axis=0)    # (N_ENS, T, H, W)
+            gen_pr     = gen_ens_pr.mean(axis=0)         # (T, H, W)
+
+            gen_baseline_pr = gen_pr[mask_bl].mean(axis=0) if mask_bl.any() else None
+            if precip_baseline_map is None and name == "hist" \
+                    and gen_baseline_pr is not None:
+                precip_baseline_map = gen_baseline_pr
+                print(f"  [PRECIP BASELINE set from model hist]  "
+                      f"mean={precip_baseline_map.mean():.3f} mm/day")
+
+            cesm_years_pr, cesm_ens_pr, cesm_pr = None, None, None
+            pref = PRECT_REFS.get(name)
+            if pref is not None:
+                try:
+                    cesm_years_pr, cesm_ens_pr = load_cesm2_ensemble(
+                        pref["data_dir"], pref["realizations"], pref["time_dim"],
+                        "PRECT", convert="ms_to_mmday",
+                    )
+                    cesm_pr = cesm_ens_pr.mean(axis=0)   # (T, H, W)
+                    print(f"  CESM2 PRECT: {cesm_years_pr[0]}–{cesm_years_pr[-1]}"
+                          f"  ({cesm_ens_pr.shape[0]} members)")
+                except Exception as e:
+                    print(f"  [WARN] CESM2 PRECT NOT loaded for {name!r} "
+                          f"(data_dir={pref['data_dir']}): {type(e).__name__}: {e}")
+            else:
+                print(f"  [PRECIP] no CESM2 PRECT reference for {name!r} "
+                      f"— model-only precip plots")
+
+            if precip_baseline_map is not None:
+                nc_out_pr = os.path.join(args.output_dir, f"PRECT_{name}.nc")
+                print(f"  Saving PRECT NetCDF …")
+                save_netcdf(
+                    name             = name,
+                    gen_ensemble     = gen_ens_pr,
+                    gen_years        = cond_years,
+                    baseline_map     = precip_baseline_map,
+                    cesm_ensemble    = cesm_ens_pr,
+                    cesm_years       = cesm_years_pr,
+                    out_path         = nc_out_pr,
+                    ckpt_path        = ckpt_path,
+                    gen_baseline_map = gen_baseline_pr,
+                    var              = "PRECT",
+                    units            = "mm/day",
+                )
+
+                map_out_pr = os.path.join(args.output_dir,
+                                          f"anomaly_maps_prect_{name}.png")
+                print(f"  Plotting PRECT anomaly maps …")
+                plot_anomaly_maps(
+                    name         = name,
+                    gen_data     = gen_pr,
+                    gen_years    = cond_years,
+                    baseline_map = precip_baseline_map,
+                    map_years    = exp["map_years"],
+                    cesm_data    = cesm_pr,
+                    cesm_years   = cesm_years_pr,
+                    out_path     = map_out_pr,
+                    gen_ensemble = gen_ens_pr,
+                    cesm_ensemble= cesm_ens_pr,
+                    var          = "PRECT",
+                    units        = "mm/day",
+                    cmap         = plt.cm.BrBG,   # brown=drying, green=wetting
+                    vmax_anom    = PRECIP_VMAX_ANOM,
+                    vmax_diff    = PRECIP_VMAX_DIFF,
+                    do_norm_bias = False,
+                )
+
+                bl_scalar_pr = float(area_weighted_gmean(
+                    precip_baseline_map[np.newaxis], LAT)[0])
+                gen_anom_ens_pr = np.stack(
+                    [area_weighted_gmean(gen_ens_pr[m], LAT) - bl_scalar_pr
+                     for m in range(gen_ens_pr.shape[0])],
+                    axis=0,
+                )
+                cesm_anom_ens_pr = cesm_anom_pr = None
+                if cesm_ens_pr is not None:
+                    cesm_anom_ens_pr = np.stack(
+                        [area_weighted_gmean(cesm_ens_pr[m], LAT) - bl_scalar_pr
+                         for m in range(cesm_ens_pr.shape[0])],
+                        axis=0,
+                    )
+                    cesm_anom_pr = cesm_anom_ens_pr.mean(axis=0)
+                # nested under the experiment entry → travels through the
+                # shard pickle merge for free (same trick as norm_bias)
+                precip_entry = dict(
+                    gen_anom_ens  = gen_anom_ens_pr,
+                    gen_years     = cond_years,
+                    cesm_anom_ens = cesm_anom_ens_pr,
+                    cesm_anom     = cesm_anom_pr,
+                    cesm_years    = cesm_years_pr,
+                    color         = exp["color"],
+                )
+            del gen_ens_pr, gen_pr, cesm_ens_pr, cesm_pr
+
         # -- spatial IG attribution maps (per output location) ----------------
         if not args.skip_ig and name in IG_WINDOWS:
             print(f"  Computing per-location IG maps "
@@ -2402,6 +2611,8 @@ def main():
             ref_years     = ref_years_out,
             norm_bias     = norm_bias_scalars,   # ADDITIVE: travels through the
                                                  # shard pickle merge for free
+            precip        = precip_entry,        # PRECT side-eval (None if off /
+                                                 # no baseline)
         )
 
     # ── combined time series plot ──────────────────────────────────────────
@@ -2479,6 +2690,23 @@ def main():
             dec_out = os.path.join(args.output_dir, "global_mean_anomaly_decadal.csv")
             print(f"[CSV]  Decadal means → {dec_out}")
             save_decadal_csv(timeseries_results, dec_out)
+
+            # ── precip: separate combined timeseries + CSVs (mm/day) ────────
+            pr_results = {n: d["precip"] for n, d in timeseries_results.items()
+                          if isinstance(d, dict) and d.get("precip") is not None}
+            if pr_results:
+                ts_pr  = os.path.join(args.output_dir, "global_mean_anomaly_precip.png")
+                csv_pr = os.path.join(args.output_dir, "global_mean_anomaly_precip.csv")
+                dec_pr = os.path.join(args.output_dir,
+                                      "global_mean_anomaly_precip_decadal.csv")
+                print(f"[PLOT] Precip time series → {ts_pr}")
+                plot_timeseries(pr_results, ts_pr, var="PRECT", units="mm/day",
+                                title_word="precipitation", include_mmm=False)
+                print(f"[CSV]  Precip global anomaly + bias → {csv_pr}")
+                save_csv(pr_results, csv_pr, unit_tag="mmday")
+                print(f"[CSV]  Precip decadal means → {dec_pr}")
+                save_decadal_csv(pr_results, dec_pr, unit_tag="mmday",
+                                 include_mmm=False)
 
             # TCRE + normalized-bias need hist + projections → full runs only.
             if not args.experiments:
