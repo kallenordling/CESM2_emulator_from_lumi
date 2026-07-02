@@ -1303,6 +1303,17 @@ class UNetTrainer:
                     # BC (ch 2): same joint_mask (hist+ssp370) as CO2/SUL — aaer has
                     # constant CO2 and ghg has constant aerosols, so dropping BC
                     # there teaches nothing. BC varies in hist/ssp370 → correct set.
+                    if cond_map_input.shape[1] < 3:
+                        raise ValueError(
+                            f"cfg_bc_drop_prob={self.cfg_bc_drop_prob} expects a BC "
+                            f"cond channel (index 2) but the batch has only "
+                            f"{cond_map_input.shape[1]} cond channels — the data "
+                            f"config (cond_vars) and config_aero.yaml disagree. "
+                            f"Launching a BC-era model with a pre-BC 2-channel "
+                            f"data_config override (e.g. config_data_ybias.yaml) "
+                            f"does this; drop the override or set "
+                            f"cfg_bc_drop_prob=0."
+                        )
                     drop_bc = (
                         torch.rand(clean_samples.shape[0], device=self.device)
                         < self.cfg_bc_drop_prob
