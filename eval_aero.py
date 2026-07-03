@@ -1998,6 +1998,14 @@ def main():
                         help="Per-channel CFG scale for BC (default: %(default)s). "
                              "Only applied when the model has a 3rd cond channel; "
                              "!= 1.0 enables the 4-pass CFG decomposition.")
+    parser.add_argument("--null-bc", action="store_true",
+                        help="Set the BC cond channel (ch2) to the null value (-1.0) "
+                             "for the whole eval, in a single joint forward pass. "
+                             "This matches the training-time cfg_bc_drop conditioning "
+                             "exactly (in-distribution), unlike --guidance-bc 0.0 which "
+                             "goes through the additive CFG decomposition. A/B against "
+                             "a default eval of the same checkpoint to isolate BC's "
+                             "inference-time contribution.")
     parser.add_argument("--target-var", default=TARGET_VAR,
                         help="Which model OUTPUT channel to evaluate "
                              "(default: %(default)s). Must be one of target_vars in "
@@ -2281,6 +2289,14 @@ def main():
         except Exception as e:
             print(f"  SKIP (conditioning failed): {e}")
             continue
+
+        if args.null_bc:
+            if cond_tensor.shape[0] < 3:
+                sys.exit(f"--null-bc: cond tensor has {cond_tensor.shape[0]} "
+                         f"channels, expected a BC channel at index 2.")
+            cond_tensor[2] = NULL_COND
+            print("  [NULL-BC] cond channel 2 (BC) set to NULL_COND "
+                  f"({NULL_COND}) — single-pass, training-drop-equivalent")
 
         # Use actual lat/lon from first successfully loaded file
         global LAT, LON
