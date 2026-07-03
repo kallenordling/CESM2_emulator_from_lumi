@@ -58,6 +58,11 @@ OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
 # Set to 1.0 (default) to disable CFG and use direct conditioning (single forward pass).
 GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
 GUIDANCE_SUL="${GUIDANCE_SUL:-1.0}"
+GUIDANCE_BC="${GUIDANCE_BC:-1.0}"
+# Set NULL_BC=1 to null the BC cond channel for the whole eval (single joint
+# pass, matches training-time cfg_bc_drop conditioning). A/B against a default
+# eval of the same checkpoint to isolate BC's inference-time contribution.
+NULL_BC="${NULL_BC:-0}"
 # Set RUN_XAI=1 (or SKIP_XAI=0) to run XAI figures (IG + saliency) — off by default (slow).
 RUN_XAI="${RUN_XAI:-0}"
 # SKIP_XAI=0 is equivalent to RUN_XAI=1 (inverted alias for convenience)
@@ -86,7 +91,7 @@ MEMBERS="${members:-${MEMBERS:-5}}"
 # bare `VAR=val sbatch ...` prefix does NOT reliably propagate on LUMI.
 echo "[EVAL-CFG] CHECKPOINT=${CHECKPOINT:-<empty>}"
 echo "[EVAL-CFG] OUTPUT_DIR=${OUTPUT_DIR}"
-echo "[EVAL-CFG] EXPERIMENTS=${EXPERIMENTS:-<all>}  MEMBERS=${MEMBERS}  GUIDANCE_CO2=${GUIDANCE_CO2} GUIDANCE_SUL=${GUIDANCE_SUL}"
+echo "[EVAL-CFG] EXPERIMENTS=${EXPERIMENTS:-<all>}  MEMBERS=${MEMBERS}  GUIDANCE_CO2=${GUIDANCE_CO2} GUIDANCE_SUL=${GUIDANCE_SUL} GUIDANCE_BC=${GUIDANCE_BC} NULL_BC=${NULL_BC}"
 if [ -z "${CHECKPOINT}" ]; then
     echo "[EVAL-CFG] WARNING: CHECKPOINT empty → eval_aero.py will use find_latest (newest run_*.pt)."
     echo "[EVAL-CFG]          If you meant a specific checkpoint, resubmit with:"
@@ -95,6 +100,8 @@ fi
 
 _XAI_FLAG=""
 [ "${RUN_XAI}" = "1" ] && _XAI_FLAG="--run-xai"
+_NULLBC_FLAG=""
+[ "${NULL_BC}" = "1" ] && _NULLBC_FLAG="--null-bc"
 _CFG_FLAG=""
 [ "${FORCE_CFG}" = "1" ] && _CFG_FLAG="--force-cfg"
 _EXP_FLAG=""
@@ -119,8 +126,9 @@ PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \
     --batch-size 16 \
     --guidance-co2 ${GUIDANCE_CO2} \
     --guidance-sul ${GUIDANCE_SUL} \
+    --guidance-bc ${GUIDANCE_BC} \
     --members ${MEMBERS} \
-    ${_XAI_FLAG} ${_CFG_FLAG} ${_EXP_FLAG}"
+    ${_XAI_FLAG} ${_CFG_FLAG} ${_EXP_FLAG} ${_NULLBC_FLAG}"
 
 # All variables expand here (script-launch time) except $SLURM_LOCALID which
 # must be evaluated inside srun's spawned shell — hence the \$.
@@ -144,9 +152,14 @@ srun --ntasks=${SLURM_NTASKS} --ntasks-per-node=${SLURM_NTASKS} --gpus-per-task=
 # anomaly/TCRE PNGs) into the repo's eval_output/<basename> so they ride along
 # on the projappl mount and can be inspected locally. Best-effort; never fail
 # the job over a mirror hiccup.
-MIRROR_DST="${WORK_DIR}/eval_output/$(basename "${OUTPUT_DIR}")"
+# Include the run name (parent dir of best_ep*) so different runs' evals of
+# the same epoch don't clobber each other in the flat mirror.
+MIRROR_DST="${WORK_DIR}/eval_output/$(basename "$(dirname "${OUTPUT_DIR}")")/$(basename "${OUTPUT_DIR}")"
 mkdir -p "${MIRROR_DST}" || true
-cp -f "${OUTPUT_DIR}/tcre_summary.json" "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/*.json "${MIRROR_DST}/" 2>/dev/null || true
 cp -f "${OUTPUT_DIR}"/anomaly_maps_*.png "${MIRROR_DST}/" 2>/dev/null || true
-cp -f "${OUTPUT_DIR}"/tcre_*.png         "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/tcre*.png          "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/global_mean_anomaly*.png "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/global_mean_anomaly*.csv "${MIRROR_DST}/" 2>/dev/null || true
+cp -f "${OUTPUT_DIR}"/normalized_bias_*.png "${MIRROR_DST}/" 2>/dev/null || true
 echo "[MIRROR] summaries → ${MIRROR_DST}"
