@@ -310,6 +310,57 @@ def pca_denoise_dataset(
 _CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95),
               "BC": (5, 95)}
 
+# ── BC clip mode ─────────────────────────────────────────────────────────────
+# "v1"        — percentiles over ALL gridpoints, zeros included (5, 95). Under
+#               this the populated BC field is semi-flattened: populated p50
+#               normalizes to -0.996 and the temporal global-mean swing is ~3×
+#               smaller than SUL's (BC is even more hotspot-concentrated than
+#               SO2, so SUL's percentile choice doesn't transfer).
+# "populated" — hi anchor from the POSITIVE values only, (5, 90). The populated
+#               p90 (~1.36e-8, ≈½ the v1 anchor) trades ~11% of populated
+#               hotspot cores clipping at +1 (SUL saturates 6.3%) for MEASURED
+#               temporal-contrast gains of +16% (hist gmean swing 0.159→0.184)
+#               and +59% (ssp370, 0.054→0.086). NOTE: no linear anchor can
+#               reach SUL-like contrast (0.47) — an anchor low enough to lift the
+#               mid-range clips the fastest-growing hotspot cells and deletes
+#               their temporal signal (empirical scan 2026-07-03: best possible
+#               hist swing ≈0.22 at 15% clipped). A real fix needs a nonlinear
+#               transform, and log-scaling cond previously FAILED (see
+#               feedback_log_normalization) — do not retry it casually.
+# Changing the mode changes the meaning of the BC channel → fresh training
+# required. The (lo, hi) actually used in training is persisted in the
+# checkpoint under "COND_NORM" and re-injected at eval via
+# set_minmax_override(), so old checkpoints keep evaluating with v1 no matter
+# what this module's default is. Select via `bc_clip_mode` in the data config.
+_BC_CLIP_MODE = "v1"
+_BC_POPULATED_PCTL = (5, 90)
+_MINMAX_OVERRIDE = None
+
+
+def set_bc_clip_mode(mode: str) -> None:
+    """Select the BC clip mode ("v1" | "populated") BEFORE datasets are built."""
+    global _BC_CLIP_MODE
+    if mode not in ("v1", "populated"):
+        raise ValueError(f"unknown bc_clip_mode {mode!r} (expected 'v1' or 'populated')")
+    _BC_CLIP_MODE = mode
+    _get_emissions_minmax.cache_clear()
+
+
+def set_minmax_override(minmax: dict) -> None:
+    """Inject checkpoint-persisted per-channel (lo, hi) clip ranges (eval path).
+
+    Overrides the recomputed percentiles entirely so eval normalizes cond
+    exactly as the loaded checkpoint's training run did.
+    """
+    global _MINMAX_OVERRIDE
+    _MINMAX_OVERRIDE = {k: (float(v[0]), float(v[1])) for k, v in minmax.items()}
+    _get_emissions_minmax.cache_clear()
+
+
+def get_active_minmax() -> dict:
+    """The per-channel (lo, hi) currently in effect — persisted to checkpoints."""
+    return dict(_get_emissions_minmax())
+
 
 @lru_cache(maxsize=1)
 def _get_emissions_minmax():
@@ -318,8 +369,12 @@ def _get_emissions_minmax():
     Cached: opens the EMISSIONS_PATHS NetCDFs once per process. The returned
     (lo, hi) per variable defines the linear mapping in `normalize()`:
     lo → -1, hi → +1, values outside are clipped to [-1, +1]. Percentiles are
-    per-channel via _CLIP_PCTL (CO2 1-99, SUL 5-95).
+    per-channel via _CLIP_PCTL (CO2 1-99, SUL 5-95); BC honours _BC_CLIP_MODE.
+    A checkpoint-injected override (set_minmax_override) short-circuits the
+    computation entirely.
     """
+    if _MINMAX_OVERRIDE is not None:
+        return _MINMAX_OVERRIDE
     all_vals = {}  # var -> list of flat arrays
     for path in EMISSIONS_PATHS:
         ds_emis = xr.open_dataset(path)
@@ -331,7 +386,11 @@ def _get_emissions_minmax():
     combined = {}
     for var, arrays in all_vals.items():
         flat = np.concatenate(arrays)
-        plo, phi = _CLIP_PCTL.get(var, (1, 99))
+        if var == "BC" and _BC_CLIP_MODE == "populated":
+            flat = flat[flat > 0]
+            plo, phi = _BC_POPULATED_PCTL
+        else:
+            plo, phi = _CLIP_PCTL.get(var, (1, 99))
         combined[var] = (float(np.percentile(flat, plo)), float(np.percentile(flat, phi)))
     return combined
 

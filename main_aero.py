@@ -60,6 +60,22 @@ def main(cfg: DictConfig) -> None:
     )
     data_cfg = OmegaConf.load(data_cfg_path)
 
+    # BC clip mode must be set BEFORE any dataset/cond building (it changes the
+    # percentile anchors of the BC channel normalisation). Default "v1" keeps
+    # existing runs byte-identical; the actual (lo, hi) used is persisted into
+    # checkpoints (COND_NORM) so eval stays consistent per checkpoint.
+    # Read order: trainer.hyperparameters.bc_clip_mode (CLI-overridable, e.g.
+    # the run2_gainfix.sh fork) → data config key → "v1".
+    bc_clip_mode = str(
+        OmegaConf.select(cfg, "trainer.hyperparameters.bc_clip_mode")
+        or data_cfg.get("bc_clip_mode", "v1")
+    )
+    if bc_clip_mode != "v1":
+        from data import climate_dataset as _cds
+        _cds.set_bc_clip_mode(bc_clip_mode)
+        if accelerator.is_main_process:
+            logger.info(f"BC clip mode: {bc_clip_mode}")
+
     if accelerator.is_main_process:
         logger.info(f"Rank {accelerator.process_index}/{accelerator.num_processes}")
         logger.info(f"Loaded data config from: {data_cfg_path}")

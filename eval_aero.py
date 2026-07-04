@@ -292,6 +292,20 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
 
     model = model.to(device).eval()
     pca_state = ckpt.get("PCA")
+
+    # Cond-normalisation ranges persisted by the training run (COND_NORM, new
+    # in the bc-clip era). Injecting them guarantees eval normalizes cond with
+    # exactly the (lo, hi) the checkpoint trained on — required for checkpoints
+    # trained with bc_clip_mode != v1. Old checkpoints lack the key and fall
+    # back to recomputing the module-default (v1) percentiles, as before.
+    cond_norm = ckpt.get("COND_NORM")
+    if cond_norm:
+        from data.climate_dataset import set_minmax_override
+        set_minmax_override(cond_norm)
+        print("[COND-NORM] using checkpoint-persisted clip ranges: "
+              + ", ".join(f"{k}=({v[0]:.3e}, {v[1]:.3e})"
+                          for k, v in cond_norm.items()))
+
     return model, pca_state
 
 
