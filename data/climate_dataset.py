@@ -346,14 +346,20 @@ def set_bc_clip_mode(mode: str) -> None:
     _get_emissions_minmax.cache_clear()
 
 
-def set_minmax_override(minmax: dict) -> None:
-    """Inject checkpoint-persisted per-channel (lo, hi) clip ranges (eval path).
+def set_minmax_override(minmax: "dict | None") -> None:
+    """Inject checkpoint-persisted per-channel (lo, hi) clip ranges.
 
-    Overrides the recomputed percentiles entirely so eval normalizes cond
-    exactly as the loaded checkpoint's training run did.
+    Overrides the recomputed percentiles entirely so eval/resume normalizes
+    cond exactly as the loaded checkpoint's training run did. Pass None to
+    CLEAR a previously set override (a process loading a second checkpoint
+    without COND_NORM must not inherit the first one's ranges).
     """
     global _MINMAX_OVERRIDE
-    _MINMAX_OVERRIDE = {k: (float(v[0]), float(v[1])) for k, v in minmax.items()}
+    if minmax is None:
+        _MINMAX_OVERRIDE = None
+    else:
+        _MINMAX_OVERRIDE = {k: (float(v[0]), float(v[1]))
+                            for k, v in minmax.items()}
     _get_emissions_minmax.cache_clear()
 
 
@@ -388,6 +394,12 @@ def _get_emissions_minmax():
         flat = np.concatenate(arrays)
         if var == "BC" and _BC_CLIP_MODE == "populated":
             flat = flat[flat > 0]
+            if flat.size == 0:
+                raise ValueError(
+                    "bc_clip_mode=populated: no positive BC values found in "
+                    "EMISSIONS_PATHS — the BC field is all zeros/NaN "
+                    "(corrupt or mis-staged cond files?)."
+                )
             plo, phi = _BC_POPULATED_PCTL
         else:
             plo, phi = _CLIP_PCTL.get(var, (1, 99))

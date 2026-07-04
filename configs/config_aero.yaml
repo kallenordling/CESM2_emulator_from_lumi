@@ -149,8 +149,12 @@ trainer:
     # a nonlinear transform, and log-scaling cond failed before (do not retry).
     # Changing this changes the BC channel's meaning → FRESH TRAINING ONLY.
     # The (lo,hi) actually used is persisted in checkpoints (COND_NORM) and
-    # re-injected at eval, so evals always match the checkpoint's training.
-    bc_clip_mode: v1
+    # re-injected at eval AND on training resume, so both always match the
+    # checkpoint's training run.
+    # null = defer to the data config's bc_clip_mode key (default "v1"). Set a
+    # string here (or via CLI override, as run2_gainfix.sh does) to force a
+    # mode; a non-null value here WINS over the data config.
+    bc_clip_mode: null
 
     reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.
     eval_script: run_eval_aero.sh

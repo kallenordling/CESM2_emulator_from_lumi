@@ -11,7 +11,8 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from ema_pytorch import EMA
 
-from data.climate_dataset import ClimateDataset, ClimateDataLoader, get_active_minmax
+from data.climate_dataset import (ClimateDataset, ClimateDataLoader,
+                                  get_active_minmax, set_minmax_override)
 from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
@@ -362,9 +363,11 @@ class UNetTrainer:
         # hist / +9% ssp370 TCRE overshoot invisible to the one-step proxy).
         # Fixed (non-adaptive) scale; 0 disables everything (default).
         self.sampled_gain_loss_scale  = float(getattr(self, "sampled_gain_loss_scale", 0.0))
-        self.sampled_gain_every_steps = int(getattr(self, "sampled_gain_every_steps", 50))
-        self.sampled_gain_steps       = int(getattr(self, "sampled_gain_steps", 6))
-        self.sampled_gain_probe_years = int(getattr(self, "sampled_gain_probe_years", 5))
+        self.sampled_gain_every_steps = max(1, int(getattr(self, "sampled_gain_every_steps", 50)))
+        # Clamped here (not at the use sites) so the startup print and the
+        # actual probe schedule can never disagree.
+        self.sampled_gain_steps       = max(2, int(getattr(self, "sampled_gain_steps", 6)))
+        self.sampled_gain_probe_years = max(3, int(getattr(self, "sampled_gain_probe_years", 5)))
         self._sg_ready        = False
         self._cached_sgain    = {}     # {"hist": slope_ratio, "ssp370": slope_ratio}
         self._last_raw_sgain  = 0.0
@@ -1064,12 +1067,11 @@ class UNetTrainer:
                   "precompute — disabled")
             return
 
-        lats = torch.as_tensor(self._ref_ds.lats.values, dtype=torch.float32)
-        w_lat = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
-        w_lat = (w_lat / w_lat.mean()).view(1, -1, 1)                 # (1, H, 1)
+        w_lat = _area_weights_1d(self._ref_ds.lats, dtype=torch.float32,
+                                 device="cpu").view(1, -1, 1)         # (1, H, 1)
 
         conds, co2s, slopes, scen = [], [], [], []
-        K = max(3, self.sampled_gain_probe_years)
+        K = self.sampled_gain_probe_years
         for sid, nm in ((0, "hist"), (1, "ssp370")):
             ds = self.train_set.datasets[names.index(nm)]
             if ds.tensor_data is None or ds.tensor_data_cond is None:
@@ -1132,7 +1134,7 @@ class UNetTrainer:
 
         cond = self._sg_cond.to(self.weight_dtype)
         B, H, W = cond.shape[0], cond.shape[-2], cond.shape[-1]
-        S = max(2, self.sampled_gain_steps)
+        S = self.sampled_gain_steps
 
         rng = torch.Generator().manual_seed(int(self.global_step) * 9973 + 17)
 
@@ -2001,6 +2003,37 @@ class UNetTrainer:
         if checkpoint.get("PCA") is not None:
             self.train_set.set_pca_state(checkpoint["PCA"])
             print("[INFO] Restored PCA state from checkpoint")
+
+        # Restore cond-normalisation clip ranges BEFORE any load_data call, for
+        # the same reason as PCA above: cond fields are normalised lazily in
+        # load_data, so injecting the checkpoint's COND_NORM here keeps a
+        # resumed/chained run on the exact (lo, hi) it was trained with even if
+        # this launch forgot the bc_clip_mode flag. The checkpoint wins; a
+        # config↔checkpoint mismatch is loud. (The end-of-__init__
+        # _cond_norm_state capture runs after load(), so descendants re-persist
+        # these restored ranges, not the module default.)
+        cond_norm = checkpoint.get("COND_NORM")
+        if cond_norm:
+            try:
+                current = get_active_minmax()
+            except Exception:
+                current = None
+            if current is not None:
+                drift = {
+                    k: {"config": current[k], "checkpoint": tuple(v)}
+                    for k, v in cond_norm.items()
+                    if k in current and any(
+                        abs(a - b) > 1e-9 * max(abs(a), abs(b), 1e-30)
+                        for a, b in zip(current[k], v)
+                    )
+                }
+                if drift:
+                    print(f"[WARN] COND_NORM mismatch — this launch's config "
+                          f"would normalise cond differently than the "
+                          f"checkpoint was trained with (bc_clip_mode flag "
+                          f"missing?): {drift}. Using the CHECKPOINT ranges.")
+            set_minmax_override({k: tuple(v) for k, v in cond_norm.items()})
+            print("[INFO] Restored cond-norm clip ranges (COND_NORM) from checkpoint")
 
         # Restore best val skill so a resumed run doesn't overwrite a better checkpoint
         if "best_val_skill" in checkpoint:

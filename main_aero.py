@@ -64,11 +64,14 @@ def main(cfg: DictConfig) -> None:
     # percentile anchors of the BC channel normalisation). Default "v1" keeps
     # existing runs byte-identical; the actual (lo, hi) used is persisted into
     # checkpoints (COND_NORM) so eval stays consistent per checkpoint.
-    # Read order: trainer.hyperparameters.bc_clip_mode (CLI-overridable, e.g.
-    # the run2_gainfix.sh fork) → data config key → "v1".
+    # Read order: trainer.hyperparameters.bc_clip_mode when non-null (CLI
+    # override, e.g. the run2_gainfix.sh fork; the config_aero default is null
+    # precisely so this source stays empty unless explicitly set) → data
+    # config key → "v1".
     bc_clip_mode = str(
         OmegaConf.select(cfg, "trainer.hyperparameters.bc_clip_mode")
-        or data_cfg.get("bc_clip_mode", "v1")
+        or data_cfg.get("bc_clip_mode", None)
+        or "v1"
     )
     if bc_clip_mode != "v1":
         from data import climate_dataset as _cds

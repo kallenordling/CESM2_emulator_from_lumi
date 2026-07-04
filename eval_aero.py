@@ -298,13 +298,23 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
     # exactly the (lo, hi) the checkpoint trained on — required for checkpoints
     # trained with bc_clip_mode != v1. Old checkpoints lack the key and fall
     # back to recomputing the module-default (v1) percentiles, as before.
+    from data.climate_dataset import set_minmax_override
     cond_norm = ckpt.get("COND_NORM")
     if cond_norm:
-        from data.climate_dataset import set_minmax_override
         set_minmax_override(cond_norm)
         print("[COND-NORM] using checkpoint-persisted clip ranges: "
               + ", ".join(f"{k}=({v[0]:.3e}, {v[1]:.3e})"
                           for k, v in cond_norm.items()))
+    else:
+        # Explicitly CLEAR any override a previously loaded checkpoint set in
+        # this process, and be loud: without COND_NORM we can only recompute
+        # the module-default (v1) ranges — correct for pre-bc-clip checkpoints,
+        # WRONG for a populated-trained checkpoint whose capture failed.
+        set_minmax_override(None)
+        print("[COND-NORM] WARNING: checkpoint has no COND_NORM — recomputing "
+              "module-default (v1) clip ranges. Correct for pre-bc-clip-era "
+              "checkpoints; if this model was trained with "
+              "bc_clip_mode=populated, this eval is MISCALIBRATED.")
 
     return model, pca_state
 
