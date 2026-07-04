@@ -11,7 +11,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from ema_pytorch import EMA
 
-from data.climate_dataset import ClimateDataset, ClimateDataLoader
+from data.climate_dataset import ClimateDataset, ClimateDataLoader, get_active_minmax
 from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
@@ -119,6 +119,7 @@ class UNetTrainer:
         ("interaction_loss_scaling",   "interaction_loss_scaling",  True),
         ("_ema_gmean",                 "_ema_gmean",                False),
         ("gmean_loss_scaling",         "gmean_loss_scaling",        True),
+        ("sampled_gain_loss_scale",    "sampled_gain_loss_scale",   True),
     )
 
     def __init__(
@@ -208,6 +209,20 @@ class UNetTrainer:
         self._int_co2_poly = None
         if getattr(self, "interaction_match_ssp370", False):
             self._precompute_interaction_target()
+
+        # Sampled-gain probe tensors (needs tcre_slopes + loaded first
+        # realizations — both prepared by _precompute_tcre_slope above).
+        if self.sampled_gain_loss_scale > 0:
+            self._init_sampled_gain()
+
+        # Cond-normalisation ranges actually in effect for this run — persisted
+        # into every checkpoint (COND_NORM) so eval re-injects them instead of
+        # recomputing with possibly-different module defaults (bc_clip_mode).
+        try:
+            self._cond_norm_state = get_active_minmax()
+        except Exception as e:
+            print(f"[TRAINER] WARNING: could not capture cond-norm state: {e}")
+            self._cond_norm_state = None
 
     # ── __init__ helpers ─────────────────────────────────────────────────────
 
@@ -334,6 +349,25 @@ class UNetTrainer:
 
         # ── Global-mean supervision (per-sample, fixed scaling, all scenarios) ──
         self.gmean_loss_scaling = getattr(self, "gmean_loss_scaling", 0.0)
+
+        # ── Sampled-gain constraint (multiplicative TCRE on SAMPLED output) ─────
+        # Every `sampled_gain_every_steps` optimizer steps: short-sample fixed
+        # probe years (hist + ssp370 cond, full conditioning, no CFG drop) with
+        # no_grad down to low noise, then ONE grad-enabled denoise step; fit the
+        # slope of sampled gmean ΔT vs cumCO2 per scenario and penalize
+        # (slope/CESM2_slope − 1)². Unlike tcre_lowt (which noises GROUND TRUTH
+        # at low t, so the input already carries the answer and the constraint
+        # is nearly vacuous), the low-t input here comes from the model's OWN
+        # sampling chain — the penalty sees the actual sampled bias (the ~+29%
+        # hist / +9% ssp370 TCRE overshoot invisible to the one-step proxy).
+        # Fixed (non-adaptive) scale; 0 disables everything (default).
+        self.sampled_gain_loss_scale  = float(getattr(self, "sampled_gain_loss_scale", 0.0))
+        self.sampled_gain_every_steps = int(getattr(self, "sampled_gain_every_steps", 50))
+        self.sampled_gain_steps       = int(getattr(self, "sampled_gain_steps", 6))
+        self.sampled_gain_probe_years = int(getattr(self, "sampled_gain_probe_years", 5))
+        self._sg_ready        = False
+        self._cached_sgain    = {}     # {"hist": slope_ratio, "ssp370": slope_ratio}
+        self._last_raw_sgain  = 0.0
 
         # ── Energy-balance constraint scaling and target ──
         # The scalar parameters themselves are registered on the model in
@@ -533,6 +567,9 @@ class UNetTrainer:
                         "COND SCALE":     self.cond_loss_scaling,
                         "TCRE SCALE":     self.tcre_loss_scaling,
                         "TCRE SLOPE":     (self.tcre_slope if self.tcre_slope is not None else 0.0),
+                        "SGAIN LOSS":     self._last_raw_sgain,
+                        **{f"SGAIN RATIO {nm}": r
+                           for nm, r in self._cached_sgain.items()},
                         "EBM SCALE":      self.ebm_loss_scaling,
                         "INTER SCALE":    self.interaction_loss_scaling,
                         "GMEAN SCALE":    self.gmean_loss_scaling,
@@ -1007,6 +1044,135 @@ class UNetTrainer:
         print(f"[TRAINER] interaction target (ssp370 {common[0]}-{common[-1]}): "
               f"I_gm ∈ [{I.min():+.3f}, {I.max():+.3f}] over cumCO2 [{x.min():.3f}, {x.max():.3f}] "
               f"(quadratic fit; sub-additive = negative I)")
+
+    def _init_sampled_gain(self) -> None:
+        """Precompute fixed probe cond tensors + CESM2 slope targets for the
+        sampled-gain constraint (hist + ssp370). Deterministic; runs on every
+        rank (all ranks need identical probe tensors). Disables itself loudly
+        on any missing prerequisite instead of raising.
+        """
+        self._sg_ready = False
+        if not self._multi:
+            print("[TRAINER] sampled-gain: single-experiment mode — disabled")
+            return
+        if not isinstance(self.scheduler, ContinuousDDPM):
+            print("[TRAINER] sampled-gain: requires ContinuousDDPM — disabled")
+            return
+        names = getattr(self.train_set, "scenario_names", [])
+        if not self.tcre_slopes or "hist" not in names or "ssp370" not in names:
+            print("[TRAINER] sampled-gain: needs hist+ssp370 and the TCRE "
+                  "precompute — disabled")
+            return
+
+        lats = torch.as_tensor(self._ref_ds.lats.values, dtype=torch.float32)
+        w_lat = torch.cos(torch.deg2rad(lats)).clamp(min=0.2)
+        w_lat = (w_lat / w_lat.mean()).view(1, -1, 1)                 # (1, H, 1)
+
+        conds, co2s, slopes, scen = [], [], [], []
+        K = max(3, self.sampled_gain_probe_years)
+        for sid, nm in ((0, "hist"), (1, "ssp370")):
+            ds = self.train_set.datasets[names.index(nm)]
+            if ds.tensor_data is None or ds.tensor_data_cond is None:
+                ds.load_data(list(ds.realizations)[0])
+            c = ds.tensor_data_cond                                    # (n_cond, T, H, W)
+            T = c.shape[1]
+            idx = torch.linspace(0, T - 1, min(K, T)).round().long()
+            co2_gm = ((c[0, idx] * w_lat).mean(dim=(1, 2))).to(torch.float32)  # (Kn,)
+            if float(co2_gm.max() - co2_gm.min()) < 1e-6:
+                print(f"[TRAINER] sampled-gain: degenerate CO2 range on {nm} — skipped")
+                continue
+            # (Kn, n_cond, 1, H, W) — full conditioning, no CFG drop (matches eval)
+            conds.append(c[:, idx].permute(1, 0, 2, 3).unsqueeze(2)
+                          .to(torch.float32).clone())
+            co2s.append(co2_gm)
+            slopes.append(float(self.tcre_slopes[sid][0]))
+            scen.append(nm)
+        if not conds:
+            print("[TRAINER] sampled-gain: no usable scenario — disabled")
+            return
+
+        self._sg_cond = torch.cat(conds)                               # (B, n_cond, 1, H, W)
+        self._sg_slices, off = [], 0
+        for cnd in conds:
+            self._sg_slices.append((off, off + cnd.shape[0]))
+            off += cnd.shape[0]
+        self._sg_co2, self._sg_slopes, self._sg_scen = co2s, slopes, scen
+        self._sg_wlat = w_lat
+        if self.climatology is not None:
+            self._sg_clim0 = (self.climatology.detach().to("cpu")
+                              .squeeze(0).squeeze(1)[0].to(torch.float32))  # (H, W)
+            self._sg_out_channels = self.climatology.shape[1]
+        else:
+            self._sg_clim0 = torch.zeros(self._sg_cond.shape[-2],
+                                         self._sg_cond.shape[-1])
+            self._sg_out_channels = self.train_set.datasets[0].tensor_data.shape[0]
+        self._sg_ready = True
+        print(f"[TRAINER] sampled-gain: {self._sg_cond.shape[0]} probe years "
+              f"({'+'.join(scen)}), every {self.sampled_gain_every_steps} opt steps, "
+              f"{self.sampled_gain_steps} sample steps, "
+              f"scale={self.sampled_gain_loss_scale}, "
+              f"target slopes={[f'{s:.4f}' for s in slopes]}")
+
+    def _compute_sampled_gain_loss(self) -> torch.Tensor:
+        """Short-sample the probe years with the ONLINE model and penalize the
+        sampled TCRE slope ratio: sum over scenarios of (m̂/m_CESM2 − 1)².
+
+        All sampling steps except the last run under no_grad; the final
+        denoise at the lowest noise level carries gradients (one UNet
+        forward/backward — memory-comparable to a normal training batch).
+        Noise is seeded from global_step, identically on every DDP rank, so
+        the term contributes identical gradients on all ranks.
+        """
+        dev = self.device
+        if self._sg_cond.device != dev:
+            self._sg_cond  = self._sg_cond.to(dev)
+            self._sg_co2   = [x.to(dev) for x in self._sg_co2]
+            self._sg_wlat  = self._sg_wlat.to(dev)
+            self._sg_clim0 = self._sg_clim0.to(dev)
+
+        cond = self._sg_cond.to(self.weight_dtype)
+        B, H, W = cond.shape[0], cond.shape[-2], cond.shape[-1]
+        S = max(2, self.sampled_gain_steps)
+
+        rng = torch.Generator().manual_seed(int(self.global_step) * 9973 + 17)
+
+        def _randn(shape):
+            return torch.randn(shape, generator=rng).to(dev)
+
+        steps = torch.linspace(1.0, 0.0, S + 1)
+        gen = _randn((B, self._sg_out_channels, 1, H, W)).to(self.weight_dtype)
+
+        with torch.no_grad():
+            for i in range(S - 1):
+                t      = steps[i].to(dev).expand(B)
+                t_next = steps[i + 1].to(dev).expand(B)
+                v = self.model(gen, self.scheduler.log_snr(t), cond_map=cond)
+                gen32 = gen.to(torch.float32)
+                x0 = self.scheduler.predict_start_from_v(gen32, t, v.to(torch.float32))
+                mean, var, _ = self.scheduler.q_posterior(x0, gen32, t, t_next=t_next)
+                gen = (mean + var.sqrt() * _randn(gen.shape)).to(self.weight_dtype)
+
+        # Final denoise WITH gradients at the lowest sampled noise level.
+        t_last = steps[S - 1].to(dev).expand(B)
+        v = self.model(gen, self.scheduler.log_snr(t_last), cond_map=cond)
+        x0 = self.scheduler.predict_start_from_v(
+            gen.to(torch.float32), t_last, v.to(torch.float32))
+
+        anom = x0[:, 0, 0] - self._sg_clim0.unsqueeze(0)               # (B, H, W)
+        gm = (anom * self._sg_wlat).mean(dim=(1, 2))                   # (B,)
+
+        loss = gm.new_zeros(())
+        gains = {}
+        for (a, b), co2, m_ref, nm in zip(self._sg_slices, self._sg_co2,
+                                          self._sg_slopes, self._sg_scen):
+            x = co2 - co2.mean()
+            y = gm[a:b]
+            m_hat = (x * (y - y.mean())).sum() / (x * x).sum()
+            ratio = m_hat / m_ref
+            loss = loss + (ratio - 1.0) ** 2
+            gains[nm] = float(ratio.detach())
+        self._cached_sgain = gains
+        return loss
 
     def get_original_sample(self, noisy_sample, model_output, timesteps):
         if isinstance(self.scheduler, ContinuousDDPM):
@@ -1521,6 +1687,18 @@ class UNetTrainer:
             self._last_raw_gmean = gmean_loss.detach().item()
             self._cached_gmean   = self._last_raw_gmean
 
+            # ── Sampled-gain constraint (scheduled; acts on SAMPLED output) ──
+            # Gated on sync_gradients (not cond_loss) so it also works in
+            # mse_only forks; global_step is identical on all ranks → the extra
+            # grad-enabled forward runs on the same iterations everywhere
+            # (DDP-safe). Costs ~(S−1) no-grad + 1 grad forward per invocation.
+            sgain_loss = torch.zeros((), device=self.device)
+            if (self.sampled_gain_loss_scale > 0 and self._sg_ready
+                    and self.accelerator.sync_gradients
+                    and self.global_step % self.sampled_gain_every_steps == 0):
+                sgain_loss = self._compute_sampled_gain_loss()
+            self._last_raw_sgain = float(sgain_loss.detach())
+
             # ── Total loss ────────────────────────────────────────────────────
             loss = (
                 mse_loss
@@ -1529,6 +1707,7 @@ class UNetTrainer:
                 + ebm_loss  * self.ebm_loss_scaling
                 + interaction_loss * self.interaction_loss_scaling
                 + gmean_loss * self.gmean_loss_scaling
+                + sgain_loss * self.sampled_gain_loss_scale
             )
 
             # Scale the loss by cosine-weighted latitude
@@ -1632,6 +1811,10 @@ class UNetTrainer:
             # "cond"/"target" keys (eval_aero.py:1656); restored on resume in
             # load() so a chained run keeps a stable basis instead of re-fitting.
             "PCA":         self.train_set.get_pca_state(),
+            # Per-channel cond clip ranges (lo, hi) in effect for this run —
+            # eval re-injects them (set_minmax_override) so cond normalisation
+            # always matches training, regardless of bc_clip_mode defaults.
+            "COND_NORM":   self._cond_norm_state,
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
             sd[ckpt_key] = getattr(self, attr)

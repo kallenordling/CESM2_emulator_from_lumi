@@ -124,6 +124,33 @@ trainer:
     # ~3σ, ssp126 ~20σ). Unlike TCRE (hist+ssp370, weak/adaptive), this is all-
     # scenario and a FIXED strong weight. A/B-tested via run_gmeantest.sh.
     gmean_loss_scaling: 0.0
+    # ── Sampled-gain constraint (multiplicative TCRE on SAMPLED output) ──────
+    # Every `sampled_gain_every_steps` optimizer steps: short-sample fixed probe
+    # years (hist+ssp370 cond, full conditioning) with no_grad down to low noise,
+    # then ONE grad-enabled denoise; penalize (sampled ΔT-vs-cumCO2 slope /
+    # CESM2 slope − 1)² per scenario. Unlike tcre_lowt (noised GROUND TRUTH →
+    # input already carries the answer → nearly vacuous), the low-t input here
+    # comes from the model's own sampling chain, so the penalty sees the actual
+    # sampled overshoot (~+29% hist at ep1000+, invisible to the one-step proxy).
+    # FIXED weight (not adaptive). 0.0 = fully off (default; keeps live runs
+    # unchanged). A/B fork: run2_gainfix.sh (scale 0.05).
+    # Cost per invocation ≈ (steps−1) no-grad + 1 grad forward of ~2·probe_years
+    # samples → ~+7%/epoch at every_steps=50.
+    sampled_gain_loss_scale: 0.0
+    sampled_gain_every_steps: 50
+    sampled_gain_steps: 6
+    sampled_gain_probe_years: 5
+    # ── BC cond-channel clip mode (data/climate_dataset.py) ──────────────────
+    # "v1" (default) = 5-95 percentiles over all gridpoints — keeps live runs
+    # byte-identical. "populated" = hi anchor at the p90 of POSITIVE BC values
+    # (≈½ the v1 anchor): measured temporal-contrast gain +16% hist / +59%
+    # ssp370; ~11% of populated hotspot cores clip at +1 (SUL saturates 6.3%).
+    # No linear anchor does better (scan 2026-07-03) — larger gains would need
+    # a nonlinear transform, and log-scaling cond failed before (do not retry).
+    # Changing this changes the BC channel's meaning → FRESH TRAINING ONLY.
+    # The (lo,hi) actually used is persisted in checkpoints (COND_NORM) and
+    # re-injected at eval, so evals always match the checkpoint's training.
+    bc_clip_mode: v1
 
     reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.
     eval_script: run_eval_aero.sh
