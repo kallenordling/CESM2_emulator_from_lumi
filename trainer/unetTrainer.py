@@ -1427,6 +1427,31 @@ class UNetTrainer:
 
         with self.accelerator.accumulate(self.model):
 
+            # ── Sampled-gain constraint (scheduled; acts on SAMPLED output) ──
+            # Runs FIRST and backprops standalone so its graph is freed before
+            # the main forward allocates its own — stacking the two peaked HBM
+            # and OOMed once Adam/EMA state was resident (job 19729306, ep2:
+            # 61.5/64 GiB allocated, 204 MiB request failed inside the probe
+            # forward; the step-0 invocation survived only because optimizer
+            # state wasn't allocated yet). Under no_sync the skipped DDP
+            # mean-reduction is exact: the probe is seeded from global_step
+            # identically on every rank, so the local gradient already equals
+            # the would-be allreduce mean; the reducer stays untouched for the
+            # main backward. Gated on sync_gradients (not cond_loss) so it
+            # also works in mse_only forks; global_step is identical on all
+            # ranks → the extra backward runs on the same iterations
+            # everywhere (DDP-safe).
+            self._last_raw_sgain = 0.0
+            if (self.sampled_gain_loss_scale > 0 and self._sg_ready
+                    and self.accelerator.sync_gradients
+                    and self.global_step % self.sampled_gain_every_steps == 0):
+                with self.accelerator.no_sync(self.model):
+                    sgain_loss = self._compute_sampled_gain_loss()
+                    self.accelerator.backward(
+                        sgain_loss * self.sampled_gain_loss_scale)
+                self._last_raw_sgain = float(sgain_loss.detach())
+                del sgain_loss
+
             gmean_loss = torch.zeros(1, device=self.device)  # global-mean supervision (set below if enabled)
 
             # ── Per-channel CFG dropout ───────────────────────────────────────
@@ -1689,19 +1714,9 @@ class UNetTrainer:
             self._last_raw_gmean = gmean_loss.detach().item()
             self._cached_gmean   = self._last_raw_gmean
 
-            # ── Sampled-gain constraint (scheduled; acts on SAMPLED output) ──
-            # Gated on sync_gradients (not cond_loss) so it also works in
-            # mse_only forks; global_step is identical on all ranks → the extra
-            # grad-enabled forward runs on the same iterations everywhere
-            # (DDP-safe). Costs ~(S−1) no-grad + 1 grad forward per invocation.
-            sgain_loss = torch.zeros((), device=self.device)
-            if (self.sampled_gain_loss_scale > 0 and self._sg_ready
-                    and self.accelerator.sync_gradients
-                    and self.global_step % self.sampled_gain_every_steps == 0):
-                sgain_loss = self._compute_sampled_gain_loss()
-            self._last_raw_sgain = float(sgain_loss.detach())
-
             # ── Total loss ────────────────────────────────────────────────────
+            # (sampled-gain contributes via its own standalone backward at the
+            # top of this block, not through this expression — see there.)
             loss = (
                 mse_loss
                 + cond_loss * self.cond_loss_scaling
@@ -1709,7 +1724,6 @@ class UNetTrainer:
                 + ebm_loss  * self.ebm_loss_scaling
                 + interaction_loss * self.interaction_loss_scaling
                 + gmean_loss * self.gmean_loss_scaling
-                + sgain_loss * self.sampled_gain_loss_scale
             )
 
             # Scale the loss by cosine-weighted latitude
