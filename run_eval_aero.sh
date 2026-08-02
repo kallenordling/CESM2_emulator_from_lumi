@@ -54,6 +54,14 @@ fi
 # Fall back to defaults for manual submission.
 CHECKPOINT="${CHECKPOINT:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
+# Override for checkpoints trained with a different model/data config (e.g. an
+# A/B arm with a different channel set, such as run_gainfix_noBCprect). Must
+# match what the checkpoint was actually trained with — it isn't self-describing.
+#   MODEL_CONFIG=configs/config_aero_noBCprect.yaml \
+#   DATA_CONFIG=configs/config_data_noBCprect.yaml \
+#   CHECKPOINT=runs/run_gainfix_noBCprect_<ep>.pt sbatch run_eval_aero.sh
+MODEL_CONFIG="${MODEL_CONFIG:-}"
+DATA_CONFIG="${DATA_CONFIG:-}"
 # Per-channel CFG scales: < 1.0 reduces CO2 warming, > 1.0 amplifies aerosol cooling.
 # Set to 1.0 (default) to disable CFG and use direct conditioning (single forward pass).
 GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
@@ -92,6 +100,7 @@ MEMBERS="${members:-${MEMBERS:-5}}"
 echo "[EVAL-CFG] CHECKPOINT=${CHECKPOINT:-<empty>}"
 echo "[EVAL-CFG] OUTPUT_DIR=${OUTPUT_DIR}"
 echo "[EVAL-CFG] EXPERIMENTS=${EXPERIMENTS:-<all>}  MEMBERS=${MEMBERS}  GUIDANCE_CO2=${GUIDANCE_CO2} GUIDANCE_SUL=${GUIDANCE_SUL} GUIDANCE_BC=${GUIDANCE_BC} NULL_BC=${NULL_BC}"
+echo "[EVAL-CFG] MODEL_CONFIG=${MODEL_CONFIG:-<default configs/config_aero.yaml>}  DATA_CONFIG=${DATA_CONFIG:-<default configs/config_data.yaml>}"
 if [ -z "${CHECKPOINT}" ]; then
     echo "[EVAL-CFG] WARNING: CHECKPOINT empty → eval_aero.py will use find_latest (newest run_*.pt)."
     echo "[EVAL-CFG]          If you meant a specific checkpoint, resubmit with:"
@@ -106,6 +115,10 @@ _CFG_FLAG=""
 [ "${FORCE_CFG}" = "1" ] && _CFG_FLAG="--force-cfg"
 _EXP_FLAG=""
 [ -n "${EXPERIMENTS}" ] && _EXP_FLAG="--experiments ${EXPERIMENTS}"
+_MODELCFG_FLAG=""
+[ -n "${MODEL_CONFIG}" ] && _MODELCFG_FLAG="--model-config ${MODEL_CONFIG}"
+_DATACFG_FLAG=""
+[ -n "${DATA_CONFIG}" ] && _DATACFG_FLAG="--data-config ${DATA_CONFIG}"
 
 # Multi-GPU experiment sharding: srun launches one task per GPU; each task
 # runs experiments_to_run[$SLURM_PROCID::$SLURM_NTASKS] inside eval_aero.py
@@ -128,7 +141,7 @@ PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \
     --guidance-sul ${GUIDANCE_SUL} \
     --guidance-bc ${GUIDANCE_BC} \
     --members ${MEMBERS} \
-    ${_XAI_FLAG} ${_CFG_FLAG} ${_EXP_FLAG} ${_NULLBC_FLAG}"
+    ${_XAI_FLAG} ${_CFG_FLAG} ${_EXP_FLAG} ${_NULLBC_FLAG} ${_MODELCFG_FLAG} ${_DATACFG_FLAG}"
 
 # All variables expand here (script-launch time) except $SLURM_LOCALID which
 # must be evaluated inside srun's spawned shell — hence the \$.

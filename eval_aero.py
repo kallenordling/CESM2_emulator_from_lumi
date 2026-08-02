@@ -1998,6 +1998,18 @@ def main():
                         help="Path to a specific checkpoint file. "
                              "Overrides --runs-dir / find_latest_checkpoint.")
     parser.add_argument("--output-dir",  default="/scratch/project_462001328/eval_output")
+    parser.add_argument("--model-config", default=CONFIG_PATH,
+                        help="Path to the model/trainer config yaml (default: "
+                             "configs/config_aero.yaml). Override for checkpoints "
+                             "trained with a different model.{in,out,cond}_channels "
+                             "(e.g. an A/B arm with a different channel set) — the "
+                             "checkpoint itself doesn't store its architecture, so "
+                             "this must match what the checkpoint was trained with.")
+    parser.add_argument("--data-config", default="configs/config_data.yaml",
+                        help="Path to the data config yaml (default: "
+                             "configs/config_data.yaml). Override to match "
+                             "--model-config for checkpoints trained with a "
+                             "different target_vars/cond_vars set.")
     parser.add_argument("--sample-steps",  type=int, default=SAMPLE_STEPS)
     parser.add_argument("--batch-size",    type=int, default=BATCH_SIZE)
     parser.add_argument("--ig-n-steps",    type=int, default=30,
@@ -2114,7 +2126,7 @@ def main():
 
     # ── load model ─────────────────────────────────────────────────────────
     ckpt_path = args.checkpoint if args.checkpoint else find_latest_checkpoint(args.runs_dir)
-    model, pca_state = load_model(ckpt_path, CONFIG_PATH, device)
+    model, pca_state = load_model(ckpt_path, args.model_config, device)
     model = model.to(dtype)
     print(f"[PCA] {'Found in checkpoint' if pca_state else 'None — no PCA projection'}")
 
@@ -2131,10 +2143,10 @@ def main():
         print(f"[PCA] per-scenario bases: {sorted(pca_per_scenario)} "
               f"(ref={pca_state.get('ref_scenario')})")
 
-    # Read n_components_cond from config_data.yaml so eval uses the same
-    # number of EOFs the model was trained with (currently [30, 10]).
-    cfg = OmegaConf.load(CONFIG_PATH)
-    data_cfg = OmegaConf.load("configs/config_data.yaml")
+    # Read n_components_cond from config_data.yaml (or --data-config) so eval
+    # uses the same number of EOFs the model was trained with.
+    cfg = OmegaConf.load(args.model_config)
+    data_cfg = OmegaConf.load(args.data_config)
     _nc = data_cfg.get("n_components_cond", None)
     N_COMP_COND = OmegaConf.to_container(_nc, resolve=True) if (pca_cond and _nc is not None) else None
     print(f"[PCA] n_components_cond={N_COMP_COND}")
