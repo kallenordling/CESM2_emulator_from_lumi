@@ -21,7 +21,13 @@
 # scenario_weights/year_bias/bsp_depth in the data config — the ONLY change is
 # configs/config_data_noBCprect.yaml (TREFHT-only target, CO2+SUL-only cond)
 # plus the matching model.{in,out,cond}_channels overrides below. bc_clip_mode
-# is dropped (no BC channel to clip).
+# is dropped (no BC channel to clip). ALSO required (both have fail-loud
+# guards in trainer/unetTrainer.py that killed every link of the first launch
+# attempt, 2026-08-02, jobs 20595116-20596900, zero epochs trained): dropping
+# a 2/2/3-channel default config_aero.yaml onto a 1/1/2-channel model needs
+# cfg_bc_drop_prob=0.0 (default 0.3 indexes a nonexistent BC channel,
+# unetTrainer.py:1495) and target_var_weights=[1.0] (default [1.0,0.5] has 2
+# entries vs the model's 1 output channel, unetTrainer.py:1587).
 #
 # FRESH RUN, cannot fork from any existing checkpoint — channel counts differ
 # (1/1/2 here vs 2/2/3 in run_gainfix), so conv shapes are incompatible.
@@ -170,7 +176,9 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.save_name=run_gainfix_noBCprect.pt \
         trainer.hyperparameters.lr_decay=cosine \
         trainer.hyperparameters.lr_decay_horizon_steps=60000 \
-        trainer.hyperparameters.sampled_gain_loss_scale=0.05
+        trainer.hyperparameters.sampled_gain_loss_scale=0.05 \
+        trainer.hyperparameters.cfg_bc_drop_prob=0.0 \
+        trainer.hyperparameters.target_var_weights=[1.0]
 '"
 
 srun bash -c "$RUN_CMD" || true
