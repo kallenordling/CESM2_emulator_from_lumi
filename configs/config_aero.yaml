@@ -158,6 +158,19 @@ trainer:
 
     reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.
     eval_script: run_eval_aero.sh
+    # Auto-eval-trigger (_spawn_eval → eval_triggers/*.json → watch_eval_triggers.sh
+    # → sbatch run_eval_aero.sh) only knows CHECKPOINT/OUTPUT_DIR by default, so
+    # it silently evaluates every checkpoint against the DEFAULT model/data
+    # config (configs/config_aero.yaml + configs/config_data.yaml). For a run
+    # whose model.{in,out,cond}_channels differ from the default (e.g. an A/B
+    # arm dropping BC/PRECT), that produces a state_dict shape-mismatch crash
+    # on EVERY auto-triggered eval — found 2026-08-04 when run_gainfix_noBCprect
+    # trained 448 epochs with zero successful auto-evals. Set these to the
+    # matching --model-config/--data-config paths for any run whose channel
+    # set differs from production; null (default) = use eval_aero.py's own
+    # hardcoded defaults, unchanged behavior for every existing run.
+    eval_model_config: null
+    eval_data_config: null
 
   optimizer:
     _target_: torch.optim.Adam

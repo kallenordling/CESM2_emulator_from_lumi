@@ -71,6 +71,11 @@ while true; do
         SBATCH_SCRIPT=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['sbatch_script'])" "$trigger" 2>/dev/null)
         LOG_DIR=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['log_dir'])" "$trigger" 2>/dev/null)
         EPOCH=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['epoch'])" "$trigger" 2>/dev/null)
+        # Optional — only set for runs whose model.{in,out,cond}_channels
+        # differ from production (see eval_model_config in configs/config_aero.yaml).
+        # Empty string if absent/null; appended to --export below only when non-empty.
+        MODEL_CONFIG=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('model_config') or '')" "$trigger" 2>/dev/null)
+        DATA_CONFIG=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('data_config') or '')" "$trigger" 2>/dev/null)
 
         if [[ -z "$CHECKPOINT" || ! -f "$CHECKPOINT" ]]; then
             echo "[watcher] WARNING: checkpoint not found: $CHECKPOINT — skipping"
@@ -83,10 +88,13 @@ while true; do
         # Explicitly pass SINGULARITYENV_PYTHONPATH so that --export=ALL cannot
         # propagate a stale value from the training job's container environment.
         _EVAL_VENV=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
+        _EXPORT="ALL,CHECKPOINT=${CHECKPOINT},OUTPUT_DIR=${OUTPUT_DIR},SINGULARITYENV_PYTHONPATH=${_EVAL_VENV}"
+        [[ -n "$MODEL_CONFIG" ]] && _EXPORT="${_EXPORT},MODEL_CONFIG=${MODEL_CONFIG}"
+        [[ -n "$DATA_CONFIG" ]] && _EXPORT="${_EXPORT},DATA_CONFIG=${DATA_CONFIG}"
         JOB_INFO=$(sbatch \
             --job-name="eval_ep$(printf '%04d' $EPOCH)" \
             --output="${LOG_DIR}/eval_aero_ep$(printf '%04d' $EPOCH)_%j.out" \
-            --export="ALL,CHECKPOINT=${CHECKPOINT},OUTPUT_DIR=${OUTPUT_DIR},SINGULARITYENV_PYTHONPATH=${_EVAL_VENV}" \
+            --export="${_EXPORT}" \
             "$SBATCH_SCRIPT" 2>&1)
 
         echo "[watcher] sbatch result: $JOB_INFO"
