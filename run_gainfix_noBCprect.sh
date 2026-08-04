@@ -29,6 +29,18 @@
 # unetTrainer.py:1495) and target_var_weights=[1.0] (default [1.0,0.5] has 2
 # entries vs the model's 1 output channel, unetTrainer.py:1587).
 #
+# ALSO required, found 2026-08-04 after the fixed run trained 448 epochs with
+# ZERO successful auto-evals: the auto-eval trigger pipeline (_spawn_eval →
+# eval_triggers/*.json → watch_eval_triggers.sh → sbatch run_eval_aero.sh)
+# didn't know about --model-config/--data-config and was evaluating every
+# checkpoint against the DEFAULT 2/2/3-channel config → state_dict shape
+# mismatch, every time. Fixed by adding eval_model_config/eval_data_config
+# hyperparameters (configs/config_aero.yaml) that _spawn_eval threads through
+# the trigger JSON and watch_eval_triggers.sh forwards as MODEL_CONFIG/
+# DATA_CONFIG env vars. Set below — takes effect on the NEXT trained epoch
+# after this fix lands (git pull), not retroactively on already-trained
+# checkpoints (re-eval those manually, see run_eval_aero.sh header).
+#
 # FRESH RUN, cannot fork from any existing checkpoint — channel counts differ
 # (1/1/2 here vs 2/2/3 in run_gainfix), so conv shapes are incompatible.
 # save_name=run_gainfix_noBCprect.pt starts from scratch.
@@ -178,7 +190,9 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.lr_decay_horizon_steps=60000 \
         trainer.hyperparameters.sampled_gain_loss_scale=0.05 \
         trainer.hyperparameters.cfg_bc_drop_prob=0.0 \
-        trainer.hyperparameters.target_var_weights=[1.0]
+        trainer.hyperparameters.target_var_weights=[1.0] \
+        trainer.hyperparameters.eval_model_config=configs/config_aero_noBCprect.yaml \
+        trainer.hyperparameters.eval_data_config=configs/config_data_noBCprect.yaml
 '"
 
 srun bash -c "$RUN_CMD" || true

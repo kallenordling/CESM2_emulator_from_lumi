@@ -166,7 +166,8 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         model.out_channels=2 \
         model.cond_channels=3 \
         trainer.hyperparameters.save_name=run_mseyb_BCprect.pt \
-        trainer.hyperparameters.mse_only=true
+        trainer.hyperparameters.mse_only=true \
+        trainer.hyperparameters.eval_data_config=configs/config_data_ybias_BCprect.yaml
 '"
 
 srun bash -c "$RUN_CMD" || true

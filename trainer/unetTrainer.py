@@ -792,6 +792,12 @@ class UNetTrainer:
                 "output_dir": output_dir,
                 "sbatch_script": os.path.join(project_root, getattr(self, "eval_script", "run_eval_aero.sh")),
                 "log_dir": os.path.join(project_root, "logs"),
+                # Only set for runs whose model.{in,out,cond}_channels differ
+                # from the production default — see eval_model_config comment
+                # in configs/config_aero.yaml. null/absent = watcher uses
+                # eval_aero.py's own hardcoded defaults (unchanged behavior).
+                "model_config": getattr(self, "eval_model_config", None),
+                "data_config": getattr(self, "eval_data_config", None),
             }
             # Write atomically: tmp file then rename so watcher never sees a partial file
             tmp = trigger_path + ".tmp"
