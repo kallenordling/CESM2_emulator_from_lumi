@@ -418,7 +418,15 @@ def main():
                          "Note: sulfur is SO2 -- there is no 'SUL' in input4MIPs.")
     ap.add_argument("--kinds", nargs="+", default=["anthro"],
                     choices=sorted(KIND_SUFFIX),
-                    help="Emission kind(s): anthro (surface), openburning, air.")
+                    help="Emission kind(s) fetched for EVERY species: anthro "
+                         "(surface), openburning, air.")
+    ap.add_argument("--air-species", nargs="+", default=["CO2"],
+                    help="Species to additionally fetch _em_AIR_anthro (aircraft) "
+                         "for. data/make_co2_files.py sums AIR+anthro for CO2 but "
+                         "make_aerosol_files.py uses surface anthro ONLY for "
+                         "SO2/BC, so the default mirrors that. AIR files carry a "
+                         "level dim and are large (~5.5 GB for CO2). Pass 'none' "
+                         "to skip.")
     ap.add_argument("--grid-label", default="gn",
                     help="gn = 0.5deg global monthly (recommended); "
                          "gr = 0.1deg regridded, 1980-2023 only.")
@@ -447,6 +455,14 @@ def main():
     session = make_session(timeout=args.timeout, verify=verify)
 
     variables = [f"{sp}{KIND_SUFFIX[k]}" for sp in args.species for k in args.kinds]
+    # Aircraft emissions only for the species that actually consume them (CO2).
+    air_species = [] if args.air_species == ["none"] else args.air_species
+    for sp in air_species:
+        if sp not in args.species:
+            continue
+        v = f"{sp}{KIND_SUFFIX['air']}"
+        if v not in variables:
+            variables.append(v)
 
     print(f"mip_era   : CMIP7 (project=input4MIPs)")
     print(f"sources   : {', '.join(args.sources)}")
