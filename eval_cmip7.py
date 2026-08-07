@@ -197,12 +197,28 @@ def main() -> int:
             print("  [PCA] fitting a fresh basis (forced)")
         else:
             entry = (pca_map or {}).get(exp["pca_key"]) if exp["pca_key"] else None
-            if entry is not None:
-                pca_objects = entry
-                print(f"  [PCA] using persisted '{exp['pca_key']}' basis")
+            # A per-scenario entry is {"cond": [...], "target": [...]} (see
+            # MultiExperimentDataset.get_pca_state); pca_denoise_dataset wants
+            # the per-CHANNEL LIST, so unwrap "cond" exactly as eval_aero.py:2306
+            # does. Passing the dict through raises KeyError: 0 downstream.
+            cond_basis = entry.get("cond") if isinstance(entry, dict) else entry
+            if cond_basis is not None:
+                # pca_denoise_dataset indexes [0..n_cond-1]; a shorter list would
+                # IndexError deep in the PCA loop with no useful message.
+                if len(cond_basis) != len(cond_vars):
+                    print(f"  [PCA] ERROR: persisted '{exp['pca_key']}' basis has "
+                          f"{len(cond_basis)} channel bases but cond_vars has "
+                          f"{len(cond_vars)} ({cond_vars}).")
+                    print("  [PCA] The checkpoint was trained with a different cond "
+                          "channel set than --data-config declares. Use the matching "
+                          "data config, or pass --pca-basis fit to fit fresh.")
+                    return 1
+                pca_objects = cond_basis
+                print(f"  [PCA] using persisted '{exp['pca_key']}' basis "
+                      f"({len(cond_basis)} channel bases)")
             else:
                 pca_objects = "fit"
-                print("  [PCA] OOD scenario — fitting a fresh per-scenario basis")
+                print("  [PCA] no persisted basis — fitting a fresh per-scenario basis")
 
         cond_tensor, years, lat, lon = EA.build_cond_tensor(
             exp["cond_file"], cond_vars, "time",
