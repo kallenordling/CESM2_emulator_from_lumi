@@ -257,8 +257,21 @@ def main() -> int:
             gen_ensemble = None
 
         if gen_ensemble is None:
+            # Per-member caching as well: a SLURM timeout mid-experiment would
+            # otherwise discard every finished member, since the whole-experiment
+            # cache is only written after the last one. Each member is ~6-15 min.
             members = []
             for m in range(args.members):
+                mcache = os.path.join(
+                    args.output_dir, f"_samples_{args.target_var}_{name}_m{m}.npy")
+                if os.path.exists(mcache) and not args.no_cache:
+                    arr = np.load(mcache)
+                    if arr.shape[0] == len(years):
+                        print(f"  member {m+1}/{args.members} — reusing {mcache}")
+                        members.append(arr)
+                        continue
+                    print(f"  member {m+1}/{args.members} — cached shape "
+                          f"{arr.shape} != ({len(years)}, …), regenerating")
                 print(f"  member {m+1}/{args.members} …")
                 gen_norm = EA.generate_timeseries(
                     model, scheduler, cond_tensor, device, dtype,
@@ -271,10 +284,18 @@ def main() -> int:
                     out_channels=out_channels,
                     target_channel=target_channel,
                 )
-                members.append(denorm_fn(gen_norm))
+                arr = denorm_fn(gen_norm)
+                np.save(mcache, arr)
+                members.append(arr)
             gen_ensemble = np.stack(members, axis=0)      # (N, T, H, W)
             np.save(cache, gen_ensemble)
             print(f"  cached samples -> {cache}")
+            # Whole-experiment cache now supersedes the per-member files.
+            for m in range(args.members):
+                mcache = os.path.join(
+                    args.output_dir, f"_samples_{args.target_var}_{name}_m{m}.npy")
+                if os.path.exists(mcache):
+                    os.remove(mcache)
         gen_mean = gen_ensemble.mean(axis=0)          # (T, H, W)
 
         # Baseline from the model's own CMIP7-hist 1850-1900 window.
