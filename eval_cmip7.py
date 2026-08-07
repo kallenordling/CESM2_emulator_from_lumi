@@ -107,6 +107,9 @@ def main() -> int:
     ap.add_argument("--fp32", action="store_true", help="Disable bf16 autocast")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--target-var", default="TREFHT", choices=["TREFHT", "PRECT"])
+    ap.add_argument("--no-cache", action="store_true",
+                    help="Ignore cached samples (_samples_*.npy in --output-dir) "
+                         "and always re-run the diffusion sampling")
     ap.add_argument("--pca-basis", default="auto",
                     choices=["auto", "fit", "none"],
                     help="auto = persisted basis when the checkpoint has one for "
@@ -228,25 +231,50 @@ def main() -> int:
         )
         if LAT is None:
             LAT, LON = lat, lon
+            # save_netcdf() and plot_anomaly_maps() read eval_aero's MODULE-LEVEL
+            # LAT/LON (eval_aero.py:224-225), which are None until eval_aero's own
+            # main() sets them — and that never runs when we import the module.
+            # Publish them here or those calls blow up with
+            # "NoneType has no attribute deg2rad" AFTER all the sampling is done.
+            EA.LAT, EA.LON = lat, lon
         print(f"  cond {years[0]}–{years[-1]}  shape={tuple(cond_tensor.shape)}")
 
-        members = []
-        for m in range(args.members):
-            print(f"  member {m+1}/{args.members} …")
-            gen_norm = EA.generate_timeseries(
-                model, scheduler, cond_tensor, device, dtype,
-                args.sample_steps, args.batch_size, seed=m,
-                guidance_co2=args.guidance_co2,
-                guidance_sul=args.guidance_sul,
-                guidance_bc=args.guidance_bc,
-                force_cfg=args.force_cfg,
-                autocast_dtype=autocast_dt,
-                out_channels=out_channels,
-                target_channel=target_channel,
-            )
-            members.append(denorm_fn(gen_norm))
+        # Sampling costs ~15 min per member, so a failure in the cheap
+        # write/plot stage downstream would otherwise discard an hour-plus of GPU
+        # time. Cache the denormalised ensemble per experiment and reuse it.
+        cache = os.path.join(args.output_dir,
+                             f"_samples_{args.target_var}_{name}.npy")
+        if os.path.exists(cache) and not args.no_cache:
+            gen_ensemble = np.load(cache)
+            if (gen_ensemble.shape[0] == args.members
+                    and gen_ensemble.shape[1] == len(years)):
+                print(f"  reusing cached samples {gen_ensemble.shape} from {cache}")
+            else:
+                print(f"  cached samples {gen_ensemble.shape} do not match "
+                      f"({args.members}, {len(years)}, …) — regenerating")
+                gen_ensemble = None
+        else:
+            gen_ensemble = None
 
-        gen_ensemble = np.stack(members, axis=0)      # (N, T, H, W)
+        if gen_ensemble is None:
+            members = []
+            for m in range(args.members):
+                print(f"  member {m+1}/{args.members} …")
+                gen_norm = EA.generate_timeseries(
+                    model, scheduler, cond_tensor, device, dtype,
+                    args.sample_steps, args.batch_size, seed=m,
+                    guidance_co2=args.guidance_co2,
+                    guidance_sul=args.guidance_sul,
+                    guidance_bc=args.guidance_bc,
+                    force_cfg=args.force_cfg,
+                    autocast_dtype=autocast_dt,
+                    out_channels=out_channels,
+                    target_channel=target_channel,
+                )
+                members.append(denorm_fn(gen_norm))
+            gen_ensemble = np.stack(members, axis=0)      # (N, T, H, W)
+            np.save(cache, gen_ensemble)
+            print(f"  cached samples -> {cache}")
         gen_mean = gen_ensemble.mean(axis=0)          # (T, H, W)
 
         # Baseline from the model's own CMIP7-hist 1850-1900 window.
