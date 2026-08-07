@@ -1,0 +1,9 @@
+scenario,fair_scenario,year,emulator_GtCO2_yr,fair_ffi_GtCO2_yr,ratio
+h,high-extension,2000,25.777,25.502,1.0108
+h,high-extension,2020,35.739,35.008,1.0209
+h,high-extension,2050,42.9,54.425,0.7882
+h,high-extension,2100,53.216,71.146,0.748
+vl,verylow,2000,25.777,25.502,1.0108
+vl,verylow,2020,35.739,35.008,1.0209
+vl,verylow,2050,2.057,1.241,1.658
+vl,verylow,2100,-1.063,-3.281,0.3239
