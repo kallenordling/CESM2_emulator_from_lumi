@@ -38,9 +38,28 @@ OUTPUT = "generated_samples_1850_2100.nc"
 # YEARS TO GENERATE
 # ============================================================
 
+#
+# ClimateDataset does NOT expose every year. load_data() hardcodes a subsample
+# (data/climate_dataset.py:585-586):
+#
+#     hist_years   = range(1850, 2015, 5)   -> every 5th year, 33 values
+#     future_years = range(2015, 2101, 2)   -> every other year, 43 values
+#
+# so asking for np.arange(1850, 2015) can never be satisfied through this path.
+# The chunk files on disk DO hold every year; the decimation is applied at load
+# time to cut training volume.
+#
+# Set USE_DATASET_YEARS = True to generate exactly what the dataset provides
+# (76 years total). To get EVERY year instead, the cond tensor has to be built
+# straight from the cond NetCDF rather than through ClimateDataset — that is
+# what eval_aero.build_cond_tensor / eval_cmip7.py do, and why they cover all
+# 174 hist years.
+#
+USE_DATASET_YEARS = True
+
 SCENARIO_YEARS = {
-    "hist": np.arange(1850, 2015),
-    "ssp370": np.arange(2015, 2101),
+    "hist": np.arange(1850, 2015, 5),
+    "ssp370": np.arange(2015, 2101, 2),
 }
 
 
@@ -435,13 +454,38 @@ for scenario, years in SCENARIO_YEARS.items():
     ]
 
 
-    if missing_years:
+    if missing_years and USE_DATASET_YEARS:
+
+        # Fall back to exactly what this scenario provides, and say so loudly —
+        # silently generating a different set of years than requested would be
+        # worse than either erroring or reporting it.
+        kept = sorted(int(y) for y in available)
+
+        print(
+            f"\nNOTE: {scenario} — {len(missing_years)} of "
+            f"{len(years)} requested years are not in the dataset "
+            f"(it subsamples: hist every 5th year, future every other; "
+            f"data/climate_dataset.py:585-586)."
+        )
+        print(
+            f"      Generating the {len(kept)} years it does provide: "
+            f"{kept[0]}..{kept[-1]}"
+        )
+
+        SCENARIO_YEARS[scenario] = np.array(kept)
+
+    elif missing_years:
 
         raise RuntimeError(
             f"{scenario} is missing "
             f"{len(missing_years)} requested years. "
             f"First missing years: "
-            f"{missing_years[:10]}"
+            f"{missing_years[:10]}. "
+            f"The dataset subsamples (hist every 5th year, future every "
+            f"other; data/climate_dataset.py:585-586) — set "
+            f"USE_DATASET_YEARS = True to generate what it provides, or "
+            f"build the cond tensor directly from the cond NetCDF as "
+            f"eval_aero.build_cond_tensor does to cover every year."
         )
 
 
