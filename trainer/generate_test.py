@@ -92,7 +92,7 @@ print("\nLoading checkpoint:")
 
 checkpoint = torch.load(
     CHECKPOINT,
-    map_location="cpu",
+    map_location="cpu",weights_only=False,
 )
 
 print("  ", CHECKPOINT)
