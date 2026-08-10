@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import contextlib
 import os
 
 import numpy as np
@@ -27,8 +28,16 @@ MODEL_CONFIG = "config_aero"
 # Number of stochastic realizations PER YEAR
 N_SAMPLES = 10
 
-# Number of reverse diffusion steps
-SAMPLE_STEPS = 100
+# Number of reverse diffusion steps.
+# 50 is what eval_aero.py / eval_cmip7.py use in production, so results stay
+# comparable with the existing evaluations — and it halves the runtime versus 100.
+SAMPLE_STEPS = 50
+
+# Mixed-precision inference. eval_aero.py defaults to bf16 (eval_aero.py:2124)
+# and gets ~2x for it; ops MIOpen has no bf16 kernel for fall back to fp32
+# cleanly inside the autocast region, so there is no dtype mismatch.
+# Set to None for full fp32 (e.g. to A/B the effect on the output).
+AUTOCAST_DTYPE = torch.bfloat16
 
 # Output NetCDF
 OUTPUT = "generated_samples_1850_2100.nc"
@@ -604,21 +613,39 @@ def generate_samples(
         # Model predicts v
         # ----------------------------------------------------
 
-        model_output = model(
-            sample,
-            scheduler.log_snr(t),
-            cond_map=cond_batch,
+        # Mixed-precision only around the UNet call (mirrors
+        # eval_aero.generate_timeseries:485). Model and tensors stay fp32; ops
+        # auto-cast where the backend supports it, and ops MIOpen has no bf16
+        # kernel for fall back to fp32 cleanly inside the region.
+        amp_ctx = (
+            torch.autocast(
+                device_type=device.type,
+                dtype=AUTOCAST_DTYPE,
+            )
+            if AUTOCAST_DTYPE is not None
+            else contextlib.nullcontext()
         )
+
+        with amp_ctx:
+
+            model_output = model(
+                sample,
+                scheduler.log_snr(t),
+                cond_map=cond_batch,
+            )
 
         # ----------------------------------------------------
         # v -> x0
         # ----------------------------------------------------
 
+        # Scheduler math expects fp32; autocast may return bf16, so cast the
+        # prediction back to the sample dtype before the update
+        # (mirrors eval_aero.py:508-510).
         x_start = (
             scheduler.predict_start_from_v(
                 sample,
                 t,
-                model_output,
+                model_output.to(sample.dtype),
             )
         )
 
