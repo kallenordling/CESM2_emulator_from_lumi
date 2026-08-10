@@ -39,28 +39,25 @@ OUTPUT = "generated_samples_1850_2100.nc"
 # ============================================================
 
 #
-# ClimateDataset does NOT expose every year. load_data() hardcodes a subsample
-# (data/climate_dataset.py:585-586):
+# ALL_YEARS=True builds the loader with EvalClimateDataset instead of
+# ClimateDataset, so every year present in the files is loaded.
 #
-#     hist_years   = range(1850, 2015, 5)   -> every 5th year, 33 values
-#     future_years = range(2015, 2101, 2)   -> every other year, 43 values
+# ClimateDataset (the TRAINING class) subsamples in load_data(): every 5th
+# historical year and every other future year, ~76 of 251. That is deliberate —
+# it is what every checkpoint was fitted on — but it leaves 5-year gaps when
+# generating a continuous timeseries. EvalClimateDataset overrides only the year
+# selection; normalisation, smoothing, PCA and tensor layout are identical.
 #
-# so asking for np.arange(1850, 2015) can never be satisfied through this path.
-# The chunk files on disk DO hold every year; the decimation is applied at load
-# time to cut training volume.
-#
-# Set USE_DATASET_YEARS = True to generate exactly what the dataset provides
-# (76 years total). To get EVERY year instead, the cond tensor has to be built
-# straight from the cond NetCDF rather than through ClimateDataset — that is
-# what eval_aero.build_cond_tensor / eval_cmip7.py do, and why they cover all
-# 174 hist years.
-#
-USE_DATASET_YEARS = True
+ALL_YEARS = True
 
+# Requested years. Anything the files do not actually contain is dropped with a
+# printed note when USE_DATASET_YEARS is True (see the verification block).
 SCENARIO_YEARS = {
-    "hist": np.arange(1850, 2015, 5),
-    "ssp370": np.arange(2015, 2101, 2),
+    "hist": np.arange(1850, 2015),
+    "ssp370": np.arange(2015, 2101),
 }
+
+USE_DATASET_YEARS = True
 
 
 # ============================================================
@@ -323,6 +320,9 @@ loader = build_multi_experiment_loader(
     ),
 
     shard_across_ranks=False,
+
+    # EvalClimateDataset instead of the training ClimateDataset -> every year
+    all_years=ALL_YEARS,
 )
 
 print(

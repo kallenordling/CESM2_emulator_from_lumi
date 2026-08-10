@@ -575,6 +575,21 @@ class ClimateDataset(Dataset):
         """Estimates the number of batches in the dataset."""
         return len(self) * len(self.realizations) // batch_size
 
+    def _select_years(self) -> set:
+        """Years to load from each realization (targets AND conditioning).
+
+        TRAINING SUBSAMPLES: every 5th historical year and every other future
+        year, ~76 of the 251 available, to cut I/O and epoch time. The chunk
+        files on disk hold every year — this decimation is applied at load time.
+
+        Override in a subclass to change coverage; see EvalClimateDataset, which
+        takes every year for evaluation/generation. Do NOT widen this default —
+        it changes what every trained model was fitted on.
+        """
+        hist_years = list(range(1850, 2015, 5))    # every 5th year
+        future_years = list(range(2015, 2101, 2))  # every other year
+        return set(hist_years + future_years)
+
     def load_data(self, realization: str):
         """Loads the data from the specified paths and returns it as an xarray Dataset.
 
@@ -582,9 +597,7 @@ class ClimateDataset(Dataset):
         are skipped entirely, which is useful for diagnostics and tools that
         only need the conditioning data.
         """
-        hist_years = list(range(1850, 2015, 5))  # every 5th year
-        future_years = list(range(2015, 2101, 2))  # every other year
-        selected_years = set(hist_years + future_years)
+        selected_years = self._select_years()
 
         # ── Target climate data (skipped in cond_only mode) ──────────────────
         if not self.cond_only:
@@ -1076,6 +1089,62 @@ class ClimateDataset(Dataset):
                 "target tensor_data is not available for iteration."
             )
         return self.tensor_data[:, idx : idx + self.seq_len], self.tensor_data_cond[:, idx : idx + self.seq_len]
+
+
+class EvalClimateDataset(ClimateDataset):
+    """ClimateDataset that loads EVERY year, for evaluation and generation.
+
+    Identical to :class:`ClimateDataset` in every respect except year coverage.
+    Training subsamples — every 5th historical year and every other future year,
+    ~76 of 251 (see :meth:`ClimateDataset._select_years`) — which is fine for
+    fitting but leaves gaps when generating a continuous timeseries: a run asking
+    for 1850..2014 gets 33 years spaced 5 apart.
+
+    This class takes all years in ``[year_min, year_max]``. The chunk files on
+    disk already contain them, so nothing else changes: same normalisation, same
+    smoothing, same PCA, same tensor layout. Only more timesteps are loaded, so
+    memory and load time scale roughly with the extra coverage (~3.3x for the
+    full range).
+
+    Do NOT use this for training — the model was fitted on the subsampled years,
+    and changing coverage changes the effective sampling distribution.
+
+    Example
+    -------
+        ds = EvalClimateDataset(
+            seq_len=1,
+            realizations=["LE2-1001.001"],
+            data_dir=".../training_data/TREFHT/hist",
+            target_vars=["TREFHT"],
+            cond_file=".../emissions_hist_only_timefixed_bc.nc",
+            cond_vars=["CO2", "SUL", "BC"],
+        )
+        ds.load_data("LE2-1001.001")
+        ds._time_values          # every year present in the files
+
+    Note that for CONDITIONING-only work (no CESM2 target needed, e.g. the CMIP7
+    scenarios) ``eval_aero.build_cond_tensor`` reads the cond NetCDF directly and
+    is simpler and cheaper than going through a dataset at all.
+    """
+
+    #: Inclusive year bounds. Widen/narrow per instance if needed.
+    YEAR_MIN = 1850
+    YEAR_MAX = 2100
+
+    def __init__(self, *args, year_min: int = None, year_max: int = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if year_min is not None:
+            self.YEAR_MIN = int(year_min)
+        if year_max is not None:
+            self.YEAR_MAX = int(year_max)
+
+    def _select_years(self) -> set:
+        """Every year in [YEAR_MIN, YEAR_MAX].
+
+        load_data() intersects this with what each file actually holds, so a
+        scenario covering only part of the range is handled without error.
+        """
+        return set(range(self.YEAR_MIN, self.YEAR_MAX + 1))
 
 
 class StratifiedPeriodSampler:
