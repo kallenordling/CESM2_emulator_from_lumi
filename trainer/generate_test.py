@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import os
-import sys
 
 import numpy as np
 import torch
@@ -12,7 +11,6 @@ from hydra import initialize_config_dir, compose
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
-# Import from the repository's data package
 from data.multi_experiment_dataset import build_multi_experiment_loader
 from data.climate_dataset import set_minmax_override
 
@@ -26,20 +24,24 @@ CHECKPOINT = "runs/run_mseyb_BCprect_509.pt"
 CONFIG_DIR = "configs"
 MODEL_CONFIG = "config_aero"
 
-# Scenario to use from the data YAML
-SCENARIO = "ssp370"
-
-# Which conditioning window to use
-CONDITIONING_INDEX = 0
-
-# Number of stochastic realizations for the same condition
+# Number of stochastic realizations PER YEAR
 N_SAMPLES = 10
 
 # Number of reverse diffusion steps
 SAMPLE_STEPS = 100
 
-# Output file
-OUTPUT = "generated_samples.nc"
+# Output NetCDF
+OUTPUT = "generated_samples_1850_2100.nc"
+
+
+# ============================================================
+# YEARS TO GENERATE
+# ============================================================
+
+SCENARIO_YEARS = {
+    "hist": np.arange(1850, 2015),
+    "ssp370": np.arange(2015, 2101),
+}
 
 
 # ============================================================
@@ -65,7 +67,10 @@ with initialize_config_dir(
         config_name=MODEL_CONFIG
     )
 
-print("Loaded model config:", MODEL_CONFIG)
+print(
+    "Loaded model config:",
+    MODEL_CONFIG
+)
 
 
 # ============================================================
@@ -81,7 +86,10 @@ data_cfg = OmegaConf.load(
     data_config_file
 )
 
-print("Loaded data config:", data_config_file)
+print(
+    "Loaded data config:",
+    data_config_file
+)
 
 
 # ============================================================
@@ -92,10 +100,12 @@ print("\nLoading checkpoint:")
 
 checkpoint = torch.load(
     CHECKPOINT,
-    map_location="cpu",weights_only=False,
+    map_location="cpu",
+    weights_only=False,
 )
 
 print("  ", CHECKPOINT)
+
 print("Checkpoint keys:")
 
 for key in checkpoint.keys():
@@ -107,20 +117,15 @@ for key in checkpoint.keys():
 # ============================================================
 
 #
-# IMPORTANT:
-#
-# This must happen BEFORE the dataset is constructed.
-#
-# The dataset will then use exactly the same CO2/SUL/BC
-# normalization ranges that were used during training.
+# This MUST happen before the dataset is constructed.
 #
 
 if "COND_NORM" not in checkpoint:
 
     raise RuntimeError(
         "Checkpoint does not contain COND_NORM. "
-        "Cannot guarantee that conditioning is normalized "
-        "the same way as during training."
+        "Cannot reproduce the conditioning normalization "
+        "used during training."
     )
 
 print("\nRestoring COND_NORM...")
@@ -140,7 +145,7 @@ accelerator = Accelerator()
 
 
 # ============================================================
-# CREATE MODEL FROM CONFIG
+# CREATE MODEL
 # ============================================================
 
 print("\nCreating model from config...")
@@ -163,21 +168,23 @@ missing, unexpected = model.load_state_dict(
     strict=False,
 )
 
-# Scalar coefficients for the EBM auxiliary loss. unetTrainer.py:386-391
-# creates them as Parameters and register_parameter()s them ONTO the model, so
-# any checkpoint trained with the EBM term carries them — but they take no part
-# in the diffusion forward pass, so they are expected extras at inference and
-# safe to drop. eval_aero.py ignores them the same way (strict=False).
+
+# These are created by the trainer for the EBM auxiliary
+# loss but are not used by the diffusion forward pass.
+
 TRAINER_ONLY_KEYS = {
     "ebm_alpha_ghg",
     "ebm_alpha_aero",
     "ebm_lambda",
 }
 
+
 unexpected_real = [
-    key for key in unexpected
+    key
+    for key in unexpected
     if key not in TRAINER_ONLY_KEYS
 ]
+
 
 if missing:
 
@@ -186,45 +193,51 @@ if missing:
     for key in missing:
         print("   ", key)
 
+
 if unexpected:
 
     print("\nUnexpected model keys:")
 
     for key in unexpected:
 
-        note = (
-            "  (trainer-only, ignored)"
-            if key in TRAINER_ONLY_KEYS
-            else ""
-        )
+        if key in TRAINER_ONLY_KEYS:
 
-        print("   ", key + note)
+            print(
+                "   ",
+                key,
+                "(trainer-only, ignored)"
+            )
 
-# MISSING keys are always fatal: the model would run with zero-initialised
-# weights and silently produce garbage. Extra keys are only fatal when they are
-# not the known trainer-side ones.
+        else:
+
+            print(
+                "   ",
+                key
+            )
+
+
 if missing or unexpected_real:
 
     raise RuntimeError(
-        "Model checkpoint does not match the model created from "
-        f"{MODEL_CONFIG}.yaml — "
-        f"{len(missing)} missing, "
-        f"{len(unexpected_real)} unexpected "
-        "(excluding known trainer-only keys). "
-        "Check that the model config's in/out/cond channel counts match "
-        "the arm this checkpoint came from."
+        "Model checkpoint does not match "
+        "the model created from config."
     )
+
 
 model.eval()
 
-print("EMA model loaded successfully.")
+print(
+    "EMA model loaded successfully."
+)
 
 
 # ============================================================
-# CREATE SCHEDULER FROM CONFIG
+# CREATE SCHEDULER
 # ============================================================
 
-print("\nCreating scheduler from config...")
+print(
+    "\nCreating scheduler from config..."
+)
 
 scheduler = instantiate(
     cfg.scheduler
@@ -232,7 +245,9 @@ scheduler = instantiate(
 
 scheduler = scheduler.to(device)
 
-print("Scheduler created.")
+print(
+    "Scheduler created."
+)
 
 
 # ============================================================
@@ -291,16 +306,14 @@ loader = build_multi_experiment_loader(
     shard_across_ranks=False,
 )
 
-print("Dataset created.")
+print(
+    "Dataset created."
+)
 
 
 # ============================================================
-# RESTORE PCA STATE
+# RESTORE PCA
 # ============================================================
-
-#
-# PCA is stored separately for the different scenarios.
-#
 
 if "PCA" not in checkpoint:
 
@@ -308,17 +321,21 @@ if "PCA" not in checkpoint:
         "Checkpoint does not contain PCA state."
     )
 
-print("\nRestoring PCA state...")
+print(
+    "\nRestoring PCA state..."
+)
 
 loader.dataset.set_pca_state(
     checkpoint["PCA"]
 )
 
-print("PCA restored.")
+print(
+    "PCA restored."
+)
 
 
 # ============================================================
-# FIND REQUESTED SCENARIO
+# CHECK SCENARIOS
 # ============================================================
 
 print(
@@ -326,131 +343,172 @@ print(
     loader.dataset.scenario_names,
 )
 
-if SCENARIO not in loader.dataset.scenario_names:
 
-    raise ValueError(
-        f"Scenario '{SCENARIO}' not found. "
-        f"Available scenarios: "
-        f"{loader.dataset.scenario_names}"
-    )
+for scenario in SCENARIO_YEARS:
 
-scenario_index = (
+    if scenario not in loader.dataset.scenario_names:
+
+        raise ValueError(
+            f"Required scenario '{scenario}' "
+            f"not found. Available scenarios: "
+            f"{loader.dataset.scenario_names}"
+        )
+
+
+# ============================================================
+# GET DATASETS
+# ============================================================
+
+hist_index = (
     loader.dataset.scenario_names.index(
-        SCENARIO
+        "hist"
     )
 )
 
-scenario_dataset = (
+ssp370_index = (
+    loader.dataset.scenario_names.index(
+        "ssp370"
+    )
+)
+
+hist_dataset = (
     loader.dataset.datasets[
-        scenario_index
+        hist_index
     ]
 )
 
-print(
-    "Using scenario:",
-    SCENARIO
+ssp370_dataset = (
+    loader.dataset.datasets[
+        ssp370_index
+    ]
 )
 
 
 # ============================================================
-# GET CONDITIONING MAP
+# PRINT AVAILABLE YEARS
 # ============================================================
 
-print(
-    "\nLoading conditioning window..."
+print("\nDataset year ranges:")
+
+hist_available_years = np.asarray(
+    hist_dataset._time_values
 )
 
-# scenario_dataset is the inner ClimateDataset, whose __getitem__ returns
-# (x, cond) — 2 values (data/climate_dataset.py:1078). Only the OUTER
-# MultiExperimentDataset appends scenario_id, by wrapping this call
-# (data/multi_experiment_dataset.py:171-175). We indexed into .datasets[...]
-# to pick the scenario ourselves, so we unpack 2 and rebuild scenario_id from
-# the index we already resolved.
-if CONDITIONING_INDEX >= len(scenario_dataset):
+ssp370_available_years = np.asarray(
+    ssp370_dataset._time_values
+)
 
-    raise IndexError(
-        f"CONDITIONING_INDEX={CONDITIONING_INDEX} is out of range for "
-        f"scenario '{SCENARIO}', which has {len(scenario_dataset)} "
-        f"conditioning windows in the currently loaded realization."
+print(
+    "  hist:",
+    hist_available_years.min(),
+    "-",
+    hist_available_years.max(),
+)
+
+print(
+    "  ssp370:",
+    ssp370_available_years.min(),
+    "-",
+    ssp370_available_years.max(),
+)
+
+
+# ============================================================
+# VERIFY REQUESTED YEARS EXIST
+# ============================================================
+
+for scenario, years in SCENARIO_YEARS.items():
+
+    if scenario == "hist":
+
+        available = hist_available_years
+
+    else:
+
+        available = ssp370_available_years
+
+
+    missing_years = [
+        int(year)
+        for year in years
+        if year not in available
+    ]
+
+
+    if missing_years:
+
+        raise RuntimeError(
+            f"{scenario} is missing "
+            f"{len(missing_years)} requested years. "
+            f"First missing years: "
+            f"{missing_years[:10]}"
+        )
+
+
+# ============================================================
+# TARGET VARIABLES
+# ============================================================
+
+target_vars = OmegaConf.to_container(
+    data_cfg.target_vars,
+    resolve=True,
+)
+
+print(
+    "\nTarget variables:",
+    target_vars
+)
+
+
+if target_vars != ["TREFHT", "PRECT"]:
+
+    raise RuntimeError(
+        "This script expects target_vars to be "
+        "['TREFHT', 'PRECT']."
     )
 
-x, cond = scenario_dataset[
-    CONDITIONING_INDEX
-]
-
-scenario_id = torch.tensor(
-    scenario_index,
-    dtype=torch.long,
-)
-
-#
-# Dataset returns:
-#
-#     cond = [C, T, lat, lon]
-#
-# Add batch dimension:
-#
-#     [1, C, T, lat, lon]
-#
-
-cond = cond.unsqueeze(0)
-
-cond = cond.to(
-    device=device,
-    dtype=torch.float32,
-)
-
-print(
-    "Conditioning shape:",
-    tuple(cond.shape)
-)
-
 
 # ============================================================
-# CONTINUOUS DIFFUSION SAMPLING
+# GENERATION FUNCTION
 # ============================================================
 
 @torch.inference_mode()
-def generate_sample(
+def generate_samples(
     cond,
-    model,
-    scheduler,
-    sample_steps,
+    n_samples,
 ):
     """
-    Generate one stochastic realization.
+    Generate n_samples stochastic realizations
+    for one conditioning map.
 
-    This follows the continuous-time sampling formulation
-    used by the production evaluator:
+    cond:
+        [1, cond_channels, time, lat, lon]
 
-        t = 1 -> 0
-
-        model input = scheduler.log_snr(t)
-
-        v prediction
-            ->
-        x0 prediction
-            ->
-        q posterior
-            ->
-        next sample
+    Returns:
+        [n_samples, 2, time, lat, lon]
     """
 
-    batch_size = cond.shape[0]
+    # --------------------------------------------------------
+    # Repeat conditioning for the whole ensemble
+    # --------------------------------------------------------
+
+    cond_batch = cond.repeat(
+        n_samples,
+        1,
+        1,
+        1,
+        1,
+    )
+
+    batch_size = n_samples
 
     # --------------------------------------------------------
-    # Output channels
+    # Output shape
     # --------------------------------------------------------
 
     n_channels = len(
         data_cfg.target_vars
     )
-
-    # --------------------------------------------------------
-    # Output shape
-    #
-    # [batch, channels, time, lat, lon]
-    # --------------------------------------------------------
 
     shape = (
         batch_size,
@@ -461,7 +519,7 @@ def generate_sample(
     )
 
     # --------------------------------------------------------
-    # Start from Gaussian noise
+    # Start from independent Gaussian noise
     # --------------------------------------------------------
 
     sample = torch.randn(
@@ -473,13 +531,13 @@ def generate_sample(
     # --------------------------------------------------------
     # Continuous diffusion times
     #
-    # 1.0 -> 0.0
+    # 1 -> 0
     # --------------------------------------------------------
 
     steps = torch.linspace(
         1.0,
         0.0,
-        sample_steps + 1,
+        SAMPLE_STEPS + 1,
         device=device,
         dtype=torch.float32,
     )
@@ -488,7 +546,7 @@ def generate_sample(
     # Reverse diffusion
     # --------------------------------------------------------
 
-    for i in range(sample_steps):
+    for i in range(SAMPLE_STEPS):
 
         t = steps[i].expand(
             batch_size
@@ -500,21 +558,16 @@ def generate_sample(
 
         # ----------------------------------------------------
         # Model predicts v
-        #
-        # IMPORTANT:
-        #
-        # The UNet receives log-SNR, not the integer
-        # diffusion step.
         # ----------------------------------------------------
 
         model_output = model(
             sample,
             scheduler.log_snr(t),
-            cond_map=cond,
+            cond_map=cond_batch,
         )
 
         # ----------------------------------------------------
-        # Convert v prediction to x0
+        # v -> x0
         # ----------------------------------------------------
 
         x_start = (
@@ -539,10 +592,10 @@ def generate_sample(
         )
 
         # ----------------------------------------------------
-        # Final step is deterministic
+        # Final step deterministic
         # ----------------------------------------------------
 
-        if i == sample_steps - 1:
+        if i == SAMPLE_STEPS - 1:
 
             sample = mean
 
@@ -560,343 +613,581 @@ def generate_sample(
 
         print(
             f"\rDiffusion step "
-            f"{i + 1}/{sample_steps}",
+            f"{i + 1}/{SAMPLE_STEPS}",
             end="",
             flush=True,
         )
 
     print()
 
-    return sample
+    return sample.cpu()
 
 
 # ============================================================
-# GENERATE ENSEMBLE
-# ============================================================
-
-print(
-    f"\nGenerating {N_SAMPLES} "
-    f"realizations for {SCENARIO}..."
-)
-
-generated = []
-
-for i in range(N_SAMPLES):
-
-    print(
-        f"\nSample {i + 1}/{N_SAMPLES}"
-    )
-
-    sample = generate_sample(
-        cond,
-        model,
-        scheduler,
-        SAMPLE_STEPS,
-    )
-
-    generated.append(
-        sample.cpu()
-    )
-
-
-# ============================================================
-# COMBINE
+# COORDINATES
 # ============================================================
 
 #
-# Each sample:
-#
-#     [1, C, T, lat, lon]
-#
-# Combined:
-#
-#     [N_SAMPLES, C, T, lat, lon]
+# Use the historical dataset for the common grid.
 #
 
-generated = torch.cat(
-    generated,
-    dim=0,
-)
+coordinate_dataset = hist_dataset
 
-generated = generated.numpy()
-
-print(
-    "\nGenerated model-space shape:",
-    generated.shape
-)
-
-
-# ============================================================
-# DENORMALIZE TARGETS
-# ============================================================
-
-#
-# The diffusion model output is still in normalized model
-# space.
-#
-# Convert it back to physical units before writing NetCDF.
-#
-
-target_vars = OmegaConf.to_container(
-    data_cfg.target_vars,
-    resolve=True,
-)
-
-print(
-    "Target variables:",
-    target_vars
-)
-
-
-if len(target_vars) != 2:
-
-    raise RuntimeError(
-        "This generation script expects exactly "
-        "two target variables: TREFHT and PRECT."
-    )
-
-
-# ------------------------------------------------------------
-# TREFHT
-# ------------------------------------------------------------
-
-trefht_index = target_vars.index(
-    "TREFHT"
-)
-
-trefht = (
-    generated[:, trefht_index]
-    * 21.0
-    + 4.5
+xr_data = getattr(
+    coordinate_dataset,
+    "xr_data",
+    None,
 )
 
 
 # ------------------------------------------------------------
-# PRECT
+# Latitude
 # ------------------------------------------------------------
 
-prect_index = target_vars.index(
-    "PRECT"
-)
-
-prect = np.expm1(
-    generated[:, prect_index]
-    * 0.5703
-    + 1.0727
-)
-
-
-# ============================================================
-# GET COORDINATES
-# ============================================================
-
-dataset = scenario_dataset
-
-
-#
-# ClimateDataset does NOT expose .lat / .lon / .time. What it has is:
-#
-#     .xr_data       the loaded xarray Dataset (lat, lon and the time dim)
-#                    — set at data/climate_dataset.py:641
-#     .lats          latitude only, plural (:637)
-#     ._time_values  integer years (:657)
-#     .time_dim      name of the time dimension
-#
-# Prefer .xr_data, which carries all three on the same object.
-#
-
-lat = lon = None
-
-xr_data = getattr(dataset, "xr_data", None)
+lat = None
 
 if xr_data is not None:
 
-    for name in ("lat", "latitude"):
+    for name in (
+        "lat",
+        "latitude",
+    ):
+
         if name in xr_data.coords:
-            lat = np.asarray(xr_data[name].values)
+
+            lat = np.asarray(
+                xr_data[name].values
+            )
+
             break
 
-    for name in ("lon", "longitude"):
+
+if lat is None and hasattr(
+    coordinate_dataset,
+    "lats",
+):
+
+    lat = np.asarray(
+        coordinate_dataset.lats
+    )
+
+
+# ------------------------------------------------------------
+# Longitude
+# ------------------------------------------------------------
+
+lon = None
+
+if xr_data is not None:
+
+    for name in (
+        "lon",
+        "longitude",
+    ):
+
         if name in xr_data.coords:
-            lon = np.asarray(xr_data[name].values)
+
+            lon = np.asarray(
+                xr_data[name].values
+            )
+
             break
-
-
-# Fallback for latitude: the dataset keeps it separately as .lats (plural).
-
-if lat is None and hasattr(dataset, "lats"):
-    lat = np.asarray(dataset.lats)
 
 
 if lat is None or lon is None:
 
-    raise AttributeError(
-        "Could not resolve lat/lon from the ClimateDataset. "
-        f"lat={'ok' if lat is not None else 'MISSING'}, "
-        f"lon={'ok' if lon is not None else 'MISSING'}. "
-        "Expected .xr_data (with lat/lon coords) or .lats; "
-        f"available attributes: "
-        f"{[a for a in vars(dataset) if not a.startswith('__')][:20]}"
+    raise RuntimeError(
+        "Could not find lat/lon coordinates."
     )
 
 
-# ------------------------------------------------------------
-# Time
-# ------------------------------------------------------------
-#
-# CONDITIONING_INDEX selects a window of length seq_len starting at that
-# index, so the generated time axis is the matching slice of the dataset's
-# own year values — not a slice from 0.
-#
-
-time_values = getattr(dataset, "_time_values", None)
-
-if time_values is not None:
-
-    time = np.asarray(time_values)[
-        CONDITIONING_INDEX:
-        CONDITIONING_INDEX + generated.shape[2]
-    ]
-
-elif xr_data is not None and getattr(dataset, "time_dim", None) in xr_data.coords:
-
-    time = np.asarray(
-        xr_data[dataset.time_dim].values
-    )[
-        CONDITIONING_INDEX:
-        CONDITIONING_INDEX + generated.shape[2]
-    ]
-
-else:
-
-    # Last resort: positional index, so the file is still writable.
-    print(
-        "WARNING: could not resolve real time values — "
-        "writing a positional time index instead."
-    )
-
-    time = np.arange(
-        generated.shape[2]
-    )
-
-
-time = np.asarray(time)[:generated.shape[2]]
-
-print("Coordinates:")
-print("   lat ", lat.shape, f"{lat[0]:.2f} .. {lat[-1]:.2f}")
-print("   lon ", lon.shape, f"{lon[0]:.2f} .. {lon[-1]:.2f}")
-print("   time", time.shape, list(time[:5]))
-
-
-# ============================================================
-# CREATE NETCDF
-# ============================================================
-
-output_ds = xr.Dataset(
-
-    data_vars={
-
-        "TREFHT": (
-            (
-                "sample",
-                "time",
-                "lat",
-                "lon",
-            ),
-            trefht,
-        ),
-
-        "PRECT": (
-            (
-                "sample",
-                "time",
-                "lat",
-                "lon",
-            ),
-            prect,
-        ),
-    },
-
-    coords={
-
-        "sample": np.arange(
-            N_SAMPLES
-        ),
-
-        "time": time,
-
-        "lat": lat,
-
-        "lon": lon,
-    },
+print(
+    "\nGrid:",
+    len(lat),
+    "x",
+    len(lon),
 )
 
 
 # ============================================================
-# ADD VARIABLE ATTRIBUTES
+# CREATE OUTPUT FILE
 # ============================================================
 
-output_ds["TREFHT"].attrs = {
-    "long_name": "Near-surface air temperature",
-    "units": "degC",
-}
+#
+# We create the complete output structure first.
+#
+# Dimensions:
+#
+#     year
+#     sample
+#     lat
+#     lon
+#
+# Each variable:
+#
+#     [year, sample, lat, lon]
+#
+# This gives:
+#
+#     1850 ... 2100
+#       10 samples/year
+#
+# ============================================================
 
-output_ds["PRECT"].attrs = {
-    "long_name": "Precipitation",
-    "units": "mm day-1",
-}
+all_years = np.arange(
+    1850,
+    2101,
+)
+
+n_years = len(
+    all_years
+)
+
+
+# ------------------------------------------------------------
+# Create empty arrays on disk via NetCDF4
+# ------------------------------------------------------------
+
+try:
+
+    from netCDF4 import Dataset
+
+except ImportError:
+
+    raise ImportError(
+        "This script requires netCDF4. "
+        "Install it with: pip install netCDF4"
+    )
+
+
+print(
+    "\nCreating output:",
+    OUTPUT
+)
+
+
+nc = Dataset(
+    OUTPUT,
+    "w",
+)
+
+
+# ------------------------------------------------------------
+# Dimensions
+# ------------------------------------------------------------
+
+nc.createDimension(
+    "year",
+    n_years,
+)
+
+nc.createDimension(
+    "sample",
+    N_SAMPLES,
+)
+
+nc.createDimension(
+    "lat",
+    len(lat),
+)
+
+nc.createDimension(
+    "lon",
+    len(lon),
+)
+
+
+# ------------------------------------------------------------
+# Coordinates
+# ------------------------------------------------------------
+
+year_var = nc.createVariable(
+    "year",
+    "i4",
+    ("year",),
+)
+
+sample_var = nc.createVariable(
+    "sample",
+    "i4",
+    ("sample",),
+)
+
+lat_var = nc.createVariable(
+    "lat",
+    "f4",
+    ("lat",),
+)
+
+lon_var = nc.createVariable(
+    "lon",
+    "f4",
+    ("lon",),
+)
+
+
+year_var[:] = all_years
+sample_var[:] = np.arange(
+    N_SAMPLES
+)
+
+lat_var[:] = lat
+lon_var[:] = lon
+
+
+lat_var.units = "degrees_north"
+lon_var.units = "degrees_east"
+
+
+# ------------------------------------------------------------
+# Target variables
+# ------------------------------------------------------------
+
+trefht_var = nc.createVariable(
+    "TREFHT",
+    "f4",
+    ("year", "sample", "lat", "lon"),
+    zlib=True,
+    complevel=4,
+)
+
+prect_var = nc.createVariable(
+    "PRECT",
+    "f4",
+    ("year", "sample", "lat", "lon"),
+    zlib=True,
+    complevel=4,
+)
+
+
+trefht_var.long_name = (
+    "Near-surface air temperature"
+)
+
+trefht_var.units = "degC"
+
+
+prect_var.long_name = (
+    "Precipitation"
+)
+
+prect_var.units = "mm day-1"
+
+
+# ------------------------------------------------------------
+# Global attributes
+# ------------------------------------------------------------
+
+nc.description = (
+    "Diffusion-model generated climate "
+    "realizations"
+)
+
+nc.checkpoint = CHECKPOINT
+
+nc.sample_steps = SAMPLE_STEPS
+
+nc.samples_per_year = N_SAMPLES
+
+nc.historical_years = (
+    "1850-2014"
+)
+
+nc.ssp370_years = (
+    "2015-2100"
+)
 
 
 # ============================================================
-# ADD GLOBAL ATTRIBUTES
-# ============================================================
-
-output_ds.attrs = {
-
-    "description":
-        "Diffusion-model generated climate realizations",
-
-    "scenario":
-        SCENARIO,
-
-    "checkpoint":
-        CHECKPOINT,
-
-    "sample_steps":
-        SAMPLE_STEPS,
-
-    "n_samples":
-        N_SAMPLES,
-
-    "conditioning_index":
-        CONDITIONING_INDEX,
-}
-
-
-# ============================================================
-# SAVE NETCDF
+# GENERATE HISTORICAL
 # ============================================================
 
 print(
-    "\nWriting NetCDF:",
-    OUTPUT
+    "\n"
+    + "=" * 60
 )
 
-output_ds.to_netcdf(
-    OUTPUT
+print(
+    "GENERATING HISTORICAL: 1850-2014"
 )
+
+print(
+    "=" * 60
+)
+
+
+for year in SCENARIO_YEARS["hist"]:
+
+    year = int(year)
+
+    # --------------------------------------------------------
+    # Find dataset index for this year
+    # --------------------------------------------------------
+
+    indices = np.where(
+        hist_available_years == year
+    )[0]
+
+    if len(indices) != 1:
+
+        raise RuntimeError(
+            f"Could not uniquely locate "
+            f"historical year {year}."
+        )
+
+    index = int(
+        indices[0]
+    )
+
+
+    # --------------------------------------------------------
+    # Get conditioning
+    # --------------------------------------------------------
+
+    x, cond = hist_dataset[
+        index
+    ]
+
+    cond = cond.unsqueeze(0)
+
+    cond = cond.to(
+        device=device,
+        dtype=torch.float32,
+    )
+
+
+    print(
+        f"\nHistorical {year} "
+        f"(index {index})"
+    )
+
+
+    # --------------------------------------------------------
+    # Generate 10 samples simultaneously
+    # --------------------------------------------------------
+
+    generated = generate_samples(
+        cond,
+        N_SAMPLES,
+    )
+
+
+    generated = generated.numpy()
+
+
+    # --------------------------------------------------------
+    # Denormalize
+    # --------------------------------------------------------
+
+    trefht = (
+        generated[:, 0]
+        * 21.0
+        + 4.5
+    )
+
+    prect = np.expm1(
+        generated[:, 1]
+        * 0.5703
+        + 1.0727
+    )
+
+
+    # --------------------------------------------------------
+    # Write
+    # --------------------------------------------------------
+
+    year_index = (
+        year - 1850
+    )
+
+    trefht_var[
+        year_index,
+        :,
+        :,
+        :
+    ] = trefht[:, 0]
+
+    prect_var[
+        year_index,
+        :,
+        :,
+        :
+    ] = prect[:, 0]
+
+
+    nc.sync()
+
+
+# ============================================================
+# GENERATE SSP370
+# ============================================================
+
+print(
+    "\n"
+    + "=" * 60
+)
+
+print(
+    "GENERATING SSP370: 2015-2100"
+)
+
+print(
+    "=" * 60
+)
+
+
+for year in SCENARIO_YEARS["ssp370"]:
+
+    year = int(year)
+
+    # --------------------------------------------------------
+    # Find dataset index for this year
+    # --------------------------------------------------------
+
+    indices = np.where(
+        ssp370_available_years == year
+    )[0]
+
+    if len(indices) != 1:
+
+        raise RuntimeError(
+            f"Could not uniquely locate "
+            f"ssp370 year {year}."
+        )
+
+    index = int(
+        indices[0]
+    )
+
+
+    # --------------------------------------------------------
+    # Get conditioning
+    # --------------------------------------------------------
+
+    x, cond = ssp370_dataset[
+        index
+    ]
+
+    cond = cond.unsqueeze(0)
+
+    cond = cond.to(
+        device=device,
+        dtype=torch.float32,
+    )
+
+
+    print(
+        f"\nSSP370 {year} "
+        f"(index {index})"
+    )
+
+
+    # --------------------------------------------------------
+    # Generate 10 samples simultaneously
+    # --------------------------------------------------------
+
+    generated = generate_samples(
+        cond,
+        N_SAMPLES,
+    )
+
+
+    generated = generated.numpy()
+
+
+    # --------------------------------------------------------
+    # Denormalize
+    # --------------------------------------------------------
+
+    trefht = (
+        generated[:, 0]
+        * 21.0
+        + 4.5
+    )
+
+    prect = np.expm1(
+        generated[:, 1]
+        * 0.5703
+        + 1.0727
+    )
+
+
+    # --------------------------------------------------------
+    # Write
+    # --------------------------------------------------------
+
+    year_index = (
+        year - 1850
+    )
+
+    trefht_var[
+        year_index,
+        :,
+        :,
+        :
+    ] = trefht[:, 0]
+
+    prect_var[
+        year_index,
+        :,
+        :,
+        :
+    ] = prect[:, 0]
+
+
+    nc.sync()
+
+
+# ============================================================
+# CLOSE FILE
+# ============================================================
+
+nc.close()
 
 
 # ============================================================
 # FINISHED
 # ============================================================
 
-print("\nDone!")
-
 print(
-    "\nOutput:"
+    "\n"
+    + "=" * 60
 )
 
 print(
-    output_ds
+    "DONE"
+)
+
+print(
+    "=" * 60
+)
+
+print(
+    "Output:",
+    OUTPUT
+)
+
+print(
+    "Years:",
+    "1850-2100"
+)
+
+print(
+    "Historical:",
+    "1850-2014"
+)
+
+print(
+    "SSP370:",
+    "2015-2100"
+)
+
+print(
+    "Samples per year:",
+    N_SAMPLES
+)
+
+print(
+    "Variables:",
+    "TREFHT, PRECT"
 )
