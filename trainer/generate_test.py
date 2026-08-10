@@ -693,81 +693,99 @@ prect = np.expm1(
 dataset = scenario_dataset
 
 
-# ------------------------------------------------------------
-# Latitude
-# ------------------------------------------------------------
+#
+# ClimateDataset does NOT expose .lat / .lon / .time. What it has is:
+#
+#     .xr_data       the loaded xarray Dataset (lat, lon and the time dim)
+#                    — set at data/climate_dataset.py:641
+#     .lats          latitude only, plural (:637)
+#     ._time_values  integer years (:657)
+#     .time_dim      name of the time dimension
+#
+# Prefer .xr_data, which carries all three on the same object.
+#
 
-if hasattr(dataset, "lat"):
+lat = lon = None
 
-    lat = np.asarray(
-        dataset.lat
-    )
+xr_data = getattr(dataset, "xr_data", None)
 
-elif hasattr(dataset, "latitude"):
+if xr_data is not None:
 
-    lat = np.asarray(
-        dataset.latitude
-    )
+    for name in ("lat", "latitude"):
+        if name in xr_data.coords:
+            lat = np.asarray(xr_data[name].values)
+            break
 
-else:
-
-    raise AttributeError(
-        "Could not find latitude coordinate "
-        "in ClimateDataset."
-    )
+    for name in ("lon", "longitude"):
+        if name in xr_data.coords:
+            lon = np.asarray(xr_data[name].values)
+            break
 
 
-# ------------------------------------------------------------
-# Longitude
-# ------------------------------------------------------------
+# Fallback for latitude: the dataset keeps it separately as .lats (plural).
 
-if hasattr(dataset, "lon"):
+if lat is None and hasattr(dataset, "lats"):
+    lat = np.asarray(dataset.lats)
 
-    lon = np.asarray(
-        dataset.lon
-    )
 
-elif hasattr(dataset, "longitude"):
-
-    lon = np.asarray(
-        dataset.longitude
-    )
-
-else:
+if lat is None or lon is None:
 
     raise AttributeError(
-        "Could not find longitude coordinate "
-        "in ClimateDataset."
+        "Could not resolve lat/lon from the ClimateDataset. "
+        f"lat={'ok' if lat is not None else 'MISSING'}, "
+        f"lon={'ok' if lon is not None else 'MISSING'}. "
+        "Expected .xr_data (with lat/lon coords) or .lats; "
+        f"available attributes: "
+        f"{[a for a in vars(dataset) if not a.startswith('__')][:20]}"
     )
 
 
 # ------------------------------------------------------------
 # Time
 # ------------------------------------------------------------
+#
+# CONDITIONING_INDEX selects a window of length seq_len starting at that
+# index, so the generated time axis is the matching slice of the dataset's
+# own year values — not a slice from 0.
+#
 
-if hasattr(dataset, "time"):
+time_values = getattr(dataset, "_time_values", None)
+
+if time_values is not None:
+
+    time = np.asarray(time_values)[
+        CONDITIONING_INDEX:
+        CONDITIONING_INDEX + generated.shape[2]
+    ]
+
+elif xr_data is not None and getattr(dataset, "time_dim", None) in xr_data.coords:
 
     time = np.asarray(
-        dataset.time
-    )
+        xr_data[dataset.time_dim].values
+    )[
+        CONDITIONING_INDEX:
+        CONDITIONING_INDEX + generated.shape[2]
+    ]
 
 else:
 
-    #
-    # Fallback.
-    #
-    # This is only used if ClimateDataset does not expose
-    # the original time coordinate.
-    #
+    # Last resort: positional index, so the file is still writable.
+    print(
+        "WARNING: could not resolve real time values — "
+        "writing a positional time index instead."
+    )
 
     time = np.arange(
         generated.shape[2]
     )
 
 
-time = time[
-    :generated.shape[2]
-]
+time = np.asarray(time)[:generated.shape[2]]
+
+print("Coordinates:")
+print("   lat ", lat.shape, f"{lat[0]:.2f} .. {lat[-1]:.2f}")
+print("   lon ", lon.shape, f"{lon[0]:.2f} .. {lon[-1]:.2f}")
+print("   time", time.shape, list(time[:5]))
 
 
 # ============================================================
