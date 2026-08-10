@@ -1,16 +1,27 @@
 #!/bin/bash
 #SBATCH --job-name=generate_test
 #SBATCH --account=project_462001328
-# small-g partial-node (1 GCD): this samples ONE conditioning window N_SAMPLES
-# times, not every year like run_eval_cmip7.sh, so it is a small job and a
-# 1-GCD request backfills almost immediately.
+# small-g partial-node (1 GCD). generate_test.py now sweeps EVERY year of hist
+# (1850-2014) and ssp370 (2015-2100) — 251 years — sampling N_SAMPLES
+# realizations per year, batched into one forward pass per diffusion step.
+#
+# Cost: years x SAMPLE_STEPS batched forwards. At the ~1.5 s/forward measured in
+# the CMIP7 eval that is
+#     251 x 100 steps ~ 25,100 forwards ~ 8-10 h
+#     251 x  50 steps ~ 12,550 forwards ~ 4-5  h   (SAMPLE_STEPS=50 is what
+#                                                   eval_cmip7.py uses)
+# 12 h is set to cover the 100-step case with margin. Drop SAMPLE_STEPS to 50 in
+# trainer/generate_test.py and this halves.
+#
+# NOTE: the script writes its NetCDF only at the END — a timeout loses the whole
+# run. Prefer finishing inside the limit over relying on a resubmit.
 #SBATCH --partition=small-g
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=64G
-#SBATCH --time=00:30:00
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/%x_%j.out
 #
 # Run trainer/generate_test.py — sample an ensemble of stochastic realizations
