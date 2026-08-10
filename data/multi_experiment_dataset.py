@@ -15,7 +15,7 @@ Design goals
 
 Typical usage
 -------------
-    from climate_dataset import ClimateDataset
+    from climate_dataset import ClimateDataset, EvalClimateDataset
     from multi_experiment_dataset import (
         MultiExperimentDataset,
         MultiExperimentDataLoader,
@@ -49,7 +49,7 @@ import torch
 from torch.utils.data import Dataset
 from accelerate import Accelerator
 
-from data.climate_dataset import ClimateDataset, StratifiedPeriodSampler
+from data.climate_dataset import ClimateDataset, EvalClimateDataset, StratifiedPeriodSampler
 
 
 # ---------------------------------------------------------------------------
@@ -908,6 +908,7 @@ def build_multi_experiment_loader(
     year_bias_floor: float = 0.05,
     bsp_depth: int = 0,
     shard_across_ranks: bool = True,
+    all_years: bool = False,
     **shared_dataset_kwargs: Any,
 ) -> MultiExperimentDataLoader:
     """Convenience factory: build datasets from a list of config dicts.
@@ -969,13 +970,21 @@ def build_multi_experiment_loader(
     scenario_names: list[str]      = [None] * len(raw_configs)
     hist_climatology = None
 
+    # all_years=True swaps in EvalClimateDataset, which loads EVERY year instead
+    # of the training subsample (every 5th hist / every other future year). Only
+    # for evaluation and generation — training must keep the subsampled default,
+    # since that is what every checkpoint was fitted on.
+    _DatasetCls = EvalClimateDataset if all_years else ClimateDataset
+    if all_years:
+        print("[BUILD] all_years=True -> EvalClimateDataset (every year loaded)")
+
     for i, (name, cfg) in enumerate(raw_configs):
         is_ssp = any(s in name.lower() for s in SSP_BORROWERS)
         has_own_clim = "external_climatology" in cfg
         if is_ssp and not has_own_clim:
             continue  # defer to pass 2
         merged = {**shared_dataset_kwargs, **cfg}
-        ds = ClimateDataset(**merged)
+        ds = _DatasetCls(**merged)
         datasets[i] = ds
         scenario_names[i] = name
         # Capture historical climatology (first dataset whose name has "hist")
@@ -997,7 +1006,7 @@ def build_multi_experiment_loader(
             merged["external_climatology"] = hist_climatology
             #print(f"[BUILD] Scenario '{name}': injecting historical climatology "
             #      f"as external_climatology.")
-        ds = ClimateDataset(**merged)
+        ds = _DatasetCls(**merged)
         datasets[i] = ds
         scenario_names[i] = name
 
