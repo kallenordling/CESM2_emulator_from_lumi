@@ -360,10 +360,27 @@ print(
     "\nLoading conditioning window..."
 )
 
-x, cond, scenario_id = (
-    scenario_dataset[
-        CONDITIONING_INDEX
-    ]
+# scenario_dataset is the inner ClimateDataset, whose __getitem__ returns
+# (x, cond) — 2 values (data/climate_dataset.py:1078). Only the OUTER
+# MultiExperimentDataset appends scenario_id, by wrapping this call
+# (data/multi_experiment_dataset.py:171-175). We indexed into .datasets[...]
+# to pick the scenario ourselves, so we unpack 2 and rebuild scenario_id from
+# the index we already resolved.
+if CONDITIONING_INDEX >= len(scenario_dataset):
+
+    raise IndexError(
+        f"CONDITIONING_INDEX={CONDITIONING_INDEX} is out of range for "
+        f"scenario '{SCENARIO}', which has {len(scenario_dataset)} "
+        f"conditioning windows in the currently loaded realization."
+    )
+
+x, cond = scenario_dataset[
+    CONDITIONING_INDEX
+]
+
+scenario_id = torch.tensor(
+    scenario_index,
+    dtype=torch.long,
 )
 
 #
