@@ -163,6 +163,22 @@ missing, unexpected = model.load_state_dict(
     strict=False,
 )
 
+# Scalar coefficients for the EBM auxiliary loss. unetTrainer.py:386-391
+# creates them as Parameters and register_parameter()s them ONTO the model, so
+# any checkpoint trained with the EBM term carries them — but they take no part
+# in the diffusion forward pass, so they are expected extras at inference and
+# safe to drop. eval_aero.py ignores them the same way (strict=False).
+TRAINER_ONLY_KEYS = {
+    "ebm_alpha_ghg",
+    "ebm_alpha_aero",
+    "ebm_lambda",
+}
+
+unexpected_real = [
+    key for key in unexpected
+    if key not in TRAINER_ONLY_KEYS
+]
+
 if missing:
 
     print("\nMissing model keys:")
@@ -175,13 +191,28 @@ if unexpected:
     print("\nUnexpected model keys:")
 
     for key in unexpected:
-        print("   ", key)
 
-if missing or unexpected:
+        note = (
+            "  (trainer-only, ignored)"
+            if key in TRAINER_ONLY_KEYS
+            else ""
+        )
+
+        print("   ", key + note)
+
+# MISSING keys are always fatal: the model would run with zero-initialised
+# weights and silently produce garbage. Extra keys are only fatal when they are
+# not the known trainer-side ones.
+if missing or unexpected_real:
 
     raise RuntimeError(
-        "Model checkpoint does not exactly match "
-        "the model created from config_aero.yaml."
+        "Model checkpoint does not match the model created from "
+        f"{MODEL_CONFIG}.yaml — "
+        f"{len(missing)} missing, "
+        f"{len(unexpected_real)} unexpected "
+        "(excluding known trainer-only keys). "
+        "Check that the model config's in/out/cond channel counts match "
+        "the arm this checkpoint came from."
     )
 
 model.eval()
