@@ -235,6 +235,7 @@ def main() -> int:
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
+    import matplotlib.transforms as mtransforms
     plt.rcParams.update({
         "figure.dpi": 150, "savefig.dpi": 300, "font.size": 10,
         "axes.labelsize": 10, "axes.titlesize": 10.5, "legend.fontsize": 9,
@@ -260,11 +261,11 @@ def main() -> int:
                 color="0.55", alpha=0.45, label="CESM2 (held-out)")
         ax.hist(ev, bins=bins, density=True, histtype="step",
                 color=colour, lw=1.8, label="Emulator")
-        # individual samples: n is small (members x years), so show them
-        ax.plot(cv, np.full_like(cv, -0.02), "|", color="0.45", ms=5, alpha=0.7,
-                clip_on=False)
-        ax.plot(ev, np.full_like(ev, -0.06), "|", color=colour, ms=5, alpha=0.7,
-                clip_on=False)
+        # No rug marks: below the axis they collided with the tick labels, and
+        # at fixed data offsets they collapsed onto y=0 and read as artefacts on
+        # the histogram baseline. The sample count is stated in the annotation
+        # instead, which is what the rug was there to convey.
+        ax.set_ylim(bottom=0)
 
         st = {}
         for nm, v in (("emu", ev), ("cesm", cv)):
@@ -288,7 +289,8 @@ def main() -> int:
             ax.set_ylabel("Density")
         ax.text(0.97, 0.95,
                 f"{d['ey'][0]}–{d['ey'][1]}\n"
-                f"n = {d['n_emu']} emulator, {d['n_c']} CESM2\n"
+                f"{d['n_emu']}\u00d7{args.n_years} = {ev.size} emulator, "
+                f"{d['n_c']}\u00d7{args.n_years} = {cv.size} CESM2\n"
                 f"Δmean {em-cm:+.2f}, Δsd {esd-csd:+.2f} "
                 f"{META['unit_plain']}",
                 transform=ax.transAxes, fontsize=7.4, va="top", ha="right",
