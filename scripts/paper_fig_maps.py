@@ -275,7 +275,8 @@ def main() -> int:
             np.abs(np.concatenate([(e - c).ravel() for e, c, _, _ in fields.values()])),
             99)) or meta["vmax"]
 
-        for c, sc in enumerate([s for s in args.scenarios if (var, s) in fields]):
+        im = None
+        for c, sc in enumerate([s for s in args.scenarios if s in fields]):
             eA, cA, spread, d = fields[sc]
             ax = axes[r][c]
             bias = eA - cA
@@ -319,6 +320,8 @@ def main() -> int:
                              pattern_corr=round(corr, 4), rmse=round(rmse, 4),
                              pct_within_spread=round(frac, 1), unit=unit))
 
+        if im is None:                     # nothing drawn in this row
+            continue
         cb = fig.colorbar(im, ax=list(axes[r]), orientation="vertical",
                           fraction=0.018, pad=0.012, extend="both")
         cb.set_label(f"emulator − CESM2 ({unit})", fontsize=8.5)
