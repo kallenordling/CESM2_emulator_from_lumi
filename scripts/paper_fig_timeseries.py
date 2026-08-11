@@ -245,10 +245,23 @@ def main() -> int:
     })
 
     # ── one panel with every scenario, bias beneath ─────────────────────────
-    fig, (ax, axb) = plt.subplots(
-        2, 1, figsize=(9.0, 7.0), sharex=True,
-        gridspec_kw=dict(height_ratios=[2.4, 1.0], hspace=0.08),
-    )
+    # (a) combined overview on top; beneath it one bias panel per experiment,
+    # with hist+ssp370 sharing a panel since they are one continuous
+    # trajectory (hist ends 2014, ssp370 starts 2015).
+    BIAS_GROUPS = [
+        (("hist", "ssp370"), "Historical + SSP3-7.0"),
+        (("aaer",),          "Aerosol-only (AAER)"),
+        (("ghg",),           "Greenhouse-gas-only (GHG)"),
+    ]
+    fig = plt.figure(figsize=(9.5, 7.6))
+    gs = fig.add_gridspec(2, len(BIAS_GROUPS), height_ratios=[2.3, 1.0],
+                          hspace=0.30, wspace=0.12)
+    ax = fig.add_subplot(gs[0, :])
+    axbs = []
+    for i in range(len(BIAS_GROUPS)):
+        a = fig.add_subplot(gs[1, i], sharey=axbs[0] if axbs else None)
+        axbs.append(a)
+    bias_of = {}          # scenario -> (years, bias series)
     rows = []
     sigma_by_scen = {}
 
@@ -312,7 +325,7 @@ def main() -> int:
         # not be comparable across scenarios.
         sd_series = spread.std(axis=1, skipna=True)
         sigma_by_scen[sc] = float(sd_series.mean())
-        axb.plot(common, d.values, color=colour, lw=1.5, zorder=3)
+        bias_of[sc] = (common, d)
 
         inside = float((d.abs() <= 2 * sd_series).mean()) * 100
         rows.append(dict(scenario=sc, n_unseen=Ra.shape[1], n_years=len(common),
@@ -322,13 +335,42 @@ def main() -> int:
                          cesm_sd=round(float(Ra.loc[common].std(axis=1, skipna=True).mean()), 3),
                          pct_within_spread=round(inside, 1)))
 
-    # One grey +/-2 sigma envelope instead of four overlapping bands. The
-    # per-scenario sigmas agree to ~2% (see printout), so a shared band is
-    # honest and legible where four translucent ones were a wash.
+    # One grey +/-2 sigma envelope per panel. Sigma is used rather than member
+    # min/max because min/max width depends on ensemble size (6 members for ghg
+    # vs 11 for aaer); the per-scenario sigmas agree to ~2%, so the same band
+    # applies everywhere.
     _sig = float(np.mean(list(sigma_by_scen.values()))) if sigma_by_scen else 0.0
-    axb.axhspan(-2 * _sig, 2 * _sig, color="0.55", alpha=0.20, lw=0, zorder=0,
-                label=f"CESM2 internal variability (\u00b12\u03c3 = \u00b1{2*_sig:.2f} \u00b0C)")
-    axb.legend(frameon=False, loc="upper left", fontsize=8.5)
+    stats = {r["scenario"]: r for r in rows}
+
+    for i, (group, gtitle) in enumerate(BIAS_GROUPS):
+        a = axbs[i]
+        a.axhspan(-2 * _sig, 2 * _sig, color="0.55", alpha=0.20, lw=0, zorder=0)
+        a.axhline(0, ls="-", lw=0.8, color="0.3", zorder=1)
+        for sc in group:
+            if sc not in bias_of:
+                continue
+            yy, d = bias_of[sc]
+            a.plot(yy, d.values, color=SCEN[sc][3], lw=1.4, zorder=3)
+        a.set_title(gtitle, fontsize=9.5, loc="left", pad=3)
+        a.grid(alpha=0.25)
+        a.text(0.02, 0.94, f"({'bcde'[i]})", transform=a.transAxes,
+               fontweight="bold", va="top", ha="left", fontsize=9)
+
+        # numbers on the figure rather than only in the console
+        txt = "\n".join(
+            f"{SCEN[sc][0].split(' (')[0]}: "
+            f"{stats[sc]['bias']:+.2f} \u00b1 {stats[sc]['rmse']:.2f}, "
+            f"{stats[sc]['pct_within_spread']:.0f}% in band"
+            for sc in group if sc in stats)
+        if txt:
+            a.text(0.02, 0.04, txt, transform=a.transAxes, fontsize=7.2,
+                   va="bottom", ha="left", color="0.25")
+
+        a.set_xlabel("Year")
+        if i == 0:
+            a.set_ylabel("Bias (\u00b0C)\nensemble means")
+        else:
+            a.tick_params(labelleft=False)
 
     # legend: scenario colours, plus what solid/dashed mean
     from matplotlib.lines import Line2D
@@ -341,14 +383,17 @@ def main() -> int:
                label="CESM2 — unseen ensemble mean"),
         Patch(facecolor="0.35", alpha=0.28, label="EMULATOR member range"),
         Patch(facecolor="0.35", alpha=0.12, label="CESM2 member range"),
+        Patch(facecolor="0.55", alpha=0.20,
+              label=f"CESM2 internal variability, b\u2013d "
+                    f"(\u00b12\u03c3 = \u00b1{2*_sig:.2f} \u00b0C)"),
     ]
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
     # Legends ABOVE the axes so they take no data area.
     leg1 = ax.legend(frameon=False, ncols=4, loc="lower left",
-                     bbox_to_anchor=(0.0, 1.10), handlelength=2.2)
+                     bbox_to_anchor=(0.0, 1.20), handlelength=2.2)
     ax.add_artist(leg1)
-    ax.legend(handles=style, frameon=False, ncols=2, fontsize=8.5,
+    ax.legend(handles=style, frameon=False, ncols=2, fontsize=8.2,
               loc="lower left", bbox_to_anchor=(0.0, 1.005), handlelength=2.6)
 
     ax.axhline(0, ls=":", lw=0.8, color="0.3")
@@ -356,20 +401,13 @@ def main() -> int:
     ax.set_ylabel("GMST anomaly (°C, vs 1850–1900)")
     ax.text(0.005, 0.97, "(a)", transform=ax.transAxes, fontweight="bold",
             va="top", ha="left")
-    axb.text(0.005, 0.94, "(b)", transform=axb.transAxes, fontweight="bold",
-             va="top", ha="left")
 
-    axb.axhline(0, ls="-", lw=0.8, color="0.3")
-    axb.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
-    axb.set_ylabel("Bias (°C)\nensemble means")
-    axb.set_xlabel("Year")
-    axb.set_xlim(BASELINE[0], args.year_max)
-    # symmetric limits so over/under-estimation read equally
-    _lim = max(0.5, float(np.nanmax([abs(x) for x in axb.get_ylim()])))
-    axb.set_ylim(-_lim, _lim)
 
-    fig.align_ylabels([ax, axb])
-    fig.tight_layout()
+    ax.set_xlabel("Year")
+    ax.set_xlim(BASELINE[0], args.year_max)
+    _lim = max(0.35, max(abs(float(d.min())) for _, d in bias_of.values()),
+               max(abs(float(d.max())) for _, d in bias_of.values())) * 1.15
+    axbs[0].set_ylim(-_lim, _lim)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out)
     fig.savefig(str(Path(args.out).with_suffix(".pdf")))   # vector for the journal
