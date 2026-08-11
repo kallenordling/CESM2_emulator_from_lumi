@@ -170,10 +170,14 @@ def main() -> int:
         "axes.grid": True, "grid.alpha": 0.25,
     })
 
-    fig, axes = plt.subplots(2, 2, figsize=(9.5, 6.4), sharey=True)
+    # ── one panel with every scenario, bias beneath ─────────────────────────
+    fig, (ax, axb) = plt.subplots(
+        2, 1, figsize=(9.0, 7.0), sharex=True,
+        gridspec_kw=dict(height_ratios=[2.4, 1.0], hspace=0.08),
+    )
     rows = []
 
-    for ax, (sc, (label, _, (sub, mem), colour)) in zip(axes.flat, SCEN.items()):
+    for sc, (label, _, (sub, mem), colour) in SCEN.items():
         # scenarios without their own pre-industrial inherit the historical one
         rb = ref_base_hist if sc == "ssp370" else baseline_of(
             ref[sc].index.values, ref[sc].values)
@@ -184,55 +188,70 @@ def main() -> int:
         if not np.isfinite(eb):
             eb = emu_base_hist
 
-        # held-out CESM2
         r = ref[sc][ref[sc].index <= args.year_max]
-        ax.plot(r.index, r.values - rb, color="k", lw=1.6, zorder=4,
-                label=f"CESM2 held-out ({mem})")
+        r_anom = r - rb
 
-        # emulator
-        if sc in emu:
-            mean, members, years = emu[sc]
-            keep = years <= args.year_max
-            if members is not None:
-                lo = (members[:, keep] - eb).min(axis=0)
-                hi = (members[:, keep] - eb).max(axis=0)
-                ax.fill_between(years[keep], lo, hi, color=colour, alpha=0.25,
-                                lw=0, zorder=2, label="Emulator ensemble range")
-            ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.0, zorder=3,
-                    label="Emulator ensemble mean")
+        # held-out CESM2: dashed, same colour as its emulator counterpart
+        ax.plot(r.index, r_anom.values, color=colour, lw=1.1, ls="--",
+                alpha=0.85, zorder=3)
 
-            # overlap diagnostics for the caption
-            common = np.intersect1d(years[keep], r.index.values)
-            if len(common):
-                e = pd.Series(mean[keep] - eb, index=years[keep]).loc[common]
-                c = (r - rb).loc[common]
-                rows.append(dict(scenario=sc, n_years=len(common),
-                                 bias=round(float((e - c).mean()), 3),
-                                 rmse=round(float(np.sqrt(((e - c) ** 2).mean())), 3),
-                                 corr=round(float(np.corrcoef(e, c)[0, 1]), 3),
-                                 last_emu=round(float(e.iloc[-1]), 3),
-                                 last_cesm=round(float(c.iloc[-1]), 3)))
+        if sc not in emu:
+            continue
+        mean, members, years = emu[sc]
+        keep = years <= args.year_max
+        if members is not None:
+            ax.fill_between(years[keep],
+                            (members[:, keep] - eb).min(axis=0),
+                            (members[:, keep] - eb).max(axis=0),
+                            color=colour, alpha=0.22, lw=0, zorder=1)
+        ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.0, zorder=2,
+                label=label)
 
-        ax.set_title(label, loc="left")
-        ax.axhline(0, ls=":", lw=0.8, color="0.3")
+        # ── bias panel: emulator ensemble mean minus held-out CESM2 ─────────
+        common = np.intersect1d(years[keep], r.index.values)
+        if not len(common):
+            continue
+        e = pd.Series(mean[keep] - eb, index=years[keep]).loc[common]
+        c = r_anom.loc[common]
+        d = e - c
+        axb.plot(common, d.values, color=colour, lw=1.3)
 
-        # Shade the baseline window only where it is actually covered; SSP3-7.0
-        # starts in 2015 and inherits the historical baseline, so shading (and
-        # spanning the x-axis back to) 1850 there is just empty panel.
-        y0 = int(min(r.index.min(), emu[sc][2].min() if sc in emu else r.index.min()))
-        y1 = int(max(r.index.max(), emu[sc][2].max() if sc in emu else r.index.max()))
-        ax.set_xlim(y0, min(y1, args.year_max))
-        if y0 <= BASELINE[1]:
-            ax.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
+        rows.append(dict(scenario=sc, n_years=len(common),
+                         bias=round(float(d.mean()), 3),
+                         rmse=round(float(np.sqrt((d ** 2).mean())), 3),
+                         corr=round(float(np.corrcoef(e, c)[0, 1]), 3),
+                         last_emu=round(float(e.iloc[-1]), 3),
+                         last_cesm=round(float(c.iloc[-1]), 3)))
 
-    for ax in axes[-1]:
-        ax.set_xlabel("Year")
-    for ax in axes[:, 0]:
-        ax.set_ylabel("GMST anomaly (°C, vs 1850–1900)")
+    # legend: scenario colours, plus what solid/dashed mean
+    from matplotlib.lines import Line2D
+    style = [
+        Line2D([], [], color="0.35", lw=2.0, label="Emulator (ensemble mean)"),
+        Line2D([], [], color="0.35", lw=1.1, ls="--", label="CESM2 (held-out member)"),
+    ]
+    # Both legends top-left: that corner is empty until ~1950 in every
+    # scenario, whereas lower-right sits on top of the AAER curve.
+    leg1 = ax.legend(frameon=False, loc="upper left", ncols=2)
+    ax.add_artist(leg1)
+    ax.legend(handles=style, frameon=False, fontsize=8.5,
+              loc="upper left", bbox_to_anchor=(0.0, 0.84))
 
-    axes.flat[0].legend(frameon=False, loc="upper left")
-    fig.suptitle("Emulated vs held-out CESM2 global-mean surface temperature",
-                 y=0.99)
+    ax.axhline(0, ls=":", lw=0.8, color="0.3")
+    ax.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
+    ax.set_ylabel("GMST anomaly (°C, vs 1850–1900)")
+    ax.set_title("Emulated vs held-out CESM2 global-mean surface temperature",
+                 loc="left")
+
+    axb.axhline(0, ls="-", lw=0.8, color="0.3")
+    axb.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
+    axb.set_ylabel("Bias (°C)\nemulator − CESM2")
+    axb.set_xlabel("Year")
+    axb.set_xlim(BASELINE[0], args.year_max)
+    # symmetric limits so over/under-estimation read equally
+    _lim = max(0.5, float(np.nanmax([abs(x) for x in axb.get_ylim()])))
+    axb.set_ylim(-_lim, _lim)
+
+    fig.align_ylabels([ax, axb])
     fig.tight_layout()
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out)
