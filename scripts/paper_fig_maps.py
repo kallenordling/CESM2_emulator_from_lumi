@@ -58,7 +58,7 @@ VARS = {
                    tree_scale={None: 1.0, "K": 1.0, "degC": 1.0},
                    tree_offset={"K": -273.15, "degC": 0.0, None: 0.0}),
     "PRECT":  dict(row="Precipitation", unit="mm day$^{-1}$", unit_plain="mm/day",
-                   cmap="BrBG", vmax=0.5,
+                   cmap="BrBG", vmax=0.5, vmax_pct=20.0,
                    tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0},
                    tree_offset={"m/s": 0.0, "mm/day": 0.0, None: 0.0}),
 }
@@ -161,12 +161,14 @@ def main() -> int:
     ap.add_argument("--absolute", action="store_true",
                     help="difference the raw fields instead of anomalies "
                          "(includes the climatological mean-state bias)")
-    ap.add_argument("--percent", action="store_true",
-                    help="precipitation bias as %% of baseline (needs "
-                         "--percent-floor; unusable over deserts otherwise)")
+    ap.add_argument("--precip-mm", action="store_true",
+                    help="precipitation bias in mm/day instead of the default "
+                         "%% of baseline (percent matches the timeseries figure "
+                         "but needs the --percent-floor mask over arid regions)")
     ap.add_argument("--percent-floor", type=float, default=0.5,
                     help="mask grid points whose baseline precip (mm/day) is "
-                         "below this before dividing")
+                         "below this before dividing; without it, dividing by a "
+                         "near-zero desert baseline produces meaningless values")
     ap.add_argument("--no-stipple", action="store_true")
     ap.add_argument("--out", default="plots/paper_fig_maps.png")
     ap.add_argument("--csv", default=None)
@@ -246,10 +248,10 @@ def main() -> int:
     rows = []
     for r, var in enumerate(args.vars):
         meta = VARS[var]
-        pct = args.percent and var == "PRECT"
+        pct = (var == "PRECT") and not args.precip_mm
         unit = "%" if pct else meta["unit"]
         # common colour scale across the row so panels are comparable
-        fields = {}
+        fields, masked_pct = {}, {}
         for sc in args.scenarios:
             if (var, sc) not in F:
                 continue
@@ -265,15 +267,19 @@ def main() -> int:
                 cA = cM.mean(axis=0)
                 spread = cM.std(axis=0, ddof=1)
             if pct:
-                base = np.where(d["cbase"] < args.percent_floor, np.nan, d["cbase"])
+                dry = d["cbase"] < args.percent_floor
+                base = np.where(dry, np.nan, d["cbase"])
                 eA, cA, spread = (100 * eA / base, 100 * cA / base,
                                   100 * spread / base)
+                wgt = area_w(d["lat"], d["lon"])
+                masked_pct[sc] = 100 * float(np.average(dry.astype(float),
+                                                        weights=wgt))
             fields[sc] = (eA, cA, spread, d)
         if not fields:
             continue
         vmax = float(np.nanpercentile(
             np.abs(np.concatenate([(e - c).ravel() for e, c, _, _ in fields.values()])),
-            99)) or meta["vmax"]
+            99)) or (meta.get("vmax_pct") if pct else meta["vmax"])
 
         im = None
         for c, sc in enumerate([s for s in args.scenarios if s in fields]):
@@ -307,9 +313,11 @@ def main() -> int:
                 ax.coastlines(linewidth=0.35, color="0.25")
                 ax.set_global()
             ax.set_title(f"{d['label']}" if r == 0 else "", fontsize=9.5)
+            _msk = masked_pct.get(sc)
             ax.text(0.5, -0.10,
                     f"r = {corr:.3f}   RMSE = {rmse:.3f} {unit}\n"
-                    f"{frac:.0f}% within CESM2 spread",
+                    f"{frac:.0f}% within CESM2 spread"
+                    + (f"   ({_msk:.0f}% arid, masked)" if _msk else ""),
                     transform=ax.transAxes, ha="center", va="top", fontsize=7.2,
                     color="0.25")
             if c == 0:
@@ -318,7 +326,9 @@ def main() -> int:
             rows.append(dict(var=var, scenario=sc, years=f"{d['yr'][0]}-{d['yr'][1]}",
                              n_emu=d["n_emu"], n_cesm=d["n_c"],
                              pattern_corr=round(corr, 4), rmse=round(rmse, 4),
-                             pct_within_spread=round(frac, 1), unit=unit))
+                             pct_within_spread=round(frac, 1), unit=unit,
+                             pct_area_masked=(round(masked_pct[sc], 1)
+                                              if sc in masked_pct else 0.0)))
 
         if im is None:                     # nothing drawn in this row
             continue
@@ -329,7 +339,9 @@ def main() -> int:
     fig.suptitle(
         f"Emulator minus held-out CESM2, {args.n_years}-year mean "
         f"{'field' if args.absolute else 'anomaly vs 1850–1900'}; "
-        f"hatching = |bias| below CESM2 inter-member spread",
+        f"hatching = |bias| below CESM2 inter-member spread"
+        + ("" if args.precip_mm else
+           f"; precipitation as % of its 1850–1900 baseline"),
         fontsize=10, y=0.99)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight")
