@@ -70,9 +70,9 @@ VARMETA = {
                    blab="Bias (\u00b0C)\nensemble means",
                    title="Emulated vs held-out CESM2 global-mean surface temperature",
                    tree_scale={None: 1.0, "K": 1.0, "degC": 1.0}),
-    "PRECT":  dict(unit="mm day$^{-1}$", unit_plain="mm/day",
-                   ylab="Precipitation anomaly (mm day$^{-1}$, vs 1850\u20131900)",
-                   blab="Bias (mm day$^{-1}$)\nensemble means",
+    "PRECT":  dict(unit="%", unit_plain="%", percent=True,
+                   ylab="Precipitation change (%, vs 1850\u20131900)",
+                   blab="Bias (percentage points)\nensemble means",
                    title="Emulated vs held-out CESM2 global-mean precipitation",
                    tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0}),
 }
@@ -183,6 +183,15 @@ def read_emulated(nc_path: Path):
                and not v.startswith(f"{VAR}_model_gmean_mean")]
     ds.close()
     return mean, (np.stack(members) if members else None), years
+
+
+def anom(values, base):
+    """Anomaly vs `base`: an absolute difference, or a PERCENT change when the
+    variable is set percent=True (precipitation, where a few tenths of a mm/day
+    is meaningless without the ~2.9 mm/day it is relative to)."""
+    if VARMETA[VAR].get("percent"):
+        return 100.0 * (values - base) / base
+    return values - base
 
 
 def baseline_of(series_years, values) -> float:
@@ -304,8 +313,9 @@ def main() -> int:
                                 ref["hist"].mean(axis=1, skipna=True).values)
     emu_base_hist = (baseline_of(emu["hist"][2], emu["hist"][0])
                      if "hist" in emu else np.nan)
-    print(f"\n[baseline 1850-1900]  CESM2 held-out hist {ref_base_hist:.3f} K   "
-          f"emulator hist {emu_base_hist:.3f}")
+    print(f"\n[baseline 1850-1900]  CESM2 held-out hist {ref_base_hist:.4f}   "
+          f"emulator hist {emu_base_hist:.4f}   "
+          f"(anomalies as {'percent change' if META.get('percent') else 'absolute difference'})")
 
     import matplotlib
     matplotlib.use("Agg")
@@ -354,7 +364,7 @@ def main() -> int:
             eb = emu_base_hist
 
         keep_r = r_years <= args.year_max
-        Ra = R[keep_r] - rb                       # anomalies, per member
+        Ra = anom(R[keep_r], rb)                  # anomalies, per member
         r_mean = Ra.mean(axis=1, skipna=True)
 
         # CESM2 held-out ensemble: mean dashed + member spread
@@ -375,11 +385,10 @@ def main() -> int:
         mean, members, years = emu[sc]
         keep = years <= args.year_max
         if members is not None:
-            ax.fill_between(years[keep],
-                            (members[:, keep] - eb).min(axis=0),
-                            (members[:, keep] - eb).max(axis=0),
+            _em = anom(members[:, keep], eb)
+            ax.fill_between(years[keep], _em.min(axis=0), _em.max(axis=0),
                             color=colour, alpha=0.28, lw=0, zorder=2)
-        ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.6, zorder=4,
+        ax.plot(years[keep], anom(mean[keep], eb), color=colour, lw=2.6, zorder=4,
                 solid_capstyle="round", label=label)
 
         # ── bias panel ──────────────────────────────────────────────────────
@@ -390,7 +399,7 @@ def main() -> int:
         common = np.intersect1d(years[keep], Ra.index.values)
         if not len(common):
             continue
-        e = pd.Series(mean[keep] - eb, index=years[keep]).loc[common]
+        e = pd.Series(anom(mean[keep], eb), index=years[keep]).loc[common]
         c = r_mean.loc[common]
         d = e - c
         spread = Ra.loc[common].sub(c, axis=0)
@@ -504,7 +513,7 @@ def main() -> int:
     ax.set_xlabel("Year")
     ax.set_xlim(BASELINE[0], args.year_max)
     # y-limit must clear both the bias lines and the +/-2 sigma band
-    _floor = 0.35 if VAR == 'TREFHT' else 0.05
+    _floor = 0.35 if not VARMETA[VAR].get('percent') else 1.0
     _lim = max([_floor]
                + [abs(float(d.min())) for _, d, _sd in bias_of.values()]
                + [abs(float(d.max())) for _, d, _sd in bias_of.values()]
