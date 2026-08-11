@@ -272,12 +272,15 @@ def main() -> int:
         # CESM2 held-out ensemble: mean dashed + member spread
         ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True), Ra.max(axis=1, skipna=True),
                         color=colour, alpha=0.12, lw=0, zorder=1)
-        # White casing under the dashed reference: where emulator and CESM2
-        # agree — i.e. nearly everywhere, which is the point — same-colour
-        # solid and dashed merge into one stroke at print size.
-        ax.plot(Ra.index, r_mean.values, color=colour, lw=1.6, ls=(0, (5, 2)),
-                zorder=5, path_effects=[
-                    pe.withStroke(linewidth=3.4, foreground="white")])
+        # CESM2 reference gets OPEN CIRCLE MARKERS, not just a dash pattern.
+        # Solid-vs-dashed in the same colour is not readable where the two
+        # curves coincide (which is most of the record); a marker shape stays
+        # distinguishable regardless of colour, overlap or print size.
+        ax.plot(Ra.index, r_mean.values, color=colour, lw=1.2, ls="--",
+                marker="o", markersize=3.4, markevery=8,
+                markerfacecolor="white", markeredgecolor=colour,
+                markeredgewidth=1.0, zorder=5,
+                path_effects=[pe.withStroke(linewidth=3.0, foreground="white")])
 
         if sc not in emu:
             continue
@@ -288,8 +291,8 @@ def main() -> int:
                             (members[:, keep] - eb).min(axis=0),
                             (members[:, keep] - eb).max(axis=0),
                             color=colour, alpha=0.28, lw=0, zorder=2)
-        ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.0, zorder=4,
-                label=label)
+        ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.6, zorder=4,
+                solid_capstyle="round", label=label)
 
         # ── bias panel ──────────────────────────────────────────────────────
         # Line: difference of ENSEMBLE MEANS. Band: the spread of individual
@@ -332,10 +335,12 @@ def main() -> int:
     from matplotlib.patches import Patch
     import matplotlib.patheffects as pe
     style = [
-        Line2D([], [], color="0.35", lw=2.0, label="Emulator (ensemble mean, 5 members)"),
-        Line2D([], [], color="0.35", lw=1.2, ls="--", label="CESM2 (unseen ensemble mean)"),
-        Patch(facecolor="0.35", alpha=0.28, label="Emulator member range"),
-        Patch(facecolor="0.35", alpha=0.12, label="CESM2 unseen member range"),
+        Line2D([], [], color="0.35", lw=2.6, label="EMULATOR — ensemble mean (5 members)"),
+        Line2D([], [], color="0.35", lw=1.2, ls="--", marker="o", markersize=3.4,
+               markerfacecolor="white", markeredgecolor="0.35",
+               label="CESM2 — unseen ensemble mean"),
+        Patch(facecolor="0.35", alpha=0.28, label="EMULATOR member range"),
+        Patch(facecolor="0.35", alpha=0.12, label="CESM2 member range"),
     ]
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
