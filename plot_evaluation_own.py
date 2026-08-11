@@ -1,3 +1,6 @@
+import os
+import sys
+
 import xarray as xr
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -19,6 +22,46 @@ plt.rcParams.update({
     "axes.grid": True,
     "grid.alpha": 0.25,
 })
+
+# ---------- data roots ----------
+#
+# Defaults point at the sshfs-mounted LUMI filesystems so this runs LOCALLY:
+#     /home/nordling/mnt/lumi_sc2  ->  /scratch/project_462001328
+#     /home/nordling/mnt/lumi2     ->  /projappl/project_462001328
+#
+# On LUMI itself, override with the real paths:
+#     EMUL_DATA_ROOT=/scratch/project_462001328/emulator_data \
+#     EMUL_GEN_ROOT=/projappl/project_462001328/CESM2_emulator_from_lumi \
+#     python plot_evaluation_own.py
+#
+DATA_ROOT = Path(os.environ.get(
+    "EMUL_DATA_ROOT",
+    "/home/nordling/mnt/lumi_sc2/emulator_data",
+))
+
+# Where generate_test.py wrote its output (it uses a relative OUTPUT, so the
+# file lands in the repo root on /projappl).
+GEN_ROOT = Path(os.environ.get(
+    "EMUL_GEN_ROOT",
+    "/home/nordling/mnt/lumi2/CESM2_emulator_from_lumi",
+))
+
+# An sshfs mount that has dropped still resolves as a directory but lists
+# EMPTY, which is indistinguishable from "the data is gone". Check explicitly.
+for _label, _root in (("EMUL_DATA_ROOT", DATA_ROOT), ("EMUL_GEN_ROOT", GEN_ROOT)):
+    if not _root.is_dir():
+        sys.exit(
+            f"{_label} does not exist: {_root}\n"
+            f"If this is an sshfs mount, mount it; otherwise set {_label}."
+        )
+    if not any(_root.iterdir()):
+        sys.exit(
+            f"{_label} is empty: {_root}\n"
+            f"A dropped sshfs mount looks exactly like this — remount it, e.g.\n"
+            f"  sshfs nordlin1@lumi.csc.fi:/scratch/project_462001328/ "
+            f"/home/nordling/mnt/lumi_sc2"
+        )
+
 
 BASELINE = slice(1850, 1900)        # reference period
 YR_MIN, YR_MAX = 1850, 2100        # x-axis limits
@@ -106,11 +149,11 @@ def plot_ensemble(ax, ens: xr.DataArray, color, label):
     ax.plot(years, mean, lw=2.2, color=color, label=label)
 
 # ---------- paths ----------
-#dir_ssp370_co2 = Path("/scratch/project_462001328/emulator_data/gen_co2_ssp370_TREFHT_1850-2100")
-dir_ssp370_aero = Path("generated_samples_1850_2100.nc")
-#dir_ssp126_co2 = Path("/scratch/project_462001328/emulator_data/gen_co2_ssp126_TREFHT_1850-2100")
-#dir_ssp126_aero = Path("/scratch/project_462001328/emulator_data/gen_ssp126_aero_v2_TREFHT_1850-2100")
-#dir_ramip_aero = Path("/scratch/project_462001328/emulator_data/gen_ssp37_ssp126_aero_v2_TREFHT_1850-2100")
+#dir_ssp370_co2 = DATA_ROOT / ("gen_co2_ssp370_TREFHT_1850-2100")
+dir_ssp370_aero = GEN_ROOT / "generated_samples_1850_2100.nc"
+#dir_ssp126_co2 = DATA_ROOT / ("gen_co2_ssp126_TREFHT_1850-2100")
+#dir_ssp126_aero = DATA_ROOT / ("gen_ssp126_aero_v2_TREFHT_1850-2100")
+#dir_ramip_aero = DATA_ROOT / ("gen_ssp37_ssp126_aero_v2_TREFHT_1850-2100")
 # ---------- load ----------
 #ens_ssp370_co2  = load_anomalies(dir_ssp370_co)
 #ens_ssp370_co2_v2  = load_anomalies(dir_ssp370_co_v2)
@@ -154,9 +197,9 @@ ax.set_xticks(np.arange(1850, 2110, 25))
 
 ###plot CMIP6 references
 
-hist_cmip=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/historical.nc")
-ssp1=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp126.nc")
-ssp3=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp370.nc")
+hist_cmip=xr.open_dataset(DATA_ROOT / "cmip6" / "historical.nc")
+ssp1=xr.open_dataset(DATA_ROOT / "cmip6" / "ssp126.nc")
+ssp3=xr.open_dataset(DATA_ROOT / "cmip6" / "ssp370.nc")
 
 common_members3 = np.intersect1d(hist_cmip.member.values, ssp3.member.values)
 common_members1 = np.intersect1d(hist_cmip.member.values, ssp1.member.values)
@@ -174,10 +217,10 @@ ax.plot(cmip_ssp1.year, cmip_ssp1.mean('member').tas, lw=2.2, linestyle='--', co
 
 ##PLOT training data
 
-data_dir = "/scratch/project_462001328/emulator_data/"       # e.g. tas, pr
+data_dir = DATA_ROOT
 realizations = ['r10i1181p1f1','r10i1231p1f1','r10i1251p1f1','r10i1281p1f1','r10i1301p1f1','r1i1001p1f1','r1i1231p1f1','r1i1251p1f1']
 for i,r in enumerate(realizations):
-    ds=xr.open_mfdataset(data_dir+r+"/*.nc")
+    ds=xr.open_mfdataset(str(data_dir / r / "*.nc"))
     ds=calcmean(ds)
     ds=ds-ds.sel(year=BASELINE).mean('year')
     if i==0:
@@ -186,7 +229,7 @@ for i,r in enumerate(realizations):
         ax.plot(ds.year,ds.TREFHT,'k',linewidth=0.5)
 
 ##ramip
-ds=xr.open_dataset('/scratch/project_462001328/emulator_data/tas_Amon_CESM2_ssp370-126aer_r1i1p1f1_gn_201501-207912.nc').groupby('time.year').mean()#.isel(member=0)
+ds=xr.open_dataset(DATA_ROOT / "tas_Amon_CESM2_ssp370-126aer_r1i1p1f1_gn_201501-207912.nc").groupby('time.year').mean()#.isel(member=0)
 print(ds)
 ds=calcmean(ds.tas)
 print(ds)
