@@ -58,16 +58,33 @@ import pandas as pd
 import xarray as xr
 
 BASELINE = (1850, 1900)
-VAR = "TREFHT"
+VAR = "TREFHT"          # overridden by --var in main()
+
+# Per-variable labels and the unit conversion needed on the TRAINING TREES.
+# The trees store CESM2 native units (PRECT in m/s) while the emulator writes
+# denormalised physical units (mm/day, see DENORM_FN in data/climate_dataset.py),
+# so the reference must be converted or it is ~8.6e7 times too small.
+VARMETA = {
+    "TREFHT": dict(unit="\u00b0C", unit_plain="degC",
+                   ylab="GMST anomaly (\u00b0C, vs 1850\u20131900)",
+                   blab="Bias (\u00b0C)\nensemble means",
+                   title="Emulated vs held-out CESM2 global-mean surface temperature",
+                   tree_scale={None: 1.0, "K": 1.0, "degC": 1.0}),
+    "PRECT":  dict(unit="mm day$^{-1}$", unit_plain="mm/day",
+                   ylab="Precipitation anomaly (mm day$^{-1}$, vs 1850\u20131900)",
+                   blab="Bias (mm day$^{-1}$)\nensemble means",
+                   title="Emulated vs held-out CESM2 global-mean precipitation",
+                   tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0}),
+}
 
 # scenario -> (panel label, eval NetCDF, (training-tree subdir, held-out member), colour)
 # Okabe-Ito colours: distinguishable under deuteranopia/protanopia, unlike
 # the red+green pairing this figure used before.
 SCEN = {
-    "hist":   ("Historical",                "TREFHT_hist.nc",   "hist",   "#0072B2"),
-    "ssp370": ("SSP3-7.0",                  "TREFHT_ssp370.nc", "ssp370", "#D55E00"),
-    "aaer":   ("Aerosol-only (AAER)",       "TREFHT_aaer.nc",   "AAER",   "#E69F00"),
-    "ghg":    ("Greenhouse-gas-only (GHG)", "TREFHT_ghg.nc",    "GHG",    "#009E73"),
+    "hist":   ("Historical",                "hist",   "hist",   "#0072B2"),
+    "ssp370": ("SSP3-7.0",                  "ssp370", "ssp370", "#D55E00"),
+    "aaer":   ("Aerosol-only (AAER)",       "aaer",   "AAER",   "#E69F00"),
+    "ghg":    ("Greenhouse-gas-only (GHG)", "ghg",    "GHG",    "#009E73"),
 }
 
 # scenario key in the data config -> training-tree subdirectory
@@ -99,7 +116,23 @@ def read_heldout_ensemble(tree_root: Path, subdir: str, members: list) -> pd.Dat
             continue
         print(f"      [{i}/{len(members)}] {subdir}/{mem} ({len(files)} chunks)", flush=True)
         ds = xr.open_mfdataset(files, combine="by_coords", decode_times=False)
-        gm = area_mean(ds[VAR]).compute()
+        if VAR not in ds:
+            raise KeyError(
+                f"{d}: no variable {VAR!r} in the chunk files (found "
+                f"{sorted(v for v in ds.data_vars)[:8]}). --tree-root is "
+                f"{tree_root}; it must point at the tree for {VAR}, e.g. "
+                f"training_data/{VAR}.")
+        raw_units = ds[VAR].attrs.get("units")
+        scale = VARMETA[VAR]["tree_scale"].get(raw_units)
+        if scale is None:
+            raise ValueError(
+                f"{subdir}/{mem}: {VAR} has units {raw_units!r}, which has no "
+                f"conversion to the emulator's {VARMETA[VAR]['unit_plain']}. "
+                f"Known: {sorted(k for k in VARMETA[VAR]['tree_scale'] if k)}")
+        if i == 1 and scale != 1.0:
+            print(f"      [units] tree {VAR} is {raw_units!r} -> x{scale:g} "
+                  f"to {VARMETA[VAR]['unit_plain']}", flush=True)
+        gm = (area_mean(ds[VAR]) * scale).compute()
         tdim = "time" if "time" in gm.dims else "year"
         years = np.asarray(ds[tdim].values).astype(int)
         sr = pd.Series(np.asarray(gm.values, dtype=float), index=years).sort_index()
@@ -163,11 +196,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Paper figure: emulated vs held-out CESM2 global-mean timeseries",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--var", default="TREFHT", choices=sorted(VARMETA),
+                    help="Target variable to plot")
     ap.add_argument("--eval-dir", required=True,
                     help="eval output dir holding TREFHT_<scenario>.nc")
-    ap.add_argument("--tree-root",
-                    default="/home/nordling/mnt/lumi_sc2/emulator_data/training_data/TREFHT",
-                    help="root of the TREFHT training trees (holds hist/, ssp370/, AAER/, GHG/)")
+    ap.add_argument("--tree-root", default=None,
+                    help="root of the training trees for --var, holding "
+                         "hist/, ssp370/, AAER/, GHG/. "
+                         "Default: <--data-root>/training_data/<var>")
+    ap.add_argument("--data-root",
+                    default="/home/nordling/mnt/lumi_sc2/emulator_data",
+                    help="emulator_data root; --tree-root is derived from it")
     ap.add_argument("--data-config",
                     default="configs/config_data_ybias_BCprect.yaml",
                     help="data config whose experiment_configs define the TRAINED "
@@ -179,9 +218,22 @@ def main() -> int:
     ap.add_argument("--ref-csv", default=None,
                     help="cache of the held-out reference series; read if present, "
                          "written after computing so re-plots are instant")
-    ap.add_argument("--out", default="plots/paper_fig_timeseries.png")
+    ap.add_argument("--out", default=None,
+                    help="default plots/paper_fig_timeseries_<var>.png")
     ap.add_argument("--year-max", type=int, default=2100)
     args = ap.parse_args()
+
+    global VAR
+    VAR = args.var
+    META = VARMETA[VAR]
+    if args.out is None:
+        args.out = f"plots/paper_fig_timeseries_{VAR}.png"
+    if args.ref_csv is None:
+        args.ref_csv = f"plots/heldout_cesm2_ensemble_{VAR}.csv"
+    if args.tree_root is None:
+        # the trees are per-variable: training_data/TREFHT, training_data/PRECT
+        args.tree_root = os.path.join(args.data_root, "training_data", VAR)
+    print(f"[var] {VAR} ({META['unit_plain']})")
 
     eval_dir = Path(args.eval_dir)
     tree_root = Path(args.tree_root)
@@ -239,7 +291,7 @@ def main() -> int:
     # ── emulated ────────────────────────────────────────────────────────────
     emu = {}
     for sc, (_, nc, _, _) in SCEN.items():
-        p = eval_dir / nc
+        p = eval_dir / f"{VAR}_{nc}.nc"
         if not p.exists():
             print(f"[emu] MISSING {p} — panel will show reference only")
             continue
@@ -390,7 +442,7 @@ def main() -> int:
         a.grid(alpha=0.25)
         a.text(0.02, 0.94, f"({'bcde'[i]})", transform=a.transAxes,
                fontweight="bold", va="top", ha="left", fontsize=9)
-        a.text(0.97, 0.95, "grey: CESM2 spread (\u00b12\u03c3)",
+        a.text(0.97, 0.95, f"grey: CESM2 spread (\u00b12\u03c3)",
                transform=a.transAxes, fontsize=7.4, va="top", ha="right",
                color="0.30")
 
@@ -406,7 +458,7 @@ def main() -> int:
 
         a.set_xlabel("Year")
         if i == 0:
-            a.set_ylabel("Bias (\u00b0C)\nensemble means")
+            a.set_ylabel(META["blab"])
         else:
             a.tick_params(labelleft=False)
 
@@ -431,7 +483,7 @@ def main() -> int:
         Patch(facecolor="0.35", alpha=0.12, label="CESM2 member range"),
         Patch(facecolor="0.55", alpha=0.20,
               label=f"CESM2 spread about its mean, b\u2013d "
-                    f"(\u00b12\u03c3, mean \u00b1{2*_sig:.2f} \u00b0C)"),
+                    f"(\u00b12\u03c3, mean \u00b1{2*_sig:.2f} {META['unit']})"),
     ]
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
@@ -444,7 +496,7 @@ def main() -> int:
 
     ax.axhline(0, ls=":", lw=0.8, color="0.3")
     ax.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
-    ax.set_ylabel("GMST anomaly (°C, vs 1850–1900)")
+    ax.set_ylabel(META["ylab"])
     ax.text(0.005, 0.97, "(a)", transform=ax.transAxes, fontweight="bold",
             va="top", ha="left")
 
@@ -452,7 +504,8 @@ def main() -> int:
     ax.set_xlabel("Year")
     ax.set_xlim(BASELINE[0], args.year_max)
     # y-limit must clear both the bias lines and the +/-2 sigma band
-    _lim = max([0.35]
+    _floor = 0.35 if VAR == 'TREFHT' else 0.05
+    _lim = max([_floor]
                + [abs(float(d.min())) for _, d, _sd in bias_of.values()]
                + [abs(float(d.max())) for _, d, _sd in bias_of.values()]
                + [2 * float(_sd.max()) for _, _d, _sd in bias_of.values()]) * 1.15
@@ -465,11 +518,11 @@ def main() -> int:
 
     if rows:
         t = pd.DataFrame(rows)
-        print("\nEmulator vs held-out CESM2 (°C, on overlapping years)")
+        print(f"\nEmulator vs held-out CESM2 ({META['unit_plain']}, overlapping years)")
         print(t.to_string(index=False))
         if sigma_by_scen:
             _v = list(sigma_by_scen.values())
-            print("\nCESM2 inter-member sigma by scenario (\u00b0C): "
+            print(f"\nCESM2 inter-member sigma by scenario ({META['unit_plain']}): "
                   + ", ".join(f"{k}={v:.3f}" for k, v in sigma_by_scen.items()))
             print(f"  spread across scenarios: {max(_v)-min(_v):.4f} \u00b0C "
                   f"({100*(max(_v)-min(_v))/np.mean(_v):.1f}% of the mean) "
