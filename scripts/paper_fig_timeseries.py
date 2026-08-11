@@ -391,7 +391,7 @@ def main() -> int:
     # scenario, whereas lower-right sits on top of the AAER curve.
     # Legends ABOVE the axes so they take no data area.
     leg1 = ax.legend(frameon=False, ncols=4, loc="lower left",
-                     bbox_to_anchor=(0.0, 1.20), handlelength=2.2)
+                     bbox_to_anchor=(0.0, 1.13), handlelength=2.2)
     ax.add_artist(leg1)
     ax.legend(handles=style, frameon=False, ncols=2, fontsize=8.2,
               loc="lower left", bbox_to_anchor=(0.0, 1.005), handlelength=2.6)
@@ -409,8 +409,8 @@ def main() -> int:
                max(abs(float(d.max())) for _, d in bias_of.values())) * 1.15
     axbs[0].set_ylim(-_lim, _lim)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
-    fig.savefig(args.out)
-    fig.savefig(str(Path(args.out).with_suffix(".pdf")))   # vector for the journal
+    fig.savefig(args.out, bbox_inches="tight")
+    fig.savefig(str(Path(args.out).with_suffix(".pdf")), bbox_inches="tight")   # vector for the journal
     print(f"\nwrote {args.out}")
     print(f"wrote {Path(args.out).with_suffix('.pdf')}")
 
