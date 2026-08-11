@@ -155,21 +155,21 @@ ax.set_xticks(np.arange(1850, 2110, 25))
 ###plot CMIP6 references
 
 hist_cmip=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/historical.nc")
-#ssp1=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp126.nc")
+ssp1=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp126.nc")
 ssp3=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp370.nc")
 
 common_members3 = np.intersect1d(hist_cmip.member.values, ssp3.member.values)
-#common_members1 = np.intersect1d(hist_cmip.member.values, ssp1.member.values)   # DISABLED: ssp1 is not loaded
+common_members1 = np.intersect1d(hist_cmip.member.values, ssp1.member.values)
 
 ds_merged_ssp3 = xr.concat([hist_cmip.sel(member=common_members3), ssp3.sel(member=common_members3)], dim="year")
-#ds_merged_ssp1 = xr.concat([hist_cmip.sel(member=common_members1), ssp1.sel(member=common_members1)], dim="year")
+ds_merged_ssp1 = xr.concat([hist_cmip.sel(member=common_members1), ssp1.sel(member=common_members1)], dim="year")
 cmip_ssp3=calcmean(ds_merged_ssp3)
-#cmip_ssp1=calcmean(ds_merged_ssp1)
+cmip_ssp1=calcmean(ds_merged_ssp1)
 cmip_ssp3=cmip_ssp3-cmip_ssp3.sel(year=BASELINE).mean('year')
-#cmip_ssp1=cmip_ssp1-cmip_ssp1.sel(year=BASELINE).mean('year')
-#print(ds_merged_ssp1)   # DISABLED: ds_merged_ssp1 is not built
+cmip_ssp1=cmip_ssp1-cmip_ssp1.sel(year=BASELINE).mean('year')
+
 ax.plot(cmip_ssp3.year, cmip_ssp3.mean('member').tas, lw=2.2, linestyle='--', color="#cc2b2b", label="SSP3–7.0 (CMIP6 CESM2)")
-#ax.plot(cmip_ssp1.year, cmip_ssp1.mean('member').tas, lw=2.2, linestyle='--', color="#1f4e79", label="SSP1–2.6 (CMIP6 CESM2)")
+ax.plot(cmip_ssp1.year, cmip_ssp1.mean('member').tas, lw=2.2, linestyle='--', color="#1f4e79", label="SSP1–2.6 (CMIP6 CESM2)")
 
 
 ##PLOT training data
