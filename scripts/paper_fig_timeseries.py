@@ -325,7 +325,7 @@ def main() -> int:
         # not be comparable across scenarios.
         sd_series = spread.std(axis=1, skipna=True)
         sigma_by_scen[sc] = float(sd_series.mean())
-        bias_of[sc] = (common, d)
+        bias_of[sc] = (common, d, sd_series)
 
         inside = float((d.abs() <= 2 * sd_series).mean()) * 100
         rows.append(dict(scenario=sc, n_unseen=Ra.shape[1], n_years=len(common),
@@ -344,17 +344,25 @@ def main() -> int:
 
     for i, (group, gtitle) in enumerate(BIAS_GROUPS):
         a = axbs[i]
-        a.axhspan(-2 * _sig, 2 * _sig, color="0.55", alpha=0.20, lw=0, zorder=0)
         a.axhline(0, ls="-", lw=0.8, color="0.3", zorder=1)
         for sc in group:
             if sc not in bias_of:
                 continue
-            yy, d = bias_of[sc]
+            yy, d, sd = bias_of[sc]
+            # Grey band = the CESM2 unseen ensemble's own spread, +/-2 sigma
+            # computed PER YEAR from its members (not a constant summary), so it
+            # shows how much a single CESM2 realization departs from the forced
+            # response by chance at that time.
+            a.fill_between(yy, -2 * sd.values, 2 * sd.values,
+                           color="0.45", alpha=0.22, lw=0, zorder=0)
             a.plot(yy, d.values, color=SCEN[sc][3], lw=1.4, zorder=3)
         a.set_title(gtitle, fontsize=9.5, loc="left", pad=3)
         a.grid(alpha=0.25)
         a.text(0.02, 0.94, f"({'bcde'[i]})", transform=a.transAxes,
                fontweight="bold", va="top", ha="left", fontsize=9)
+        a.text(0.97, 0.95, "grey: CESM2 spread (\u00b12\u03c3)",
+               transform=a.transAxes, fontsize=7.4, va="top", ha="right",
+               color="0.30")
 
         # numbers on the figure rather than only in the console
         txt = "\n".join(
@@ -384,8 +392,8 @@ def main() -> int:
         Patch(facecolor="0.35", alpha=0.28, label="EMULATOR member range"),
         Patch(facecolor="0.35", alpha=0.12, label="CESM2 member range"),
         Patch(facecolor="0.55", alpha=0.20,
-              label=f"CESM2 internal variability, b\u2013d "
-                    f"(\u00b12\u03c3 = \u00b1{2*_sig:.2f} \u00b0C)"),
+              label=f"CESM2 spread about its mean, b\u2013d "
+                    f"(\u00b12\u03c3, mean \u00b1{2*_sig:.2f} \u00b0C)"),
     ]
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
@@ -405,8 +413,11 @@ def main() -> int:
 
     ax.set_xlabel("Year")
     ax.set_xlim(BASELINE[0], args.year_max)
-    _lim = max(0.35, max(abs(float(d.min())) for _, d in bias_of.values()),
-               max(abs(float(d.max())) for _, d in bias_of.values())) * 1.15
+    # y-limit must clear both the bias lines and the +/-2 sigma band
+    _lim = max([0.35]
+               + [abs(float(d.min())) for _, d, _sd in bias_of.values()]
+               + [abs(float(d.max())) for _, d, _sd in bias_of.values()]
+               + [2 * float(_sd.max()) for _, _d, _sd in bias_of.values()]) * 1.15
     axbs[0].set_ylim(-_lim, _lim)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight")
