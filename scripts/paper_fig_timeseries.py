@@ -4,15 +4,23 @@ Paper figure: emulated vs held-out CESM2 global-mean temperature, four scenarios
 
 Panels: historical, SSP3-7.0, AAER (aerosol-only), GHG-only.
 
-THE REFERENCE IS HELD-OUT DATA ONLY
------------------------------------
-Each scenario keeps exactly one CESM2 realization out of training
-(configs/config_data_ybias_BCprect.yaml val_experiment_configs):
+THE REFERENCE IS EVERY UNSEEN CESM2 MEMBER
+------------------------------------------
+The held-out set is resolved automatically as (members on disk) MINUS (members
+in experiment_configs), so it is not limited to the single member named in
+val_experiment_configs. Far more data was never trained on:
 
-    hist    trained on 20 LE2 members   -> held out: LE2-1231.001
-    ssp370  trained on 20 LE2 members   -> held out: LE2-1231.001
-    aaer    trained on 001-009          -> held out: 010
-    ghg     trained on 001-009          -> held out: 010
+    scenario  on disk  trained  UNSEEN
+    hist          30       20      10
+    ssp370        30       20      10
+    aaer          20        9      11
+    ghg           15        9       6
+
+Using the whole unseen ensemble matters: comparing a 5-member emulator ensemble
+against ONE CESM2 realization pits a mean against a single noisy draw, so the
+residual is dominated by CESM2's internal variability rather than model error.
+With an unseen ENSEMBLE both sides have a mean and a spread, and the question
+becomes whether the emulator reproduces the distribution.
 
 Those held-out members are read STRAIGHT FROM THE TRAINING TREES here, rather
 than from the eval NetCDF's CESM arrays, for two reasons:
@@ -54,11 +62,14 @@ VAR = "TREFHT"
 
 # scenario -> (panel label, eval NetCDF, (training-tree subdir, held-out member), colour)
 SCEN = {
-    "hist":   ("Historical",              "TREFHT_hist.nc",   ("hist",   "LE2-1231.001"), "#1f4e79"),
-    "ssp370": ("SSP3-7.0",                "TREFHT_ssp370.nc", ("ssp370", "LE2-1231.001"), "#cc2b2b"),
-    "aaer":   ("Aerosol-only (AAER)",     "TREFHT_aaer.nc",   ("AAER",   "010"),          "#e08214"),
-    "ghg":    ("Greenhouse-gas-only (GHG)", "TREFHT_ghg.nc",  ("GHG",    "010"),          "#2a8a3e"),
+    "hist":   ("Historical",                "TREFHT_hist.nc",   "hist",   "#1f4e79"),
+    "ssp370": ("SSP3-7.0",                  "TREFHT_ssp370.nc", "ssp370", "#cc2b2b"),
+    "aaer":   ("Aerosol-only (AAER)",       "TREFHT_aaer.nc",   "AAER",   "#e08214"),
+    "ghg":    ("Greenhouse-gas-only (GHG)", "TREFHT_ghg.nc",    "GHG",    "#2a8a3e"),
 }
+
+# scenario key in the data config -> training-tree subdirectory
+CFG_KEY = {"hist": "hist", "ssp370": "ssp370", "aaer": "aaer", "ghg": "ghg"}
 
 
 def area_mean(da: xr.DataArray) -> xr.DataArray:
@@ -67,21 +78,63 @@ def area_mean(da: xr.DataArray) -> xr.DataArray:
     return da.weighted(w).mean(("lat", "lon"))
 
 
-def read_heldout(tree_root: Path, subdir: str, member: str) -> pd.Series:
-    """Annual global-mean TREFHT for one held-out realization, from its chunks."""
-    d = tree_root / subdir / member
-    files = sorted(d.glob("*.nc"))
-    if not files:
-        raise FileNotFoundError(f"no chunk files in {d}")
-    print(f"    {subdir}/{member}: {len(files)} chunks", flush=True)
-    ds = xr.open_mfdataset(files, combine="by_coords", decode_times=False)
-    da = ds[VAR]
-    gm = area_mean(da).compute()
-    tdim = "time" if "time" in gm.dims else "year"
-    years = np.asarray(ds[tdim].values).astype(int)
-    s = pd.Series(np.asarray(gm.values, dtype=float), index=years).sort_index()
-    ds.close()
-    return s[~s.index.duplicated(keep="first")]
+def unseen_members(tree_root: Path, subdir: str, trained: set) -> list:
+    """Members present on disk but absent from experiment_configs."""
+    d = tree_root / subdir
+    have = {p.name for p in d.iterdir()
+            if p.is_dir() and p.name != "diagnostics"}
+    return sorted(have - set(trained))
+
+
+def read_heldout_ensemble(tree_root: Path, subdir: str, members: list) -> pd.DataFrame:
+    """Annual global-mean TREFHT per unseen member -> DataFrame(year x member)."""
+    cols = {}
+    for i, mem in enumerate(members, 1):
+        d = tree_root / subdir / mem
+        files = sorted(d.glob("*.nc"))
+        if not files:
+            print(f"      [{i}/{len(members)}] {mem}: NO CHUNKS, skipped", flush=True)
+            continue
+        print(f"      [{i}/{len(members)}] {subdir}/{mem} ({len(files)} chunks)", flush=True)
+        ds = xr.open_mfdataset(files, combine="by_coords", decode_times=False)
+        gm = area_mean(ds[VAR]).compute()
+        tdim = "time" if "time" in gm.dims else "year"
+        years = np.asarray(ds[tdim].values).astype(int)
+        sr = pd.Series(np.asarray(gm.values, dtype=float), index=years).sort_index()
+        cols[mem] = sr[~sr.index.duplicated(keep="first")]
+        ds.close()
+    if not cols:
+        raise FileNotFoundError(f"no readable members under {tree_root / subdir}")
+    return pd.DataFrame(cols).sort_index()
+
+
+def qc_ensemble(df: pd.DataFrame, scenario: str, n_sigma: float = 5.0) -> pd.DataFrame:
+    """Mask corrupt points before they contaminate the reference mean/spread.
+
+    Some staged realizations have bad years — LE2-1231.012 reads 286.02 K in
+    1930 (1.2 K below the ensemble mean, ~10 sigma) and is NaN for 1931-1935.
+    Averaging that in drags the reference mean down and inflates the spread
+    exactly where the bias panel is read.
+
+    Points further than n_sigma from the per-year ensemble MEDIAN (robust to the
+    outlier itself) are set to NaN; every downstream statistic skips NaN, so a
+    member contributes for the years it is good and is simply absent elsewhere.
+    """
+    med = df.median(axis=1)
+    dev = df.sub(med, axis=0)
+    sd = float(dev.stack().std())
+    bad = dev.abs() > n_sigma * sd
+    if bad.any().any():
+        for m in df.columns[bad.any()]:
+            yrs = df.index[bad[m]].tolist()
+            print(f"    [QC] {scenario}: masked {m} at {yrs} "
+                  f"(>{n_sigma:g} sigma, sd={sd:.3f} K)")
+    nan_before = int(df.isna().sum().sum())
+    if nan_before:
+        for m in df.columns[df.isna().any()]:
+            print(f"    [QC] {scenario}: {m} has {int(df[m].isna().sum())} "
+                  f"missing years (excluded per-year)")
+    return df.mask(bad)
 
 
 def read_emulated(nc_path: Path):
@@ -113,6 +166,10 @@ def main() -> int:
     ap.add_argument("--tree-root",
                     default="/home/nordling/mnt/lumi_sc2/emulator_data/training_data/TREFHT",
                     help="root of the TREFHT training trees (holds hist/, ssp370/, AAER/, GHG/)")
+    ap.add_argument("--data-config",
+                    default="configs/config_data_ybias_BCprect.yaml",
+                    help="data config whose experiment_configs define the TRAINED "
+                         "members; everything else on disk counts as unseen")
     ap.add_argument("--ref-csv", default=None,
                     help="cache of the held-out reference series; read if present, "
                          "written after computing so re-plots are instant")
@@ -123,20 +180,33 @@ def main() -> int:
     eval_dir = Path(args.eval_dir)
     tree_root = Path(args.tree_root)
 
-    # ── held-out CESM2 reference ────────────────────────────────────────────
-    ref = {}
+    # ── held-out CESM2 reference: EVERY unseen member ───────────────────────
+    ref = {}          # scenario -> DataFrame(year x member)
     if args.ref_csv and os.path.exists(args.ref_csv):
         df = pd.read_csv(args.ref_csv)
         for sc, g in df.groupby("scenario"):
-            ref[sc] = pd.Series(g["gmean_K"].values, index=g["year"].values.astype(int))
-        print(f"[ref] reusing cached series from {args.ref_csv}")
+            ref[sc] = qc_ensemble(
+                g.pivot(index="year", columns="member", values="gmean_K").sort_index(), sc)
+        print(f"[ref] reusing cached ensemble from {args.ref_csv}")
+        for sc, d in ref.items():
+            print(f"      {sc:7s} {d.shape[1]} unseen members, "
+                  f"{int(d.index.min())}-{int(d.index.max())}")
     else:
-        print("[ref] reading held-out realizations from the training trees")
-        for sc, (_, _, (sub, mem), _) in SCEN.items():
-            ref[sc] = read_heldout(tree_root, sub, mem)
+        import yaml
+        cfg = yaml.safe_load(open(args.data_config))
+        trained = {e["scenario_name"]: set(e.get("realizations", []))
+                   for e in cfg["experiment_configs"]}
+        print("[ref] resolving unseen members (on disk MINUS experiment_configs)")
+        for sc, (_, _, sub, _) in SCEN.items():
+            mems = unseen_members(tree_root, sub, trained.get(CFG_KEY[sc], set()))
+            print(f"    {sc:7s} {len(mems)} unseen: {mems}")
+            ref[sc] = qc_ensemble(
+                read_heldout_ensemble(tree_root, sub, mems), sc)
         if args.ref_csv:
-            rows = [dict(scenario=sc, year=int(y), gmean_K=float(v))
-                    for sc, s in ref.items() for y, v in s.items()]
+            rows = [dict(scenario=sc, member=m, year=int(y), gmean_K=float(v))
+                    for sc, d in ref.items()
+                    for m in d.columns
+                    for y, v in d[m].dropna().items()]
             os.makedirs(os.path.dirname(os.path.abspath(args.ref_csv)) or ".", exist_ok=True)
             pd.DataFrame(rows).to_csv(args.ref_csv, index=False)
             print(f"[out] {args.ref_csv}")
@@ -153,7 +223,8 @@ def main() -> int:
               f"{0 if emu[sc][1] is None else emu[sc][1].shape[0]} members")
 
     # ── baselines: each side referenced to ITS OWN pre-industrial ───────────
-    ref_base_hist = baseline_of(ref["hist"].index.values, ref["hist"].values)
+    ref_base_hist = baseline_of(ref["hist"].index.values,
+                                ref["hist"].mean(axis=1, skipna=True).values)
     emu_base_hist = (baseline_of(emu["hist"][2], emu["hist"][0])
                      if "hist" in emu else np.nan)
     print(f"\n[baseline 1850-1900]  CESM2 held-out hist {ref_base_hist:.3f} K   "
@@ -177,10 +248,12 @@ def main() -> int:
     )
     rows = []
 
-    for sc, (label, _, (sub, mem), colour) in SCEN.items():
+    for sc, (label, _, sub, colour) in SCEN.items():
+        R = ref[sc]                              # DataFrame(year x member)
+        r_years = R.index.values
         # scenarios without their own pre-industrial inherit the historical one
         rb = ref_base_hist if sc == "ssp370" else baseline_of(
-            ref[sc].index.values, ref[sc].values)
+            r_years, R.mean(axis=1, skipna=True).values)
         eb = emu_base_hist if sc == "ssp370" else (
             baseline_of(emu[sc][2], emu[sc][0]) if sc in emu else np.nan)
         if not np.isfinite(rb):
@@ -188,12 +261,15 @@ def main() -> int:
         if not np.isfinite(eb):
             eb = emu_base_hist
 
-        r = ref[sc][ref[sc].index <= args.year_max]
-        r_anom = r - rb
+        keep_r = r_years <= args.year_max
+        Ra = R[keep_r] - rb                       # anomalies, per member
+        r_mean = Ra.mean(axis=1, skipna=True)
 
-        # held-out CESM2: dashed, same colour as its emulator counterpart
-        ax.plot(r.index, r_anom.values, color=colour, lw=1.1, ls="--",
-                alpha=0.85, zorder=3)
+        # CESM2 held-out ensemble: mean dashed + member spread
+        ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True), Ra.max(axis=1, skipna=True),
+                        color=colour, alpha=0.12, lw=0, zorder=1)
+        ax.plot(Ra.index, r_mean.values, color=colour, lw=1.2, ls="--",
+                alpha=0.95, zorder=3)
 
         if sc not in emu:
             continue
@@ -203,31 +279,42 @@ def main() -> int:
             ax.fill_between(years[keep],
                             (members[:, keep] - eb).min(axis=0),
                             (members[:, keep] - eb).max(axis=0),
-                            color=colour, alpha=0.22, lw=0, zorder=1)
-        ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.0, zorder=2,
+                            color=colour, alpha=0.28, lw=0, zorder=2)
+        ax.plot(years[keep], mean[keep] - eb, color=colour, lw=2.0, zorder=4,
                 label=label)
 
-        # ── bias panel: emulator ensemble mean minus held-out CESM2 ─────────
-        common = np.intersect1d(years[keep], r.index.values)
+        # ── bias panel ──────────────────────────────────────────────────────
+        # Line: difference of ENSEMBLE MEANS. Band: the spread of individual
+        # CESM2 members about their own mean — i.e. what a single realization
+        # departs from the forced response by chance. A bias line inside that
+        # band is indistinguishable from internal variability.
+        common = np.intersect1d(years[keep], Ra.index.values)
         if not len(common):
             continue
         e = pd.Series(mean[keep] - eb, index=years[keep]).loc[common]
-        c = r_anom.loc[common]
+        c = r_mean.loc[common]
         d = e - c
-        axb.plot(common, d.values, color=colour, lw=1.3)
+        spread = Ra.loc[common].sub(c, axis=0)
+        axb.fill_between(common, spread.min(axis=1, skipna=True), spread.max(axis=1, skipna=True),
+                         color=colour, alpha=0.12, lw=0, zorder=1)
+        axb.plot(common, d.values, color=colour, lw=1.4, zorder=3)
 
-        rows.append(dict(scenario=sc, n_years=len(common),
+        inside = float((d.abs() <= spread.abs().max(axis=1, skipna=True)).mean()) * 100
+        rows.append(dict(scenario=sc, n_unseen=Ra.shape[1], n_years=len(common),
                          bias=round(float(d.mean()), 3),
                          rmse=round(float(np.sqrt((d ** 2).mean())), 3),
                          corr=round(float(np.corrcoef(e, c)[0, 1]), 3),
-                         last_emu=round(float(e.iloc[-1]), 3),
-                         last_cesm=round(float(c.iloc[-1]), 3)))
+                         cesm_sd=round(float(Ra.loc[common].std(axis=1, skipna=True).mean()), 3),
+                         pct_within_spread=round(inside, 1)))
 
     # legend: scenario colours, plus what solid/dashed mean
     from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
     style = [
-        Line2D([], [], color="0.35", lw=2.0, label="Emulator (ensemble mean)"),
-        Line2D([], [], color="0.35", lw=1.1, ls="--", label="CESM2 (held-out member)"),
+        Line2D([], [], color="0.35", lw=2.0, label="Emulator (ensemble mean, 5 members)"),
+        Line2D([], [], color="0.35", lw=1.2, ls="--", label="CESM2 (unseen ensemble mean)"),
+        Patch(facecolor="0.35", alpha=0.28, label="Emulator member range"),
+        Patch(facecolor="0.35", alpha=0.12, label="CESM2 unseen member range"),
     ]
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
@@ -244,7 +331,7 @@ def main() -> int:
 
     axb.axhline(0, ls="-", lw=0.8, color="0.3")
     axb.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
-    axb.set_ylabel("Bias (°C)\nemulator − CESM2")
+    axb.set_ylabel("Bias (°C)\nensemble means")
     axb.set_xlabel("Year")
     axb.set_xlim(BASELINE[0], args.year_max)
     # symmetric limits so over/under-estimation read equally
