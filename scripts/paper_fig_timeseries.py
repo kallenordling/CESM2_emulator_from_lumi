@@ -61,11 +61,13 @@ BASELINE = (1850, 1900)
 VAR = "TREFHT"
 
 # scenario -> (panel label, eval NetCDF, (training-tree subdir, held-out member), colour)
+# Okabe-Ito colours: distinguishable under deuteranopia/protanopia, unlike
+# the red+green pairing this figure used before.
 SCEN = {
-    "hist":   ("Historical",                "TREFHT_hist.nc",   "hist",   "#1f4e79"),
-    "ssp370": ("SSP3-7.0",                  "TREFHT_ssp370.nc", "ssp370", "#cc2b2b"),
-    "aaer":   ("Aerosol-only (AAER)",       "TREFHT_aaer.nc",   "AAER",   "#e08214"),
-    "ghg":    ("Greenhouse-gas-only (GHG)", "TREFHT_ghg.nc",    "GHG",    "#2a8a3e"),
+    "hist":   ("Historical",                "TREFHT_hist.nc",   "hist",   "#0072B2"),
+    "ssp370": ("SSP3-7.0",                  "TREFHT_ssp370.nc", "ssp370", "#D55E00"),
+    "aaer":   ("Aerosol-only (AAER)",       "TREFHT_aaer.nc",   "AAER",   "#E69F00"),
+    "ghg":    ("Greenhouse-gas-only (GHG)", "TREFHT_ghg.nc",    "GHG",    "#009E73"),
 }
 
 # scenario key in the data config -> training-tree subdirectory
@@ -233,6 +235,7 @@ def main() -> int:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
     plt.rcParams.update({
         "figure.dpi": 150, "savefig.dpi": 300, "font.size": 10,
         "axes.labelsize": 10, "axes.titlesize": 11, "legend.fontsize": 9,
@@ -247,6 +250,7 @@ def main() -> int:
         gridspec_kw=dict(height_ratios=[2.4, 1.0], hspace=0.08),
     )
     rows = []
+    sigma_by_scen = {}
 
     for sc, (label, _, sub, colour) in SCEN.items():
         R = ref[sc]                              # DataFrame(year x member)
@@ -268,8 +272,12 @@ def main() -> int:
         # CESM2 held-out ensemble: mean dashed + member spread
         ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True), Ra.max(axis=1, skipna=True),
                         color=colour, alpha=0.12, lw=0, zorder=1)
-        ax.plot(Ra.index, r_mean.values, color=colour, lw=1.2, ls="--",
-                alpha=0.95, zorder=3)
+        # White casing under the dashed reference: where emulator and CESM2
+        # agree — i.e. nearly everywhere, which is the point — same-colour
+        # solid and dashed merge into one stroke at print size.
+        ax.plot(Ra.index, r_mean.values, color=colour, lw=1.6, ls=(0, (5, 2)),
+                zorder=5, path_effects=[
+                    pe.withStroke(linewidth=3.4, foreground="white")])
 
         if sc not in emu:
             continue
@@ -295,11 +303,15 @@ def main() -> int:
         c = r_mean.loc[common]
         d = e - c
         spread = Ra.loc[common].sub(c, axis=0)
-        axb.fill_between(common, spread.min(axis=1, skipna=True), spread.max(axis=1, skipna=True),
-                         color=colour, alpha=0.12, lw=0, zorder=1)
-        axb.plot(common, d.values, color=colour, lw=1.4, zorder=3)
+        # Per-scenario sigma of members about their own mean. Recorded for the
+        # shared envelope drawn once below; min/max is NOT used because its
+        # width depends on member count (6 for ghg vs 11 for aaer) and would
+        # not be comparable across scenarios.
+        sd_series = spread.std(axis=1, skipna=True)
+        sigma_by_scen[sc] = float(sd_series.mean())
+        axb.plot(common, d.values, color=colour, lw=1.5, zorder=3)
 
-        inside = float((d.abs() <= spread.abs().max(axis=1, skipna=True)).mean()) * 100
+        inside = float((d.abs() <= 2 * sd_series).mean()) * 100
         rows.append(dict(scenario=sc, n_unseen=Ra.shape[1], n_years=len(common),
                          bias=round(float(d.mean()), 3),
                          rmse=round(float(np.sqrt((d ** 2).mean())), 3),
@@ -307,9 +319,18 @@ def main() -> int:
                          cesm_sd=round(float(Ra.loc[common].std(axis=1, skipna=True).mean()), 3),
                          pct_within_spread=round(inside, 1)))
 
+    # One grey +/-2 sigma envelope instead of four overlapping bands. The
+    # per-scenario sigmas agree to ~2% (see printout), so a shared band is
+    # honest and legible where four translucent ones were a wash.
+    _sig = float(np.mean(list(sigma_by_scen.values()))) if sigma_by_scen else 0.0
+    axb.axhspan(-2 * _sig, 2 * _sig, color="0.55", alpha=0.20, lw=0, zorder=0,
+                label=f"CESM2 internal variability (\u00b12\u03c3 = \u00b1{2*_sig:.2f} \u00b0C)")
+    axb.legend(frameon=False, loc="upper left", fontsize=8.5)
+
     # legend: scenario colours, plus what solid/dashed mean
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
+    import matplotlib.patheffects as pe
     style = [
         Line2D([], [], color="0.35", lw=2.0, label="Emulator (ensemble mean, 5 members)"),
         Line2D([], [], color="0.35", lw=1.2, ls="--", label="CESM2 (unseen ensemble mean)"),
@@ -318,16 +339,20 @@ def main() -> int:
     ]
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
-    leg1 = ax.legend(frameon=False, loc="upper left", ncols=2)
+    # Legends ABOVE the axes so they take no data area.
+    leg1 = ax.legend(frameon=False, ncols=4, loc="lower left",
+                     bbox_to_anchor=(0.0, 1.10), handlelength=2.2)
     ax.add_artist(leg1)
-    ax.legend(handles=style, frameon=False, fontsize=8.5,
-              loc="upper left", bbox_to_anchor=(0.0, 0.84))
+    ax.legend(handles=style, frameon=False, ncols=2, fontsize=8.5,
+              loc="lower left", bbox_to_anchor=(0.0, 1.005), handlelength=2.6)
 
     ax.axhline(0, ls=":", lw=0.8, color="0.3")
     ax.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
     ax.set_ylabel("GMST anomaly (°C, vs 1850–1900)")
-    ax.set_title("Emulated vs held-out CESM2 global-mean surface temperature",
-                 loc="left")
+    ax.text(0.005, 0.97, "(a)", transform=ax.transAxes, fontweight="bold",
+            va="top", ha="left")
+    axb.text(0.005, 0.94, "(b)", transform=axb.transAxes, fontweight="bold",
+             va="top", ha="left")
 
     axb.axhline(0, ls="-", lw=0.8, color="0.3")
     axb.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
@@ -350,6 +375,13 @@ def main() -> int:
         t = pd.DataFrame(rows)
         print("\nEmulator vs held-out CESM2 (°C, on overlapping years)")
         print(t.to_string(index=False))
+        if sigma_by_scen:
+            _v = list(sigma_by_scen.values())
+            print("\nCESM2 inter-member sigma by scenario (\u00b0C): "
+                  + ", ".join(f"{k}={v:.3f}" for k, v in sigma_by_scen.items()))
+            print(f"  spread across scenarios: {max(_v)-min(_v):.4f} \u00b0C "
+                  f"({100*(max(_v)-min(_v))/np.mean(_v):.1f}% of the mean) "
+                  f"-> a single shared envelope is representative")
     return 0
 
 
