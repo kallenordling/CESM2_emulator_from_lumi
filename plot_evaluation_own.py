@@ -60,6 +60,35 @@ def load_anomalies(dir_path: Path) -> xr.DataArray:
     ens = xr.concat(series, dim="member").isel(time=0)
     return ens
 
+def load_anomalies_from_file(nc_path: Path) -> xr.DataArray:
+    """Load one generate_test.py output file and return baseline anomalies.
+
+    That file is written as TREFHT(year, sample, lat, lon) in degC with no time
+    dim (trainer/generate_test.py), so the ensemble members are the `sample`
+    dimension of a SINGLE file rather than one file per member. Renamed to
+    `member` so plot_ensemble() can consume it unchanged.
+    """
+    print("open", nc_path)
+    ds = xr.open_dataset(nc_path)
+
+    da = calcmean(ds[VAR])                      # -> (year, sample)
+
+    base = da.sel(year=BASELINE)
+    if base.size == 0:
+        raise ValueError(
+            f"Baseline years {BASELINE.start}-{BASELINE.stop} not found in "
+            f"{Path(nc_path).name}; it covers "
+            f"{int(da['year'].min())}-{int(da['year'].max())}"
+        )
+
+    anom = (da - base.mean("year")).sortby("year")
+
+    if "sample" in anom.dims:
+        anom = anom.rename({"sample": "member"})
+
+    return anom.transpose("member", "year")
+
+
 def plot_ensemble(ax, ens: xr.DataArray, color, label):
     """Plot members (light), mean (bold), and 5–95% band."""
     years = ens["year"].values
@@ -77,15 +106,15 @@ def plot_ensemble(ax, ens: xr.DataArray, color, label):
     ax.plot(years, mean, lw=2.2, color=color, label=label)
 
 # ---------- paths ----------
-#dir_ssp370_co2 = Path("/scratch/project_462001112/emulator_data/gen_co2_ssp370_TREFHT_1850-2100")
+#dir_ssp370_co2 = Path("/scratch/project_462001328/emulator_data/gen_co2_ssp370_TREFHT_1850-2100")
 dir_ssp370_aero = Path("generated_samples_1850_2100.nc")
-#dir_ssp126_co2 = Path("/scratch/project_462001112/emulator_data/gen_co2_ssp126_TREFHT_1850-2100")
-#dir_ssp126_aero = Path("/scratch/project_462001112/emulator_data/gen_ssp126_aero_v2_TREFHT_1850-2100")
-#dir_ramip_aero = Path("/scratch/project_462001112/emulator_data/gen_ssp37_ssp126_aero_v2_TREFHT_1850-2100")
+#dir_ssp126_co2 = Path("/scratch/project_462001328/emulator_data/gen_co2_ssp126_TREFHT_1850-2100")
+#dir_ssp126_aero = Path("/scratch/project_462001328/emulator_data/gen_ssp126_aero_v2_TREFHT_1850-2100")
+#dir_ramip_aero = Path("/scratch/project_462001328/emulator_data/gen_ssp37_ssp126_aero_v2_TREFHT_1850-2100")
 # ---------- load ----------
 #ens_ssp370_co2  = load_anomalies(dir_ssp370_co)
 #ens_ssp370_co2_v2  = load_anomalies(dir_ssp370_co_v2)
-ens_ssp370_aero  = load_anomalies(dir_ssp370_aero)
+ens_ssp370_aero  = load_anomalies_from_file(dir_ssp370_aero)
 #ens_ssp126_aero = load_anomalies(dir_ssp126_aero)
 #ens_ramip_aero = load_anomalies(dir_ramip_aero)
 #ens_ssp126_co2 = load_anomalies(dir_ssp126_co2)
@@ -103,8 +132,8 @@ fig, ax = plt.subplots(figsize=(7.2, 4.2))
 #plot_ensemble(ax, ens_ssp370_co2_v2,  color="#1fffff",label="SSP126 (ensemble) CO2+sulfate")
 plot_ensemble(ax, ens_ssp370_aero, color="#cc2b2b", label="SSP3–7.0 (ensemble) Co2+sulfate")
 #plot_ensemble(ax, ens_ssp126_co2, color="#1f4e79", label="SSP1–2.6 (ensemble co2)")
-plot_ensemble(ax, ens_ssp126_aero, color="#1fff79", label="SSP1–2.6 (ensemble,co2+sul)")
-plot_ensemble(ax, ens_ramip_aero, color="#1fff79", label="SSP1370-ssp126aer")
+#plot_ensemble(ax, ens_ssp126_aero, color="#1fff79", label="SSP1–2.6 (ensemble,co2+sul)")   # DISABLED: ens_ssp126_aero is not loaded
+#plot_ensemble(ax, ens_ramip_aero, color="#1fff79", label="SSP1370-ssp126aer")   # DISABLED: ens_ramip_aero is not loaded
 #plot_ensemble(ax, ens_aero, color="#1f4e00", label="aero constrain (ensemble)")
 #plot_ensemble(ax, ens_aero3, color="#1f4e02", label="aero3 constrain (ensemble)")
 # Baseline band
@@ -125,12 +154,12 @@ ax.set_xticks(np.arange(1850, 2110, 25))
 
 ###plot CMIP6 references
 
-hist_cmip=xr.open_dataset("/scratch/project_462001112/emulator_data/cmip6/historical.nc")
-#ssp1=xr.open_dataset("/scratch/project_462001112/emulator_data/cmip6/ssp126.nc")
-ssp3=xr.open_dataset("/scratch/project_462001112/emulator_data/cmip6/ssp370.nc")
+hist_cmip=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/historical.nc")
+#ssp1=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp126.nc")
+ssp3=xr.open_dataset("/scratch/project_462001328/emulator_data/cmip6/ssp370.nc")
 
 common_members3 = np.intersect1d(hist_cmip.member.values, ssp3.member.values)
-common_members1 = np.intersect1d(hist_cmip.member.values, ssp1.member.values)
+#common_members1 = np.intersect1d(hist_cmip.member.values, ssp1.member.values)   # DISABLED: ssp1 is not loaded
 
 ds_merged_ssp3 = xr.concat([hist_cmip.sel(member=common_members3), ssp3.sel(member=common_members3)], dim="year")
 #ds_merged_ssp1 = xr.concat([hist_cmip.sel(member=common_members1), ssp1.sel(member=common_members1)], dim="year")
@@ -138,14 +167,14 @@ cmip_ssp3=calcmean(ds_merged_ssp3)
 #cmip_ssp1=calcmean(ds_merged_ssp1)
 cmip_ssp3=cmip_ssp3-cmip_ssp3.sel(year=BASELINE).mean('year')
 #cmip_ssp1=cmip_ssp1-cmip_ssp1.sel(year=BASELINE).mean('year')
-print(ds_merged_ssp1)
+#print(ds_merged_ssp1)   # DISABLED: ds_merged_ssp1 is not built
 ax.plot(cmip_ssp3.year, cmip_ssp3.mean('member').tas, lw=2.2, linestyle='--', color="#cc2b2b", label="SSP3–7.0 (CMIP6 CESM2)")
 #ax.plot(cmip_ssp1.year, cmip_ssp1.mean('member').tas, lw=2.2, linestyle='--', color="#1f4e79", label="SSP1–2.6 (CMIP6 CESM2)")
 
 
 ##PLOT training data
 
-data_dir = "//scratch/project_462001112/emulator_data/"       # e.g. tas, pr
+data_dir = "/scratch/project_462001328/emulator_data/"       # e.g. tas, pr
 realizations = ['r10i1181p1f1','r10i1231p1f1','r10i1251p1f1','r10i1281p1f1','r10i1301p1f1','r1i1001p1f1','r1i1231p1f1','r1i1251p1f1']
 for i,r in enumerate(realizations):
     ds=xr.open_mfdataset(data_dir+r+"/*.nc")
@@ -157,11 +186,13 @@ for i,r in enumerate(realizations):
         ax.plot(ds.year,ds.TREFHT,'k',linewidth=0.5)
 
 ##ramip
-ds=xr.open_dataset('tas_Amon_CESM2_ssp370-126aer_r1i1p1f1_gn_201501-207912.nc').groupby('time.year').mean()#.isel(member=0)
+ds=xr.open_dataset('/scratch/project_462001328/emulator_data/tas_Amon_CESM2_ssp370-126aer_r1i1p1f1_gn_201501-207912.nc').groupby('time.year').mean()#.isel(member=0)
 print(ds)
 ds=calcmean(ds.tas)
 print(ds)
-ds=ds-cmip_ssp1.sel(year=BASELINE).mean('year')
+# cmip_ssp1 is not built; RAMIP starts 2015 so it needs an
+# external 1850-1900 reference -> use the CMIP6 historical one.
+ds=ds-calcmean(hist_cmip.tas).sel(year=BASELINE).mean('year').mean('member')
 print(ds)
 ax.plot(ds.year,ds.values,'purple',linewidth=3,label="RAMIP")
 ax.legend(frameon=False, ncols=2, handlelength=2.5)
