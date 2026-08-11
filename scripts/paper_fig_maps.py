@@ -246,6 +246,7 @@ def main() -> int:
                              subplot_kw=proj, squeeze=False)
 
     rows = []
+    _counts = []
     for r, var in enumerate(args.vars):
         meta = VARS[var]
         pct = (var == "PRECT") and not args.precip_mm
@@ -312,7 +313,12 @@ def main() -> int:
             if HAVE_CARTOPY:
                 ax.coastlines(linewidth=0.35, color="0.25")
                 ax.set_global()
-            ax.set_title(f"{d['label']}" if r == 0 else "", fontsize=9.5)
+            if r == 0:
+                # Year range belongs in the column title: it is a property of
+                # the experiment, identical for both variable rows, so putting
+                # it here states it once instead of twice per column.
+                ax.set_title(f"{d['label']}\n{d['yr'][0]}\u2013{d['yr'][1]}"
+                             f"  ({args.n_years} yr)", fontsize=9.5)
             _msk = masked_pct.get(sc)
             ax.text(0.5, -0.10,
                     f"r = {corr:.3f}   RMSE = {rmse:.3f} {unit}\n"
@@ -323,6 +329,11 @@ def main() -> int:
             if c == 0:
                 ax.text(-0.06, 0.5, meta["row"], transform=ax.transAxes,
                         rotation=90, va="center", ha="right", fontsize=10)
+            if d["n_emu"] != d["n_c"]:
+                print(f"  [warn] {var}/{sc}: {d['n_emu']} emulator vs "
+                      f"{d['n_c']} CESM2 members — the means are converged to "
+                      f"different degrees; set --n-ref-members {d['n_emu']}")
+            _counts.append(dict(n_emu=d["n_emu"], n_cesm=d["n_c"]))
             rows.append(dict(var=var, scenario=sc, years=f"{d['yr'][0]}-{d['yr'][1]}",
                              n_emu=d["n_emu"], n_cesm=d["n_c"],
                              pattern_corr=round(corr, 4), rmse=round(rmse, 4),
@@ -336,13 +347,19 @@ def main() -> int:
                           fraction=0.018, pad=0.012, extend="both")
         cb.set_label(f"emulator − CESM2 ({unit})", fontsize=8.5)
 
+    _ne = sorted({r_["n_emu"] for r_ in _counts}) or [0]
+    _nc = sorted({r_["n_cesm"] for r_ in _counts}) or [0]
+    _fmt = lambda v: str(v[0]) if len(v) == 1 else "\u2013".join(
+        (str(min(v)), str(max(v))))
+    _what = "field" if args.absolute else "anomaly vs 1850\u20131900"
     fig.suptitle(
-        f"Emulator minus held-out CESM2, {args.n_years}-year mean "
-        f"{'field' if args.absolute else 'anomaly vs 1850–1900'}; "
+        f"ENSEMBLE-MEAN emulator minus held-out CESM2 "
+        f"({_fmt(_ne)} emulator vs {_fmt(_nc)} CESM2 members), "
+        f"{args.n_years}-year mean " + _what + "\n"
         f"hatching = |bias| below CESM2 inter-member spread"
         + ("" if args.precip_mm else
-           f"; precipitation as % of its 1850–1900 baseline"),
-        fontsize=10, y=0.99)
+           "; precipitation as % of its 1850\u20131900 baseline"),
+        fontsize=9.5, y=1.005)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight")
     fig.savefig(str(Path(args.out).with_suffix(".pdf")), bbox_inches="tight")
