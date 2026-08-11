@@ -2,20 +2,20 @@
 """
 Paper figure: emulated vs held-out CESM2 DISTRIBUTIONS over the final decade.
 
-One panel per experiment (historical, SSP3-7.0, AAER, GHG). Each pools every
-grid point, every year of the last N years, and every ensemble member into one
-distribution, then overlays emulator against CESM2.
+One panel per experiment (historical, SSP3-7.0, AAER, GHG). The quantity is the
+GLOBAL-MEAN ANOMALY: each ensemble member contributes one value per year, and
+the last N years of every member are pooled into one distribution — n_members x
+n_years samples per side (5 x 10 = 50 by default).
 
-Where the timeseries figure asks "is the forced response right?", this asks "is
-the whole distribution right?" — including the tails, which a global mean cannot
-show. That matters most for precipitation, which is strongly right-skewed: an
-emulator can match the mean while badly missing the extremes.
+This is the distribution of global-mean climate STATES the emulator produces,
+i.e. whether its year-to-year and member-to-member spread matches CESM2's
+internal variability. The timeseries figure shows the ensemble MEANS agree; this
+shows whether the scatter about them does too.
 
-AREA WEIGHTING
---------------
-Grid cells are not equal area, so an unweighted histogram over-counts the poles
-by ~cos(lat). Every count is weighted by cos(lat), making these true
-area-fraction distributions.
+Global means are cos(lat)-weighted, and anomalies are referenced to each side's
+OWN 1850-1900 mean, exactly as in paper_fig_timeseries.py. Precipitation is
+expressed as percent change for the same reason it is there: a few hundredths of
+a mm/day is meaningless without the ~2.9 mm/day it is relative to.
 
 REFERENCE = HELD-OUT MEMBERS ONLY
 ---------------------------------
@@ -45,12 +45,12 @@ VAR = "TREFHT"
 
 VARMETA = {
     "TREFHT": dict(unit="°C", unit_plain="degC",
-                   xlab="Near-surface air temperature (°C)",
+                   xlab="Global-mean temperature anomaly (°C, vs 1850–1900)",
                    title="temperature",
                    tree_scale={None: 1.0, "K": 1.0, "degC": 1.0},
                    tree_offset={"K": -273.15, "degC": 0.0, None: 0.0}),
-    "PRECT":  dict(unit="mm day$^{-1}$", unit_plain="mm/day",
-                   xlab="Precipitation (mm day$^{-1}$)",
+    "PRECT":  dict(unit="%", unit_plain="%", percent=True,
+                   xlab="Global-mean precipitation change (%, vs 1850–1900)",
                    title="precipitation",
                    tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0},
                    tree_offset={"m/s": 0.0, "mm/day": 0.0, None: 0.0}),
@@ -71,67 +71,49 @@ def unseen_members(tree_root: Path, subdir: str, trained: set) -> list:
     return sorted(have - set(trained))
 
 
-def read_emulator_block(nc_path: Path, n_years: int):
-    """(values, weights) pooled over members x last n_years x grid."""
+BASELINE = (1850, 1900)
+
+
+def anom(values, base):
+    """Absolute difference, or percent change when the variable sets percent."""
+    if VARMETA[VAR].get("percent"):
+        return 100.0 * (np.asarray(values) - base) / base
+    return np.asarray(values) - base
+
+
+def baseline_of(years, values):
+    m = (np.asarray(years) >= BASELINE[0]) & (np.asarray(years) <= BASELINE[1])
+    return float(np.asarray(values)[m].mean()) if m.any() else np.nan
+
+
+def read_emulator_gmean(nc_path: Path):
+    """(years, member matrix) of ABSOLUTE global means from an eval NetCDF."""
     ds = xr.open_dataset(nc_path)
     years = ds["year"].values.astype(int)
-    keep = years >= years.max() - n_years + 1
     names = [v for v in ds.data_vars
-             if v.startswith(f"{VAR}_model_m") and not v.endswith("_anom")
-             and not v.startswith(f"{VAR}_model_mean")]
+             if v.startswith(f"{VAR}_model_gmean_m") and not v.endswith("_anom")
+             and not v.startswith(f"{VAR}_model_gmean_mean")]
     if not names:
-        raise KeyError(f"{nc_path}: no per-member {VAR}_model_m* fields")
-    lat = ds["lat"].values
-    w2d = np.broadcast_to(np.cos(np.deg2rad(lat))[:, None],
-                          (len(lat), ds.sizes["lon"]))
-    vals, wts = [], []
-    for nm in sorted(names, key=lambda x: int(x.rsplit("_m", 1)[1])):
-        a = ds[nm].values[keep]                      # (t, lat, lon)
-        vals.append(a.ravel())
-        wts.append(np.broadcast_to(w2d, a.shape).ravel())
+        raise KeyError(f"{nc_path}: no per-member {VAR}_model_gmean_m* fields")
+    M = np.stack([ds[n].values for n in
+                  sorted(names, key=lambda x: int(x.rsplit("_m", 1)[1]))])
     ds.close()
-    yr = years[keep]
-    return (np.concatenate(vals), np.concatenate(wts),
-            int(yr.min()), int(yr.max()), len(names))
+    return years, M                      # (members, years)
 
 
-def read_cesm_block(tree_root: Path, subdir: str, members: list, n_years: int):
-    """Same, from the held-out training-tree members, converted to model units."""
-    meta = VARMETA[VAR]
-    vals, wts, y0, y1 = [], [], None, None
-    for i, mem in enumerate(members, 1):
-        files = sorted((tree_root / subdir / mem).glob("*.nc"))
-        if not files:
-            print(f"      [{i}/{len(members)}] {mem}: no chunks, skipped", flush=True)
-            continue
-        ds = xr.open_mfdataset(files, combine="by_coords", decode_times=False)
-        if VAR not in ds:
-            raise KeyError(f"{tree_root/subdir/mem}: no {VAR!r} "
-                           f"(--tree-root must point at the {VAR} tree)")
-        u = ds[VAR].attrs.get("units")
-        scale = meta["tree_scale"].get(u)
-        off = meta["tree_offset"].get(u, 0.0)
-        if scale is None:
-            raise ValueError(f"{mem}: {VAR} units {u!r} have no conversion to "
-                             f"{meta['unit_plain']}")
-        tdim = "time" if "time" in ds[VAR].dims else "year"
-        years = np.asarray(ds[tdim].values).astype(int)
-        keep = years >= years.max() - n_years + 1
-        if i == 1:
-            print(f"      units {u!r} -> x{scale:g}{off:+g} "
-                  f"[{meta['unit_plain']}]", flush=True)
-        a = (ds[VAR].isel({tdim: np.where(keep)[0]}).values * scale + off)
-        lat = ds["lat"].values
-        w2d = np.broadcast_to(np.cos(np.deg2rad(lat))[:, None], a.shape[-2:])
-        vals.append(a.ravel())
-        wts.append(np.broadcast_to(w2d, a.shape).ravel())
-        yy = years[keep]
-        y0 = int(yy.min()) if y0 is None else min(y0, int(yy.min()))
-        y1 = int(yy.max()) if y1 is None else max(y1, int(yy.max()))
-        ds.close()
-        print(f"      [{i}/{len(members)}] {subdir}/{mem} {yy.min()}-{yy.max()}",
-              flush=True)
-    return np.concatenate(vals), np.concatenate(wts), y0, y1, len(vals)
+def read_cesm_gmean_cache(ref_csv: str):
+    """Per-member global means from paper_fig_timeseries.py's cache.
+
+    Reusing that cache is what makes this script fast: the global means have
+    already been extracted from the training trees, so nothing here re-reads
+    them. Build it by running paper_fig_timeseries.py for the same --var.
+    """
+    df = pd.read_csv(ref_csv)
+    out = {}
+    for sc, g in df.groupby("scenario"):
+        P = g.pivot(index="year", columns="member", values="gmean_K").sort_index()
+        out[str(sc)] = P
+    return out
 
 
 def wq(x, w, q):
@@ -158,7 +140,11 @@ def main() -> int:
                     help="pool the last N years of each experiment")
     ap.add_argument("--n-ref-members", type=int, default=5,
                     help="CESM2 members to use; matches the emulator's count")
-    ap.add_argument("--bins", type=int, default=80)
+    ap.add_argument("--ref-csv", default=None,
+                    help="paper_fig_timeseries.py's cached CESM2 global means "
+                         "for the same --var; default "
+                         "plots/heldout_cesm2_ensemble_<var>.csv")
+    ap.add_argument("--bins", type=int, default=16)
     ap.add_argument("--out", default=None)
     ap.add_argument("--csv", default=None)
     args = ap.parse_args()
@@ -170,6 +156,16 @@ def main() -> int:
         args.out = f"plots/paper_fig_hist_{VAR}.png"
     if args.tree_root is None:
         args.tree_root = os.path.join(args.data_root, "training_data", VAR)
+    if args.ref_csv is None:
+        args.ref_csv = (f"plots/heldout_cesm2_ensemble.csv" if VAR == "TREFHT"
+                        else f"plots/heldout_cesm2_ensemble_{VAR}.csv")
+    if not os.path.exists(args.ref_csv):
+        print(f"ERROR: CESM2 global-mean cache not found: {args.ref_csv}\n"
+              f"Build it first (it extracts the held-out members from the "
+              f"training trees):\n"
+              f"    python scripts/paper_fig_timeseries.py --var {VAR} "
+              f"--eval-dir {args.eval_dir}", file=sys.stderr)
+        return 1
     tree_root, eval_dir = Path(args.tree_root), Path(args.eval_dir)
     print(f"[var] {VAR} ({META['unit_plain']})   last {args.n_years} years")
 
@@ -178,23 +174,57 @@ def main() -> int:
     trained = {e["scenario_name"]: set(e.get("realizations", []))
                for e in cfg["experiment_configs"]}
 
+    ref_all = read_cesm_gmean_cache(args.ref_csv)
+    print(f"[ref] {args.ref_csv}: "
+          + ", ".join(f"{k}={v.shape[1]}m" for k, v in ref_all.items()))
+
+    # baselines: each side vs its OWN 1850-1900 historical mean. ssp370 has no
+    # pre-industrial of its own and inherits the historical one, as in the
+    # timeseries figure.
+    emu_abs, emu_years = {}, {}
+    for sc, (_, ncname, _, _) in SCEN.items():
+        p = eval_dir / f"{VAR}_{ncname}.nc"
+        if p.exists():
+            emu_years[sc], emu_abs[sc] = read_emulator_gmean(p)
+    ref_base_hist = baseline_of(ref_all["hist"].index.values,
+                                ref_all["hist"].mean(axis=1).values)
+    emu_base_hist = (baseline_of(emu_years["hist"], emu_abs["hist"].mean(axis=0))
+                     if "hist" in emu_abs else np.nan)
+
     data = {}
     for sc, (label, ncname, sub, colour) in SCEN.items():
-        p = eval_dir / f"{VAR}_{ncname}.nc"
-        if not p.exists():
-            print(f"[skip] {sc}: {p} not found")
+        if sc not in emu_abs or sc not in ref_all:
+            print(f"[skip] {sc}: missing emulator or reference data")
             continue
-        print(f"\n[{sc}] emulator …", flush=True)
-        ev, ew, ey0, ey1, n_emu = read_emulator_block(p, args.n_years)
-        mems = unseen_members(tree_root, sub, trained.get(CFG_KEY[sc], set()))
+        R = ref_all[sc]
         if args.n_ref_members > 0:
-            mems = mems[:args.n_ref_members]
-        print(f"[{sc}] CESM2 held-out {mems} …", flush=True)
-        cv, cw, cy0, cy1, n_c = read_cesm_block(tree_root, sub, mems, args.n_years)
-        data[sc] = dict(ev=ev, ew=ew, cv=cv, cw=cw, n_emu=n_emu, n_c=n_c,
-                        ey=(ey0, ey1), cy=(cy0, cy1))
-        print(f"[{sc}] emulator {ey0}-{ey1} ({ev.size:,} pts), "
-              f"CESM2 {cy0}-{cy1} ({cv.size:,} pts)")
+            R = R[list(R.columns)[:args.n_ref_members]]
+
+        rb = ref_base_hist if sc == "ssp370" else baseline_of(
+            R.index.values, R.mean(axis=1).values)
+        eb = emu_base_hist if sc == "ssp370" else baseline_of(
+            emu_years[sc], emu_abs[sc].mean(axis=0))
+        if not np.isfinite(rb):
+            rb = ref_base_hist
+        if not np.isfinite(eb):
+            eb = emu_base_hist
+
+        ey = emu_years[sc]
+        ekeep = ey >= ey.max() - args.n_years + 1
+        ev = anom(emu_abs[sc][:, ekeep], eb).ravel()
+
+        ry = R.index.values
+        rkeep = ry >= ry.max() - args.n_years + 1
+        cv = anom(R[rkeep].values, rb).ravel()
+        cv = cv[np.isfinite(cv)]
+
+        data[sc] = dict(ev=ev, cv=cv,
+                        n_emu=emu_abs[sc].shape[0], n_c=R.shape[1],
+                        ey=(int(ey[ekeep].min()), int(ey[ekeep].max())),
+                        cy=(int(ry[rkeep].min()), int(ry[rkeep].max())))
+        print(f"[{sc}] emulator {data[sc]['ey'][0]}-{data[sc]['ey'][1]} "
+              f"({ev.size} values = {data[sc]['n_emu']}m x {ekeep.sum()}y), "
+              f"CESM2 {data[sc]['cy'][0]}-{data[sc]['cy'][1]} ({cv.size} values)")
 
     if not data:
         print("no data", file=sys.stderr)
@@ -217,24 +247,29 @@ def main() -> int:
     rows = []
     for i, (ax, (sc, d)) in enumerate(zip(axes.flat, data.items())):
         label, _, _, colour = SCEN[sc]
-        ev, ew, cv, cw = d["ev"], d["ew"], d["cv"], d["cw"]
+        ev, cv = d["ev"], d["cv"]
 
-        # shared bins spanning both, clipped to the 0.1-99.9 percentile so a
-        # handful of extreme cells do not flatten the body of the distribution
-        lo = min(wq(ev, ew, 0.001), wq(cv, cw, 0.001))
-        hi = max(wq(ev, ew, 0.999), wq(cv, cw, 0.999))
-        bins = np.linspace(lo, hi, args.bins + 1)
+        # Shared bins spanning both. The global means are already area-weighted,
+        # so each sample counts once — no further weighting here.
+        lo = min(ev.min(), cv.min())
+        hi = max(ev.max(), cv.max())
+        pad = 0.05 * (hi - lo) if hi > lo else 1.0
+        bins = np.linspace(lo - pad, hi + pad, args.bins + 1)
 
-        ax.hist(cv, bins=bins, weights=cw, density=True, histtype="stepfilled",
+        ax.hist(cv, bins=bins, density=True, histtype="stepfilled",
                 color="0.55", alpha=0.45, label="CESM2 (held-out)")
-        ax.hist(ev, bins=bins, weights=ew, density=True, histtype="step",
+        ax.hist(ev, bins=bins, density=True, histtype="step",
                 color=colour, lw=1.8, label="Emulator")
+        # individual samples: n is small (members x years), so show them
+        ax.plot(cv, np.full_like(cv, -0.02), "|", color="0.45", ms=5, alpha=0.7,
+                clip_on=False)
+        ax.plot(ev, np.full_like(ev, -0.06), "|", color=colour, ms=5, alpha=0.7,
+                clip_on=False)
 
         st = {}
-        for nm, v, w in (("emu", ev, ew), ("cesm", cv, cw)):
-            m = np.average(v, weights=w)
-            sd = np.sqrt(np.average((v - m) ** 2, weights=w))
-            q = wq(v, w, [0.01, 0.5, 0.99])
+        for nm, v in (("emu", ev), ("cesm", cv)):
+            m = float(np.mean(v)); sd = float(np.std(v, ddof=1))
+            q = np.percentile(v, [1, 50, 99])
             st[nm] = (m, sd, q)
         (em, esd, eq), (cm, csd, cq) = st["emu"], st["cesm"]
         rows.append(dict(scenario=sc, years=f"{d['ey'][0]}-{d['ey'][1]}",
@@ -250,7 +285,7 @@ def main() -> int:
         ax.set_title(f"({'abcd'[i]}) {label}", loc="left")
         ax.set_xlabel(META["xlab"])
         if i % 2 == 0:
-            ax.set_ylabel("Area-weighted density")
+            ax.set_ylabel("Density")
         ax.text(0.97, 0.95,
                 f"{d['ey'][0]}–{d['ey'][1]}\n"
                 f"n = {d['n_emu']} emulator, {d['n_c']} CESM2\n"
@@ -260,9 +295,9 @@ def main() -> int:
                 color="0.25")
 
     axes.flat[0].legend(frameon=False, loc="upper left")
-    fig.suptitle(f"Emulated vs held-out CESM2 {META['title']} distribution, "
-                 f"final {args.n_years} years "
-                 f"(all grid points, years and members; area-weighted)",
+    fig.suptitle(f"Emulated vs held-out CESM2 global-mean {META['title']} "
+                 f"anomaly, final {args.n_years} years "
+                 f"(all years x all members pooled)",
                  fontsize=10.5, y=0.995)
     fig.tight_layout()
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
