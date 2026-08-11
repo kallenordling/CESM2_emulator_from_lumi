@@ -172,6 +172,10 @@ def main() -> int:
                     default="configs/config_data_ybias_BCprect.yaml",
                     help="data config whose experiment_configs define the TRAINED "
                          "members; everything else on disk counts as unseen")
+    ap.add_argument("--n-ref-members", type=int, default=5,
+                    help="Use only the first N unseen CESM2 members, so the "
+                         "reference ensemble is the same size as the emulator's "
+                         "and identical across experiments. 0 = use all.")
     ap.add_argument("--ref-csv", default=None,
                     help="cache of the held-out reference series; read if present, "
                          "written after computing so re-plots are instant")
@@ -212,6 +216,25 @@ def main() -> int:
             os.makedirs(os.path.dirname(os.path.abspath(args.ref_csv)) or ".", exist_ok=True)
             pd.DataFrame(rows).to_csv(args.ref_csv, index=False)
             print(f"[out] {args.ref_csv}")
+
+    # ── equal ensemble size on both sides ───────────────────────────────────
+    # The unseen sets differ in size (6-11) and none matches the emulator's 5,
+    # so the two means were converged to different degrees and the +/-2 sigma
+    # band was estimated from a different N per experiment. Truncating to a
+    # common N makes every mean carry the same sampling noise and every spread
+    # the same estimator variance, so panels b-d are directly comparable.
+    # Selection is the first N sorted member IDs — deterministic, not random.
+    if args.n_ref_members and args.n_ref_members > 0:
+        for sc in list(ref):
+            have = list(ref[sc].columns)
+            if len(have) < args.n_ref_members:
+                print(f"[ref] WARNING: {sc} has only {len(have)} unseen members, "
+                      f"fewer than the requested {args.n_ref_members}")
+                continue
+            keep = have[:args.n_ref_members]
+            ref[sc] = ref[sc][keep]
+            print(f"[ref] {sc:7s} using {len(keep)} of {len(have)} unseen "
+                  f"members: {keep}")
 
     # ── emulated ────────────────────────────────────────────────────────────
     emu = {}
