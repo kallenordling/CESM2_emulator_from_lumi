@@ -328,7 +328,9 @@ def main() -> int:
         bias_of[sc] = (common, d, sd_series)
 
         inside = float((d.abs() <= 2 * sd_series).mean()) * 100
-        rows.append(dict(scenario=sc, n_unseen=Ra.shape[1], n_years=len(common),
+        rows.append(dict(scenario=sc,
+                         n_emu=(members.shape[0] if members is not None else 0),
+                         n_unseen=Ra.shape[1], n_years=len(common),
                          bias=round(float(d.mean()), 3),
                          rmse=round(float(np.sqrt((d ** 2).mean())), 3),
                          corr=round(float(np.corrcoef(e, c)[0, 1]), 3),
@@ -356,7 +358,12 @@ def main() -> int:
             a.fill_between(yy, -2 * sd.values, 2 * sd.values,
                            color="0.45", alpha=0.22, lw=0, zorder=0)
             a.plot(yy, d.values, color=SCEN[sc][3], lw=1.4, zorder=3)
-        a.set_title(gtitle, fontsize=9.5, loc="left", pad=3)
+        _ne = sorted({stats[sc]["n_emu"] for sc in group if sc in stats})
+        _nc = sorted({stats[sc]["n_unseen"] for sc in group if sc in stats})
+        _fmt = lambda v: str(v[0]) if len(v) == 1 else "\u2013".join(
+            (str(min(v)), str(max(v))))
+        a.set_title(f"{gtitle}\nn = {_fmt(_ne)} emulator, {_fmt(_nc)} CESM2",
+                    fontsize=9.0, loc="left", pad=4, linespacing=1.5)
         a.grid(alpha=0.25)
         a.text(0.02, 0.94, f"({'bcde'[i]})", transform=a.transAxes,
                fontweight="bold", va="top", ha="left", fontsize=9)
@@ -367,7 +374,7 @@ def main() -> int:
         # numbers on the figure rather than only in the console
         txt = "\n".join(
             f"{SCEN[sc][0].split(' (')[0]}: "
-            f"{stats[sc]['bias']:+.2f} \u00b1 {stats[sc]['rmse']:.2f}, "
+            f"{stats[sc]['bias']:+.2f} \u00b1 {stats[sc]['rmse']:.2f} \u00b0C, "
             f"{stats[sc]['pct_within_spread']:.0f}% in band"
             for sc in group if sc in stats)
         if txt:
@@ -381,14 +388,22 @@ def main() -> int:
             a.tick_params(labelleft=False)
 
     # legend: scenario colours, plus what solid/dashed mean
+    # Member counts for the legend: emulator is the same everywhere; CESM2
+    # differs by scenario (6-11), so show the range rather than a single number.
+    _n_emu = sorted({r["n_emu"] for r in rows}) or [0]
+    _n_emu = str(_n_emu[0]) if len(_n_emu) == 1 else f"{min(_n_emu)}\u2013{max(_n_emu)}"
+    _n_c = sorted({r["n_unseen"] for r in rows}) or [0]
+    _n_cesm = str(_n_c[0]) if len(_n_c) == 1 else f"{min(_n_c)}\u2013{max(_n_c)}"
+
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     import matplotlib.patheffects as pe
     style = [
-        Line2D([], [], color="0.35", lw=2.6, label="EMULATOR — ensemble mean (5 members)"),
+        Line2D([], [], color="0.35", lw=2.6,
+               label=f"EMULATOR \u2014 ensemble mean ({_n_emu} members)"),
         Line2D([], [], color="0.35", lw=1.2, ls="--", marker="o", markersize=3.4,
                markerfacecolor="white", markeredgecolor="0.35",
-               label="CESM2 — unseen ensemble mean"),
+               label=f"CESM2 \u2014 unseen ensemble mean ({_n_cesm} members)"),
         Patch(facecolor="0.35", alpha=0.28, label="EMULATOR member range"),
         Patch(facecolor="0.35", alpha=0.12, label="CESM2 member range"),
         Patch(facecolor="0.55", alpha=0.20,
