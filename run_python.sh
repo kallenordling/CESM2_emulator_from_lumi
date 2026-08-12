@@ -8,6 +8,11 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
+
 set -euo pipefail
 
 # Usage:
@@ -31,11 +36,11 @@ SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
 # ── Project paths ────────────────────────────────────────────────────────────
-PROJECT_DIR=/projappl/project_462001328/CESM2_emulator_from_lumi
+PROJECT_DIR=${LUMI_REPO}
 
 # ── Inject host venv into container ──────────────────────────────────────────
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 
@@ -58,7 +63,7 @@ echo "[INFO] Scenario: ${SCENARIO}"
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 singularity exec \
-    --bind /projappl/project_462001328 \
+    --bind ${LUMI_PROJAPPL} \
     "${SIF}" \
     bash -c "
         cd ${PROJECT_DIR}

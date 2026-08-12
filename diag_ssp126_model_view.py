@@ -1,4 +1,4 @@
-"""Show how the MODEL sees ssp126 emissions — and isolate the aaer-basis artifact.
+f"""Show how the MODEL sees ssp126 emissions — and isolate the aaer-basis artifact.
 
 ssp126 is a model-only (never-trained) scenario, so eval has no PCA basis fit on
 it.  eval_aero.py therefore routes ssp126 through the REFERENCE basis, which is
@@ -28,8 +28,9 @@ and a printed per-stage global-mean table at 2015/2050/2100.
 Run ON LUMI (needs torch + /scratch cond files), e.g.:
     singularity exec <SIF> bash -c 'cd <repo> && python diag_ssp126_model_view.py'
 Or from a local mount with the cond files staged + torch available:
-    PATH_REMAP=/scratch/project_462001328:/mnt/lumi_sc2 python diag_ssp126_model_view.py
+    PATH_REMAP={L.SCRATCH}:/mnt/lumi_sc2 python diag_ssp126_model_view.py
 """
+import lumi_paths as L
 import os
 import argparse
 import numpy as np

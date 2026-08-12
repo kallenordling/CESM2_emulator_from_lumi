@@ -26,6 +26,7 @@ Run on LUMI:
     python diag_integrated_gradients.py [--checkpoint /path/to/run.pt]
 """
 
+import lumi_paths as L
 import argparse
 import glob
 import os
@@ -45,8 +46,8 @@ from data.climate_dataset import normalize
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
 
 # ── paths ──────────────────────────────────────────────────────────────────────
-PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
-SCRATCH     = "/scratch/project_462001328/emulator_data"
+PROJ_ROOT   = f"{L.REPO}"
+SCRATCH     = f"{L.DATA}"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 EMIS_DIR    = SCRATCH
 CONFIG_PATH = "configs/config_aero.yaml"
@@ -219,7 +220,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-dir",    default=RUNS_DIR)
     parser.add_argument("--checkpoint",  default=None)
-    parser.add_argument("--output-dir",  default="/scratch/project_462001328/eval_output")
+    parser.add_argument("--output-dir",  default="${LUMI_EVAL_OUT}")
     parser.add_argument("--n-ig-steps",  type=int,   default=50,
                         help="Number of IG interpolation steps (more = more accurate, slower)")
     parser.add_argument("--batch-size",  type=int,   default=32,

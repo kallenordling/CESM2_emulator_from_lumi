@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+f"""
 Download CESM2 Large Ensemble (LENS2, d651056) monthly timeseries.
 OSDF base: https://osdf-director.osg-htc.org/ncar/gdex/d651056/CESM2-LE/
 
@@ -20,7 +20,7 @@ Default: 30 members (15 CMIP6 + 15 SMBB) for maximum diversity.
 
 Usage:
   python download_lens2.py --dry-run
-  python download_lens2.py --output /scratch/project_462001328/emulator_data/lens2
+  python download_lens2.py --output {L.DATA}/lens2
   python download_lens2.py --variable TREFHT PRECT --output /scratch/.../lens2 --workers 4
   python download_lens2.py --subensemble smbb --n-members 30
   python download_lens2.py --check-urls --n-members 2
@@ -28,6 +28,7 @@ Usage:
 Requirements: pip install requests tqdm
 """
 
+import lumi_paths as L
 import argparse
 import sys
 import time

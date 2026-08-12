@@ -19,6 +19,7 @@ Run on LUMI:
     python diag_aerosol_sensitivity.py [--checkpoint /path/to/run.pt]
 """
 
+import lumi_paths as L
 import argparse
 import glob
 import os
@@ -45,8 +46,8 @@ from custom_diffusers.continuous_ddpm import ContinuousDDPM
 from models.video_net import UNetModel3D
 
 # ── paths (same as eval_aero.py) ──────────────────────────────────────────────
-PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
-SCRATCH     = "/scratch/project_462001328/emulator_data"
+PROJ_ROOT   = f"{L.REPO}"
+SCRATCH     = f"{L.DATA}"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 DATA_ROOT   = os.path.join(SCRATCH, "training_data/TREFHT")
 EMIS_DIR    = SCRATCH
@@ -180,7 +181,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs-dir",    default=RUNS_DIR)
     parser.add_argument("--checkpoint",  default=None)
-    parser.add_argument("--output-dir",  default="/scratch/project_462001328/eval_output")
+    parser.add_argument("--output-dir",  default=f"{L.EVAL_OUT}")
     parser.add_argument("--sample-steps", type=int, default=SAMPLE_STEPS)
     parser.add_argument("--n-ensemble",   type=int, default=N_ENSEMBLE)
     args = parser.parse_args()

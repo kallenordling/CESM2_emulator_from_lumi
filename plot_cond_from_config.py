@@ -1,4 +1,4 @@
-"""Plot CO2 and SUL global-mean time series from every cond file listed in
+f"""Plot CO2 and SUL global-mean time series from every cond file listed in
 configs/config_data.yaml under experiment_configs.
 
 Reads (scenario_name, cond_file) pairs straight from the active training
@@ -8,13 +8,14 @@ seeing.  No hardcoded experiment list.
 Usage:
     python plot_cond_from_config.py
     OUT_DIR=/mnt/lumi_sc2/eval_output \
-    PATH_REMAP=/scratch/project_462001328:/mnt/lumi_sc2 \
+    PATH_REMAP={L.SCRATCH}:/mnt/lumi_sc2 \
         python plot_cond_from_config.py
 
 PATH_REMAP (optional): "src:dst" — applied as a literal-prefix replace on
 each cond_file path before opening.  Useful when the YAML stores LUMI
 scratch paths but you're plotting from a local mount.
 """
+import lumi_paths as L
 import os
 import numpy as np
 import xarray as xr
@@ -24,7 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 CONFIG     = os.environ.get("CONFIG",  "configs/config_data.yaml")
-OUT_DIR    = os.environ.get("OUT_DIR", "/scratch/project_462001328/eval_output")
+OUT_DIR    = os.environ.get("OUT_DIR", f"{L.EVAL_OUT}")
 PATH_REMAP = os.environ.get("PATH_REMAP", "")
 
 COND_VARS   = ["CO2", "SUL"]

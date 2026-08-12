@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # watch_eval_triggers.sh
 #
 # Polls eval_triggers/ for JSON files written by the trainer (inside container)
@@ -87,7 +90,7 @@ while true; do
 
         # Explicitly pass SINGULARITYENV_PYTHONPATH so that --export=ALL cannot
         # propagate a stale value from the training job's container environment.
-        _EVAL_VENV=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
+        _EVAL_VENV=${LUMI_VENV}/lib/python3.12/site-packages
         _EXPORT="ALL,CHECKPOINT=${CHECKPOINT},OUTPUT_DIR=${OUTPUT_DIR},SINGULARITYENV_PYTHONPATH=${_EVAL_VENV}"
         [[ -n "$MODEL_CONFIG" ]] && _EXPORT="${_EXPORT},MODEL_CONFIG=${MODEL_CONFIG}"
         [[ -n "$DATA_CONFIG" ]] && _EXPORT="${_EXPORT},DATA_CONFIG=${DATA_CONFIG}"

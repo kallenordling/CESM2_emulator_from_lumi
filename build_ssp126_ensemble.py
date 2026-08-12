@@ -21,13 +21,14 @@ Then point eval_aero.py's ssp126 experiment at the directory:
     data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126_ens")
     realizations = [<members printed below>]
 """
+import lumi_paths as L
 import os
 import re
 import glob
 import argparse
 from collections import defaultdict
 
-CMIP6_DIR = "/scratch/project_462001328/emulator_data/cmip6"
+CMIP6_DIR = f"{L.DATA}/cmip6"
 MEMBER_RE = re.compile(r"_(r\d+i\d+p\d+f\d+)_")
 RANGE_RE = re.compile(r"_(\d{4})\d{2}-(\d{4})\d{2}\.nc$")
 

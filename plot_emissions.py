@@ -3,6 +3,7 @@
 Each experiment gets its own y-axis so lines with very different magnitudes
 (e.g. aaer CO2 max=0.02 vs ssp370 CO2 max=28.3) are all clearly visible.
 """
+import lumi_paths as L
 import os
 import numpy as np
 import xarray as xr
@@ -10,8 +11,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-EMIS_DIR = os.environ.get("EMIS_DIR", "/scratch/project_462001328/emulator_data")
-OUT_DIR  = os.environ.get("OUT_DIR",  "/scratch/project_462001328/eval_output")
+EMIS_DIR = os.environ.get("EMIS_DIR", f"{L.DATA}")
+OUT_DIR  = os.environ.get("OUT_DIR",  f"{L.EVAL_OUT}")
 
 EXPERIMENTS = {
     "hist":   f"{EMIS_DIR}/emissions_hist_timefixed.nc",

@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_ybias
-#SBATCH --account=project_462001328
 #
 # ── year_bias-ONLY A/B arm (isolated fork of run2_aero.sh) ───────────────────
 # Same as run_sensfix (ALL aux losses ON: cond/TCRE/low-t) but with
@@ -21,6 +20,11 @@
 #SBATCH --mem=128G
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 # 6 h links instead of one 48 h reservation: short jobs backfill into idle gaps
 # far sooner. The run auto-resumes (load_path:"newest") and self-chains below.
 
@@ -40,8 +44,8 @@ echo "[CONTAINER] Using: ${SIF}"
 # Inject our venv's site-packages into the container via SINGULARITYENV_PYTHONPATH.
 # Regular PYTHONPATH is ignored/overridden by the container's own environment;
 # SINGULARITYENV_* variables are guaranteed to be set inside singularity.
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
 
@@ -92,7 +96,7 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
 # Total ~3.8 GB per node — trivial for compute-node /tmp.  The local copy is
 # bind-mounted over the original /scratch path inside the container so no
 # config edits are needed.
-SRC_DATA_ROOT=/scratch/project_462001328/emulator_data
+SRC_DATA_ROOT=${LUMI_DATA}
 LOCAL_DATA_ROOT=/tmp/emulator_data_${SLURM_JOB_ID}
 
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "

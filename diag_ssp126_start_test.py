@@ -53,6 +53,7 @@ Usage:
 See run_ssp126_start_test.sh for the LUMI container invocation.
 """
 
+import lumi_paths as L
 import argparse
 import os
 import sys
@@ -76,7 +77,7 @@ from eval_aero import (
 CONFIG_AERO = "configs/config_aero.yaml"
 CONFIG_DATA = "configs/config_data.yaml"
 DEFAULT_CKPT = (
-    "/projappl/project_462001328/CESM2_emulator_from_lumi/runs/run_mseyb_852.pt"
+    f"{L.REPO}/runs/run_mseyb_852.pt"
 )
 
 

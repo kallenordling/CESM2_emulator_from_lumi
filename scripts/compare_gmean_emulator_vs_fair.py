@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+f"""
 Compare the emulator's global-mean temperature timeseries against FaIR, for the
 CMIP7 scenarios.
 
@@ -35,10 +35,11 @@ Both sides are anomalies vs 1850-1900, so no re-baselining is applied.
 Usage
 -----
     python scripts/compare_gmean_emulator_vs_fair.py \
-        --eval-dir /scratch/project_462001328/eval_output/cmip7 \
+        --eval-dir {L.EVAL_OUT}/cmip7 \
         --out plots/gmean_emulator_vs_fair.png --csv plots/gmean_comparison.csv
 """
 
+import lumi_paths as L
 import argparse
 import glob
 import os

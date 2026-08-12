@@ -7,6 +7,11 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # Run diag_forcing_consistency.py inside the LUMI container — verify the
 # single-forcing cond files match the combined hist+ssp370 forcing:
@@ -34,12 +39,12 @@ SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
 # ── Project + data paths ─────────────────────────────────────────────────────
-PROJECT_DIR=/projappl/project_462001328/CESM2_emulator_from_lumi
-EMU_DIR="${EMU_DIR:-/scratch/project_462001328/emulator_data}"
+PROJECT_DIR=${LUMI_REPO}
+EMU_DIR="${EMU_DIR:-${LUMI_DATA}}"
 
 # ── Inject host venv into container ──────────────────────────────────────────
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
@@ -48,8 +53,8 @@ echo "[ARGS] $*"
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 singularity exec \
-    --bind /projappl/project_462001328 \
-    --bind /scratch/project_462001328 \
+    --bind ${LUMI_PROJAPPL} \
+    --bind ${LUMI_SCRATCH} \
     "${SIF}" \
     bash -c "
         cd ${PROJECT_DIR}

@@ -24,6 +24,7 @@ trainer's co2only/sulonly passes. Run ON LUMI (model + GPU + data there):
     python decompose_ssp126.py                 # newest checkpoint
     python decompose_ssp126.py --checkpoint /path/to/ckpt.pt --fp32 --sample-steps 100
 """
+import lumi_paths as L
 import argparse
 import numpy as np
 import torch
@@ -40,7 +41,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", default=None, help="explicit ckpt; default = newest in --runs-dir")
-    ap.add_argument("--runs-dir", default="/projappl/project_462001328/CESM2_emulator_from_lumi/runs")
+    ap.add_argument("--runs-dir", default=f"{L.REPO}/runs")
     ap.add_argument("--sample-steps", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--fp32", action="store_true", help="disable bf16 autocast")

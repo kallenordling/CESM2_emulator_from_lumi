@@ -14,6 +14,7 @@ Usage:
 e.g.
   python plot_from_nc.py /mnt/lumi_sc2/eval_output/manual/ep0852_v2 ssp126 ssp245 ssp370
 """
+import lumi_paths as L
 import os
 import argparse
 import numpy as np
@@ -36,7 +37,7 @@ MMM_FILES = {
 # Default cmip6 locations to probe (local mount first, then LUMI scratch).
 _MMM_DIR_CANDIDATES = [
     "/mnt/lumi_sc2/emulator_data/cmip6",
-    "/scratch/project_462001328/emulator_data/cmip6",
+    f"{L.DATA}/cmip6",
 ]
 
 

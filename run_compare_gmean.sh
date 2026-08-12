@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # CPU-only: compare the emulator's CMIP7 global-mean temperature against FaIR,
 # inside the LAIF singularity container (project venv injected). Wraps
 # scripts/compare_gmean_emulator_vs_fair.py — no GPU, just xarray/pandas/matplotlib.
@@ -14,11 +17,11 @@
 #
 # Usage on LUMI (from the repo dir, after `git pull`); extra args pass through:
 #   bash run_compare_gmean.sh
-#   EVAL_DIR=/scratch/project_462001328/eval_output/cmip7_smoke bash run_compare_gmean.sh
+#   EVAL_DIR=${LUMI_EVAL_OUT}/cmip7_smoke bash run_compare_gmean.sh
 #   bash run_compare_gmean.sh --year-min 2000        # zoom the plot
 #   VAR=PRECT bash run_compare_gmean.sh
 # If the login node blocks singularity, wrap it:
-#   srun --account=project_462001328 --partition=debug --time=10 \
+#   srun --account=${LUMI_ACCOUNT} --partition=debug --time=10 \
 #        --nodes=1 --ntasks=1 bash run_compare_gmean.sh
 #
 # NOTE ON INTERPRETATION: FaIR is a plausibility bracket, NOT truth. It is driven
@@ -28,7 +31,7 @@
 # neither side can be scored. Agreement is not validation.
 set -euo pipefail
 
-EVAL_DIR="${EVAL_DIR:-/scratch/project_462001328/eval_output/cmip7}"
+EVAL_DIR="${EVAL_DIR:-${LUMI_EVAL_OUT}/cmip7}"
 VAR="${VAR:-TREFHT}"
 FAIR_CSV="${FAIR_CSV:-reference_data/fair_cmip7_gsat.csv}"
 FAIR_CO2ONLY_CSV="${FAIR_CO2ONLY_CSV:-reference_data/fair_cmip7_gsat_co2only.csv}"
@@ -56,8 +59,8 @@ module load lumi-aif-singularity-bindings
 
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 

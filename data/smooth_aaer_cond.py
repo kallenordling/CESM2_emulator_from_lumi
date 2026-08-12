@@ -1,4 +1,4 @@
-"""Smooth the CEDS→IAMC SO2 inventory junction in the aaer conditioning file.
+f"""Smooth the CEDS→IAMC SO2 inventory junction in the aaer conditioning file.
 
 The aaer cond trajectory stitches CEDS-2017 historical SO2 (1850-2014) to
 IAMC-AIM ssp370 SO2 (2015-2100). At 2014→2015 the spatial pattern
@@ -12,9 +12,10 @@ Fix: replace years 2013-2016 with linear interpolation between 2012 and
 
 Usage:
     python smooth_aaer_cond.py \\
-        --in  /scratch/project_462001328/emulator_data/emissions_aero_only_timefixed.nc \\
-        --out /scratch/project_462001328/emulator_data/emissions_aero_only_smoothed_timefixed.nc
+        --in  {L.DATA}/emissions_aero_only_timefixed.nc \\
+        --out {L.DATA}/emissions_aero_only_smoothed_timefixed.nc
 """
+import lumi_paths as L
 import argparse
 import numpy as np
 import xarray as xr

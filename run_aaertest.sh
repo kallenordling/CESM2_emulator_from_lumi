@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=aaertest
-#SBATCH --account=project_462001328
 #SBATCH --partition=small-g
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -9,6 +8,11 @@
 #SBATCH --mem=128G
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # ISOLATED A/B test: does upweighting aaer (aerosol-only) improve the
 # under-learned aerosol response (aaer pattern corr 0.42; model_skill_diagnosis)
@@ -31,8 +35,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] ${SIF}"
 
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 echo "[VENV] ${SINGULARITYENV_PYTHONPATH}"
 

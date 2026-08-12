@@ -1,3 +1,4 @@
+import lumi_paths as L
 import argparse
 import intake
 import numpy as np
@@ -13,7 +14,7 @@ NUM_CHUNKS = 40
 parser = argparse.ArgumentParser()
 parser.add_argument("--variable",   nargs="+", default=["TREFHT", "PRECT"],
                     help="CESM2-LE variable(s) to download (default: TREFHT PRECT)")
-parser.add_argument("--output-dir", default="/scratch/project_462001328/emulator_data/training_data",
+parser.add_argument("--output-dir", default=f"{L.DATA}/training_data",
                     help="Root output directory; data saved to <output-dir>/<variable>/")
 parser.add_argument("--n-jobs",     type=int, default=4,
                     help="Parallel save workers")

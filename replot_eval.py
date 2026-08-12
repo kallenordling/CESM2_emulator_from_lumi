@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""replot_eval.py
+f"""replot_eval.py
 ================
 Re-generate evaluation plots from existing NetCDF output produced by eval_aero.py.
 No model checkpoint or GPU required — reads only the saved TREFHT_*.nc files.
@@ -14,10 +14,11 @@ Arguments
 ---------
 output_dir   Directory containing TREFHT_hist.nc, TREFHT_ssp370.nc, etc.
 --emis-dir   Root directory containing emissions_*.nc files (needed for TCRE plot).
-             Defaults to /scratch/project_462001328/emulator_data.
+             Defaults to {L.DATA}.
 --out-dir    Where to save new plots. Defaults to output_dir (overwrites originals).
 """
 
+import lumi_paths as L
 import argparse
 import os
 import re
@@ -629,7 +630,7 @@ def main():
     )
     parser.add_argument(
         "--emis-dir",
-        default="/scratch/project_462001328/emulator_data",
+        default=f"{L.DATA}",
         help="Root directory of emissions_*.nc files (for TCRE CO2 axis). "
              "Default: %(default)s",
     )

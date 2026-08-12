@@ -1,4 +1,9 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 # Launch a LARGE-ENSEMBLE eval (default 25 diffusion members per experiment).
 #
 # WHY 25
@@ -59,13 +64,13 @@ MEMBERS="${MEMBERS:-25}"
 NTASKS="${NTASKS:-6}"
 WALLTIME="${WALLTIME:-12:00:00}"
 
-REPO=/projappl/project_462001328/CESM2_emulator_from_lumi
+REPO=${LUMI_REPO}
 case "${CKPT}" in
     /*) ;;                       # already absolute
     *)  CKPT="${REPO}/${CKPT}" ;;
 esac
 
-OUTPUT_DIR="/scratch/project_462001328/eval_output/manual/${SUBDIR}"
+OUTPUT_DIR="${LUMI_EVAL_OUT}/manual/${SUBDIR}"
 
 EXPORTS="ALL,CHECKPOINT=${CKPT},OUTPUT_DIR=${OUTPUT_DIR},MEMBERS=${MEMBERS}"
 [ -n "${EXPERIMENTS}" ] && EXPORTS="${EXPORTS},EXPERIMENTS=${EXPERIMENTS}"

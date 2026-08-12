@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # CPU-only: download CMIP7 gridded emissions (BC, SO2, CO2) from ESGF input4MIPs,
 # inside the LAIF singularity container (project venv injected). Wraps
 # download_input4mips_cmip7.py.
@@ -26,12 +29,12 @@
 #   bash run_download_input4mips.sh --discover-only
 #
 # 12 GB over HTTPS; run inside a batch/interactive alloc, NOT on the login node:
-#   srun --account=project_462001328 --partition=small --time=04:00:00 \
+#   srun --account=${LUMI_ACCOUNT} --partition=small --time=04:00:00 \
 #        --nodes=1 --ntasks=1 --cpus-per-task=2 --mem=8G \
 #        bash run_download_input4mips.sh
 set -euo pipefail
 
-DATA_ROOT=/scratch/project_462001328/emulator_data
+DATA_ROOT=${LUMI_DATA}
 OUTDIR="${DATA_ROOT}/input4mips"
 
 module --force purge
@@ -41,8 +44,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
 # Inject the project venv's site-packages into the container (matches run_download_data.sh).
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 

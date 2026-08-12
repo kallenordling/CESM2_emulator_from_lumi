@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # CPU-only: build the BC (black carbon) 3rd-cond-channel files, inside the LAIF
 # singularity container (project venv injected; needs xarray + xesmf, same as
 # run_concat_ssp126.sh). Two stages + verification:
@@ -20,12 +23,12 @@
 # Usage on LUMI (from the repo dir, after `git pull`):
 #     bash run_make_bc_cond.sh
 # If the login node blocks singularity, wrap it:
-#     srun --account=project_462001328 --partition=small --time=00:45:00 \
+#     srun --account=${LUMI_ACCOUNT} --partition=small --time=00:45:00 \
 #          --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=24G \
 #          bash run_make_bc_cond.sh
 set -euo pipefail
 
-DATA_ROOT=/scratch/project_462001328/emulator_data
+DATA_ROOT=${LUMI_DATA}
 # Grid template (only lat/lon read) — same default as run_concat_ssp126.sh.
 TARGET="${DATA_ROOT}/emissions_ssp126_only_timefixed.nc"
 
@@ -35,8 +38,8 @@ module load lumi-aif-singularity-bindings
 
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 

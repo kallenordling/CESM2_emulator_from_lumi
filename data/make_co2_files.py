@@ -8,6 +8,7 @@ Process CO2 emission input files from CEDS/input4MIPs:
 6. Compute cumulative sum over time
 """
 
+import lumi_paths as L
 import xarray as xr
 import numpy as np
 import glob
@@ -23,9 +24,9 @@ exp = args.exp
 # ── Configure paths ──────────────────────────────────────────────────────────
 # Override via env to run off a local mount (e.g. /mnt/lumi_sc2) instead of /scratch.
 INPUT_DIR = os.environ.get(
-    "EMUL_INPUT_DIR", "/scratch/project_462001328/emulator_data/emission_data/inputs4mips/")
+    "EMUL_INPUT_DIR", f"{L.DATA}/emission_data/inputs4mips/")
 OUTPUT_DIR = os.environ.get(
-    "EMUL_OUTPUT_DIR", "/scratch/project_462001328/emulator_data/")
+    "EMUL_OUTPUT_DIR", f"{L.DATA}/")
 
 if exp == "hist":
     AIR_PATTERN = os.path.join(INPUT_DIR, "CO2-em-AIR-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2024-10-21_gn_*.nc")

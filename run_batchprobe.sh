@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=batchprobe
-#SBATCH --account=project_462001328
 #SBATCH --partition=dev-g
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -9,6 +8,11 @@
 #SBATCH --mem=128G
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # Batch-size headroom probe for the run_sensfix config (low-t TCRE ON).
 # Sweeps several per-GPU batch sizes; for each it runs ONE short epoch and
@@ -33,8 +37,8 @@ module --force purge
 module use /appl/local/laifs/modules
 module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 
 export NCCL_DEBUG=WARN
@@ -55,7 +59,7 @@ export MIOPEN_FIND_ENFORCE=1
 mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 
 # ── Stage data to /tmp once (reused by every probe) ──────────────────────────
-SRC_DATA_ROOT=/scratch/project_462001328/emulator_data
+SRC_DATA_ROOT=${LUMI_DATA}
 LOCAL_DATA_ROOT=/tmp/emulator_data_${SLURM_JOB_ID}
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     set -euo pipefail

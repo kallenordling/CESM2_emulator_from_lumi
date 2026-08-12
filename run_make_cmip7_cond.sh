@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # CPU-only: build the CMIP7 (h / vl) conditioning files, inside the LAIF
 # singularity container (project venv injected; needs xarray + xesmf, same as
 # run_make_bc_cond.sh). Wraps data/make_cmip7_cond.py.
@@ -22,12 +25,12 @@
 #     bash run_make_cmip7_cond.sh --hist-end 2021       # splice at scenario start
 #     bash run_make_cmip7_cond.sh --scenarios h         # one scenario only
 # If the login node blocks singularity, wrap it:
-#     srun --account=project_462001328 --partition=small --time=01:00:00 \
+#     srun --account=${LUMI_ACCOUNT} --partition=small --time=01:00:00 \
 #          --nodes=1 --ntasks=1 --cpus-per-task=8 --mem=64G \
 #          bash run_make_cmip7_cond.sh
 set -euo pipefail
 
-DATA_ROOT=/scratch/project_462001328/emulator_data
+DATA_ROOT=${LUMI_DATA}
 INPUT_DIR="${EMUL_INPUT_DIR:-${DATA_ROOT}/emission_data/inputs4mips}"
 OUTPUT_DIR="${EMUL_OUTPUT_DIR:-${DATA_ROOT}}"
 
@@ -41,8 +44,8 @@ module load lumi-aif-singularity-bindings
 
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 
