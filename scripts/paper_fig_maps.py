@@ -18,10 +18,28 @@ reproduced, while the map shows where the residual sits.
 
 STIPPLING
 ---------
-Grid points where |bias| is BELOW CESM2's own inter-member spread are hatched:
-there the emulator differs from CESM2 by less than CESM2 members differ from
-each other, so the difference is not distinguishable from internal variability.
-For a well-performing emulator most of the map is hatched, which is the result.
+Hatching marks grid points where the emulator differs from CESM2 SIGNIFICANTLY,
+i.e. by more than the two ensembles' sampling uncertainty can explain. The test
+is a Welch two-sample t-test between the n_emu emulator members and the n_cesm
+held-out CESM2 members at each grid point,
+
+    t = (mean_e - mean_c) / sqrt(s_e^2/n_e + s_c^2/n_c)
+
+with Welch-Satterthwaite degrees of freedom. Note the denominator: the relevant
+scale is the standard error of the DIFFERENCE OF TWO MEANS, ~sqrt(n) smaller
+than the inter-member spread of a single member. For a well-performing emulator
+most of the map is UNhatched, which is the result.
+
+Because the test is applied at every one of ~55k grid points, a raw alpha=0.05
+would flag ~5% of the map by construction. The field significance is therefore
+controlled with a Benjamini-Hochberg false-discovery-rate step at q = 2*alpha
+(Wilks 2016, BAMS 97:2263, the standard recommendation for gridded fields).
+--no-fdr reports the uncorrected point-wise test instead.
+
+CAVEAT worth stating in the caption: the emulator's "members" are independent
+diffusion samples, not independent climate realizations. The test therefore asks
+whether the emulator's sampling distribution is offset from CESM2's, which is the
+right question here, but the two ensembles' spreads have different origins.
 
 WHAT IS DIFFERENCED
 -------------------
@@ -80,6 +98,53 @@ def unseen_members(tree_root: Path, subdir: str, trained: set) -> list:
 def area_w(lat, lon):
     return np.broadcast_to(np.cos(np.deg2rad(np.asarray(lat)))[:, None],
                            (len(lat), len(lon)))
+
+
+def welch_p(eM, cM):
+    """Point-wise Welch two-sample t-test p-values between two member stacks.
+
+    eM, cM are (member, lat, lon). Returns (p, t) with the same map shape.
+    Welch rather than Student because the emulator and CESM2 ensembles have no
+    reason to share a variance — one is diffusion sampling noise, the other is
+    climate internal variability.
+    """
+    from scipy import stats
+
+    ne, nc = eM.shape[0], cM.shape[0]
+    if ne < 2 or nc < 2:
+        raise ValueError(f"need >=2 members per side for a t-test, "
+                         f"got {ne} emulator / {nc} CESM2")
+    ve = eM.var(axis=0, ddof=1) / ne
+    vc = cM.var(axis=0, ddof=1) / nc
+    se = np.sqrt(ve + vc)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (eM.mean(axis=0) - cM.mean(axis=0)) / se
+        # Welch-Satterthwaite
+        dof = (ve + vc) ** 2 / (ve ** 2 / (ne - 1) + vc ** 2 / (nc - 1))
+    p = np.full(t.shape, np.nan)
+    ok = np.isfinite(t) & np.isfinite(dof) & (se > 0)
+    p[ok] = 2.0 * stats.t.sf(np.abs(t[ok]), dof[ok])
+    # se == 0 with a non-zero difference is a degenerate but real difference
+    p[(se == 0) & (eM.mean(axis=0) != cM.mean(axis=0))] = 0.0
+    p[(se == 0) & (eM.mean(axis=0) == cM.mean(axis=0))] = 1.0
+    return p, t
+
+
+def fdr_mask(p, q):
+    """Benjamini-Hochberg: True where the null is rejected at FDR level q.
+
+    Returns (mask, p_threshold). p_threshold is 0 when nothing is rejected.
+    """
+    flat = p[np.isfinite(p)]
+    if flat.size == 0:
+        return np.zeros(p.shape, dtype=bool), 0.0
+    s = np.sort(flat)
+    n = s.size
+    below = s <= (np.arange(1, n + 1) / n) * q
+    if not below.any():
+        return np.zeros(p.shape, dtype=bool), 0.0
+    thr = s[np.nonzero(below)[0].max()]
+    return np.isfinite(p) & (p <= thr), float(thr)
 
 
 def emulator_fields(nc_path: Path, var: str, n_years: int):
@@ -169,7 +234,19 @@ def main() -> int:
                     help="mask grid points whose baseline precip (mm/day) is "
                          "below this before dividing; without it, dividing by a "
                          "near-zero desert baseline produces meaningless values")
-    ap.add_argument("--no-stipple", action="store_true")
+    ap.add_argument("--no-stipple", action="store_true",
+                    help="omit the significance hatching")
+    ap.add_argument("--allow-no-cartopy", action="store_true",
+                    help="write flat lat/lon panels if cartopy is missing "
+                         "instead of refusing; the default refuses so a run in "
+                         "the wrong env cannot overwrite the projected figure")
+    ap.add_argument("--alpha", type=float, default=0.05,
+                    help="two-sided significance level for the point-wise "
+                         "Welch t-test between emulator and CESM2 members")
+    ap.add_argument("--no-fdr", action="store_true",
+                    help="hatch the raw point-wise test instead of controlling "
+                         "the false discovery rate at q=2*alpha; with ~55k grid "
+                         "points the raw test flags ~alpha of the map by chance")
     ap.add_argument("--out", default="plots/paper_fig_maps.png")
     ap.add_argument("--csv", default=None)
     args = ap.parse_args()
@@ -231,6 +308,18 @@ def main() -> int:
         HAVE_CARTOPY = True
     except ImportError:
         HAVE_CARTOPY = False
+        # Fail loudly by default: without cartopy the panels silently lose the
+        # Robinson projection AND the coastlines, and the result overwrites the
+        # good figure with something unusable in the paper.
+        if not args.allow_no_cartopy:
+            print("\n[error] cartopy not available — the figure would be written "
+                  "without a map projection or coastlines, overwriting a good "
+                  f"{args.out}.\n        Run it with the 'plotting' env:\n"
+                  "          /home/nordling/miniconda3/envs/plotting/bin/python "
+                  + " ".join(sys.argv) + "\n"
+                  "        or pass --allow-no-cartopy to accept flat lat/lon "
+                  "panels.", file=sys.stderr)
+            return 2
         print("\n[warn] cartopy not available — plotting without coastlines. "
               "It lives in the 'plotting' conda env.")
 
@@ -258,33 +347,35 @@ def main() -> int:
                 continue
             d = F[(var, sc)]
             if args.absolute:
-                eA = d["edec"].mean(axis=0)
-                cM = d["cdec"]
-                cA = cM.mean(axis=0)
-                spread = cM.std(axis=0, ddof=1)
+                eM, cM = d["edec"], d["cdec"]
             else:
-                eA = d["edec"].mean(axis=0) - d["ebase"]
-                cM = d["cdec"] - d["cbase"]
-                cA = cM.mean(axis=0)
-                spread = cM.std(axis=0, ddof=1)
+                eM, cM = d["edec"] - d["ebase"], d["cdec"] - d["cbase"]
+            eA, cA = eM.mean(axis=0), cM.mean(axis=0)
+            spread = cM.std(axis=0, ddof=1)
+            # p-values from the UNSCALED members: the percent conversion below
+            # divides both ensembles by the same per-grid-point baseline, which
+            # cancels in t, so significance is identical either way.
+            pval, _ = welch_p(eM, cM)
             if pct:
                 dry = d["cbase"] < args.percent_floor
                 base = np.where(dry, np.nan, d["cbase"])
                 eA, cA, spread = (100 * eA / base, 100 * cA / base,
                                   100 * spread / base)
+                pval = np.where(dry, np.nan, pval)   # don't hatch masked desert
                 wgt = area_w(d["lat"], d["lon"])
                 masked_pct[sc] = 100 * float(np.average(dry.astype(float),
                                                         weights=wgt))
-            fields[sc] = (eA, cA, spread, d)
+            fields[sc] = (eA, cA, spread, pval, d)
         if not fields:
             continue
         vmax = float(np.nanpercentile(
-            np.abs(np.concatenate([(e - c).ravel() for e, c, _, _ in fields.values()])),
+            np.abs(np.concatenate([(e - c).ravel()
+                                   for e, c, _, _, _ in fields.values()])),
             99)) or (meta.get("vmax_pct") if pct else meta["vmax"])
 
         im = None
         for c, sc in enumerate([s for s in args.scenarios if s in fields]):
-            eA, cA, spread, d = fields[sc]
+            eA, cA, spread, pval, d = fields[sc]
             ax = axes[r][c]
             bias = eA - cA
             w = area_w(d["lat"], d["lon"])
@@ -297,19 +388,26 @@ def main() -> int:
                                  * np.average((cA[m] - cw_) ** 2, weights=w[m]))
             frac = float(np.average((np.abs(bias[m]) < spread[m]).astype(float),
                                     weights=w[m])) * 100
+            # significance of the emulator-minus-CESM2 difference
+            if args.no_fdr:
+                sig = np.isfinite(pval) & (pval < args.alpha)
+                p_thr = args.alpha
+            else:
+                sig, p_thr = fdr_mask(pval, 2.0 * args.alpha)
+            raw = np.isfinite(pval) & (pval < args.alpha)
+            sig_pct = float(np.average(sig[m].astype(float), weights=w[m])) * 100
+            raw_pct = float(np.average(raw[m].astype(float), weights=w[m])) * 100
 
             kw = dict(cmap=meta["cmap"], vmin=-vmax, vmax=vmax, shading="auto")
             if HAVE_CARTOPY:
                 kw["transform"] = ccrs.PlateCarree()
             im = ax.pcolormesh(d["lon"], d["lat"], bias, **kw)
             if not args.no_stipple:
-                # hatch where the emulator differs from CESM2 by LESS than
-                # CESM2 members differ from each other
-                hk = dict(colors="none", hatches=["....", ""], levels=[0.5, 1.5, 2.5])
+                # hatch where the emulator differs from CESM2 SIGNIFICANTLY
+                hk = dict(colors="none", hatches=["", "...."], levels=[0.5, 1.5, 2.5])
                 if HAVE_CARTOPY:
                     hk["transform"] = ccrs.PlateCarree()
-                ax.contourf(d["lon"], d["lat"],
-                            (np.abs(bias) < spread).astype(float) + 1.0, **hk)
+                ax.contourf(d["lon"], d["lat"], sig.astype(float) + 1.0, **hk)
             if HAVE_CARTOPY:
                 ax.coastlines(linewidth=0.35, color="0.25")
                 ax.set_global()
@@ -322,21 +420,30 @@ def main() -> int:
             _msk = masked_pct.get(sc)
             ax.text(0.5, -0.10,
                     f"r = {corr:.3f}   RMSE = {rmse:.3f} {unit}\n"
-                    f"{frac:.0f}% within CESM2 spread"
-                    + (f"   ({_msk:.0f}% arid, masked)" if _msk else ""),
+                    f"{sig_pct:.0f}% of area significantly different"
+                    # own line: appended inline it overruns into the neighbour
+                    + (f"\n({_msk:.0f}% arid, masked)" if _msk else ""),
                     transform=ax.transAxes, ha="center", va="top", fontsize=7.2,
                     color="0.25")
             if c == 0:
                 ax.text(-0.06, 0.5, meta["row"], transform=ax.transAxes,
                         rotation=90, va="center", ha="right", fontsize=10)
             if d["n_emu"] != d["n_c"]:
-                print(f"  [warn] {var}/{sc}: {d['n_emu']} emulator vs "
-                      f"{d['n_c']} CESM2 members — the means are converged to "
-                      f"different degrees; set --n-ref-members {d['n_emu']}")
+                # Unequal sizes are fine for the Welch test (that is the point
+                # of Welch), and equalising is usually IMPOSSIBLE anyway: only
+                # 10/10/11/6 CESM2 members are held out of hist/ssp370/aaer/ghg.
+                # Report it because the two means are converged to different
+                # degrees, which matters when reading the colours.
+                print(f"  [info] {var}/{sc}: {d['n_emu']} emulator vs "
+                      f"{d['n_c']} CESM2 members (Welch handles the imbalance; "
+                      f"the smaller side dominates the standard error)")
             _counts.append(dict(n_emu=d["n_emu"], n_cesm=d["n_c"]))
             rows.append(dict(var=var, scenario=sc, years=f"{d['yr'][0]}-{d['yr'][1]}",
                              n_emu=d["n_emu"], n_cesm=d["n_c"],
                              pattern_corr=round(corr, 4), rmse=round(rmse, 4),
+                             pct_area_significant=round(sig_pct, 1),
+                             pct_area_significant_raw=round(raw_pct, 1),
+                             p_threshold=round(p_thr, 5),
                              pct_within_spread=round(frac, 1), unit=unit,
                              pct_area_masked=(round(masked_pct[sc], 1)
                                               if sc in masked_pct else 0.0)))
@@ -356,7 +463,9 @@ def main() -> int:
         f"ENSEMBLE-MEAN emulator minus held-out CESM2 "
         f"({_fmt(_ne)} emulator vs {_fmt(_nc)} CESM2 members), "
         f"{args.n_years}-year mean " + _what + "\n"
-        f"hatching = |bias| below CESM2 inter-member spread"
+        f"hatching = difference significant at p < {args.alpha:g} "
+        f"(Welch t-test"
+        + ("" if args.no_fdr else f", FDR-controlled at q = {2*args.alpha:g}") + ")"
         + ("" if args.precip_mm else
            "; precipitation as % of its 1850\u20131900 baseline"),
         fontsize=9.5, y=1.005)
