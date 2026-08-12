@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=ssp126_get
-#SBATCH --account=project_462001328
 #SBATCH --partition=standard-g
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
@@ -10,6 +9,11 @@
 #SBATCH --time=2:10:00
 #SBATCH --output=logs/%x_%j.out
 
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
+
 set -euo pipefail
 mkdir -p logs
 
@@ -18,7 +22,7 @@ module use /appl/local/csc/modulefiles
 module load LUMI
 module load pytorch
 #module load cray-python
-source "/projappl/project_462001328/venvs/diffesm/bin/activate"
+source "${LUMI_PROJAPPL}/venvs/diffesm/bin/activate"
 
 # Common settings
 export HYDRA_FULL_ERROR=1

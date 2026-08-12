@@ -1,3 +1,4 @@
+import lumi_paths as L
 import os
 import random
 from typing import Any, Optional, Union
@@ -67,10 +68,10 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 # baseline), matching what config_data.yaml feeds to training/eval.
 # ssp126 is intentionally excluded: it's the OOD test scenario.
 EMISSIONS_PATHS = [
-    "/scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc.nc",
-    "/scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed_bc.nc",
-    "/scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed_bc.nc",
-    "/scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed_bc.nc",
+    f"{L.DATA}/emissions_hist_only_timefixed_bc.nc",
+    f"{L.DATA}/emissions_ssp370_only_timefixed_bc.nc",
+    f"{L.DATA}/emissions_aaer_only_timefixed_bc.nc",
+    f"{L.DATA}/emissions_ghg_only_timefixed_bc.nc",
 ]
 
 

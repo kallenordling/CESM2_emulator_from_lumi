@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=eval_aero
-#SBATCH --account=project_462001328
 # small-g allows a partial-node allocation (4 GCDs) instead of reserving a whole
 # standard-g node, so the job backfills into much smaller idle gaps. Eval runs
 # in ~15-20 min (bf16 + 50 sample steps + 4-GPU sharding), so a 1 h request lets
@@ -15,6 +14,11 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/%x_%j.out
 
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
+
 set -euo pipefail
 mkdir -p logs
 
@@ -27,8 +31,8 @@ SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
 # Override any inherited SINGULARITYENV_PYTHONPATH from --export=ALL
-_VENV_SITE=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
-_EXTRA_PKGS=/scratch/project_462001328/python_packages
+_VENV_SITE=${LUMI_VENV}/lib/python3.12/site-packages
+_EXTRA_PKGS=${LUMI_PKGS}
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}:${_EXTRA_PKGS}"
 echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
 
@@ -44,16 +48,16 @@ export MIOPEN_FIND_ENFORCE=2
 mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 
 # Use container-internal path if available
-if [ -d "/pfs/lustrep1/projappl/project_462001328/CESM2_emulator_from_lumi" ]; then
-    WORK_DIR=/pfs/lustrep1/projappl/project_462001328/CESM2_emulator_from_lumi
+if [ -d "${LUMI_REPO_PFS}" ]; then
+    WORK_DIR=${LUMI_REPO_PFS}
 else
-    WORK_DIR=/projappl/project_462001328/CESM2_emulator_from_lumi
+    WORK_DIR=${LUMI_REPO}
 fi
 
 # When submitted by the trainer, CHECKPOINT and OUTPUT_DIR are set via --export.
 # Fall back to defaults for manual submission.
 CHECKPOINT="${CHECKPOINT:-}"
-OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output}"
+OUTPUT_DIR="${OUTPUT_DIR:-${LUMI_EVAL_OUT}}"
 # Override for checkpoints trained with a different model/data config (e.g. an
 # A/B arm with a different channel set, such as run_gainfix_noBCprect). Must
 # match what the checkpoint was actually trained with — it isn't self-describing.
@@ -130,7 +134,7 @@ if [ -n "${CHECKPOINT}" ]; then
     RUNS_FLAG=""
 else
     CKPT_FLAG=""
-    RUNS_FLAG="--runs-dir /projappl/project_462001328/CESM2_emulator_from_lumi/runs"
+    RUNS_FLAG="--runs-dir ${LUMI_REPO}/runs"
 fi
 
 PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \

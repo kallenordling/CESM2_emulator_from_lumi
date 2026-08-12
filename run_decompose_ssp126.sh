@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=decomp_ssp126
-#SBATCH --account=project_462001328
 #SBATCH --partition=dev-g
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -9,6 +8,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # Single-GPU ssp126 single-forcing decomposition on dev-g (fast turnaround).
 # Submit:
@@ -26,8 +30,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] ${SIF}"
 
-_VENV_SITE=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
-_EXTRA_PKGS=/scratch/project_462001328/python_packages
+_VENV_SITE=${LUMI_VENV}/lib/python3.12/site-packages
+_EXTRA_PKGS=${LUMI_PKGS}
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}:${_EXTRA_PKGS}"
 
 export HYDRA_FULL_ERROR=1
@@ -41,10 +45,10 @@ export MIOPEN_FIND_ENFORCE=2
 mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 
 # Container-internal repo path (matches run_eval_aero.sh).
-if [ -d "/pfs/lustrep1/projappl/project_462001328/CESM2_emulator_from_lumi" ]; then
-    WORK_DIR=/pfs/lustrep1/projappl/project_462001328/CESM2_emulator_from_lumi
+if [ -d "${LUMI_REPO_PFS}" ]; then
+    WORK_DIR=${LUMI_REPO_PFS}
 else
-    WORK_DIR=/projappl/project_462001328/CESM2_emulator_from_lumi
+    WORK_DIR=${LUMI_REPO}
 fi
 
 # ── Options (override via env at submit time) ────────────────────────────────

@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # Turnkey launcher for a MANUAL eval. Wraps `sbatch run_eval_aero.sh` with the
 # correct `--export=ALL,CHECKPOINT=...,OUTPUT_DIR=...,EXPERIMENTS=...` so the env
 # vars actually reach the job.
@@ -27,13 +30,13 @@ CKPT="${1:?usage: bash submit_eval.sh <checkpoint.pt> [experiments] [output_subd
 EXPERIMENTS="${2:-}"
 SUBDIR="${3:-manual_$(basename "${CKPT}" .pt)}"
 
-REPO=/projappl/project_462001328/CESM2_emulator_from_lumi
+REPO=${LUMI_REPO}
 case "${CKPT}" in
     /*) ;;                       # already absolute
     *)  CKPT="${REPO}/${CKPT}" ;;
 esac
 
-OUTPUT_DIR="/scratch/project_462001328/eval_output/manual/${SUBDIR}"
+OUTPUT_DIR="${LUMI_EVAL_OUT}/manual/${SUBDIR}"
 
 EXPORTS="ALL,CHECKPOINT=${CKPT},OUTPUT_DIR=${OUTPUT_DIR}"
 [ -n "${EXPERIMENTS}" ] && EXPORTS="${EXPORTS},EXPERIMENTS=${EXPERIMENTS}"

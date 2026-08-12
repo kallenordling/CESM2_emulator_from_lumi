@@ -8,6 +8,7 @@ For each conditioning variable (CO2, SUL), checks:
 Run on LUMI:
     python diagnose_conditioning.py
 """
+import lumi_paths as L
 import numpy as np
 import xarray as xr
 import matplotlib
@@ -16,7 +17,7 @@ import matplotlib.pyplot as plt
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 NORM_REF_PATH = "/scratch/project_462001112/emulator_data/emissions_co2_so2_regridded.nc"
-EMIS_DIR      = "/scratch/project_462001328/emulator_data"
+EMIS_DIR      = f"{L.DATA}"
 
 EXPERIMENTS = {
     "hist":   f"{EMIS_DIR}/emissions_hist_timefixed.nc",
@@ -151,6 +152,6 @@ for vi, var in enumerate(COND_VARS):
 fig.suptitle("Conditioning normalization check — does reference cover all experiments?",
              fontsize=13, fontweight="bold")
 plt.tight_layout()
-out = "/scratch/project_462001328/eval_output/diagnose_conditioning.png"
+out = f"{L.EVAL_OUT}/diagnose_conditioning.png"
 plt.savefig(out, dpi=130, bbox_inches="tight")
 print(f"\nSaved → {out}")

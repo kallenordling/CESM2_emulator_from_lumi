@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=dl_input4mips
-#SBATCH --account=project_462001328
 #SBATCH --partition=small
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -8,6 +7,11 @@
 #SBATCH --mem=8G
 #SBATCH --time=06:00:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # Download CMIP7 gridded emissions (BC, SO2, CO2) from ESGF input4MIPs.
 # CPU-only, single task — this is network-bound, not compute-bound, so more
@@ -29,7 +33,7 @@
 #     bash run_download_input4mips.sh --discover-only
 #
 # DEFAULT OUTPUT = the FLAT directory the cond-building pipeline already globs:
-#     /scratch/project_462001328/emulator_data/emission_data/inputs4mips/
+#     ${LUMI_DATA}/emission_data/inputs4mips/
 # data/make_aerosol_files.py and data/make_co2_files.py match input4MIPs files by
 # FILENAME in one flat INPUT_DIR, so a nested tree would be invisible to them.
 # Filenames encode source_id + date range and are globally unique, so dropping
@@ -45,7 +49,7 @@
 # RCP numbers; only h and vl had gridded emissions as of 2026-08-06.
 set -euo pipefail
 
-DATA_ROOT=/scratch/project_462001328/emulator_data
+DATA_ROOT=${LUMI_DATA}
 OUTDIR="${OUTDIR:-${DATA_ROOT}/emission_data/inputs4mips}"
 LAYOUT="${LAYOUT:-flat}"
 PASSES="${PASSES:-3}"
@@ -60,7 +64,7 @@ mkdir -p logs
 # files land somewhere data/make_{aerosol,co2}_files.py will never glob. Those
 # scripts default to EMUL_INPUT_DIR, falling back to the path below; if you have
 # EMUL_INPUT_DIR set in your environment, it wins there, so honour it here too.
-PIPELINE_DIR="${EMUL_INPUT_DIR:-/scratch/project_462001328/emulator_data/emission_data/inputs4mips}"
+PIPELINE_DIR="${EMUL_INPUT_DIR:-${LUMI_DATA}/emission_data/inputs4mips}"
 PIPELINE_DIR="${PIPELINE_DIR%/}"
 
 if [[ "${OUTDIR%/}" != "${PIPELINE_DIR}" ]]; then
@@ -97,8 +101,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
 # Inject the project venv's site-packages into the container (matches run_download_data.sh).
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 

@@ -13,6 +13,7 @@ Run from the project root:
     python eval_aero.py [--runs-dir /path/to/runs] [--output-dir eval_output]
 """
 
+import lumi_paths as L
 import argparse
 import contextlib
 import os
@@ -48,8 +49,8 @@ from custom_diffusers.continuous_ddpm import ContinuousDDPM
 from models.video_net import UNetModel3D
 
 # ── paths ──────────────────────────────────────────────────────────────────────
-PROJ_ROOT   = "/projappl/project_462001328/CESM2_emulator_from_lumi"
-SCRATCH     = "/scratch/project_462001328/emulator_data"
+PROJ_ROOT   = f"{L.REPO}"
+SCRATCH     = f"{L.DATA}"
 RUNS_DIR    = os.path.join(PROJ_ROOT, "runs")
 DATA_ROOT   = os.path.join(SCRATCH, "training_data/TREFHT")
 PRECT_ROOT  = os.path.join(SCRATCH, "training_data/PRECT")
@@ -275,7 +276,7 @@ def find_latest_checkpoint(runs_dir: str) -> str:
 
 def load_model(ckpt_path: str, config_path: str, device: torch.device):
     """Load UNet model from checkpoint, return (model, pca_state)."""
-    cfg = OmegaConf.load(config_path)
+    cfg = L.resolve_cfg(OmegaConf.load(config_path))
     model: UNetModel3D = instantiate(cfg.model)
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -1997,7 +1998,7 @@ def main():
     parser.add_argument("--checkpoint",  default=None,
                         help="Path to a specific checkpoint file. "
                              "Overrides --runs-dir / find_latest_checkpoint.")
-    parser.add_argument("--output-dir",  default="/scratch/project_462001328/eval_output")
+    parser.add_argument("--output-dir",  default="${LUMI_EVAL_OUT}")
     parser.add_argument("--model-config", default=CONFIG_PATH,
                         help="Path to the model/trainer config yaml (default: "
                              "configs/config_aero.yaml). Override for checkpoints "
@@ -2145,8 +2146,8 @@ def main():
 
     # Read n_components_cond from config_data.yaml (or --data-config) so eval
     # uses the same number of EOFs the model was trained with.
-    cfg = OmegaConf.load(args.model_config)
-    data_cfg = OmegaConf.load(args.data_config)
+    cfg = L.resolve_cfg(OmegaConf.load(args.model_config))
+    data_cfg = L.resolve_cfg(OmegaConf.load(args.data_config))
     _nc = data_cfg.get("n_components_cond", None)
     N_COMP_COND = OmegaConf.to_container(_nc, resolve=True) if (pca_cond and _nc is not None) else None
     print(f"[PCA] n_components_cond={N_COMP_COND}")

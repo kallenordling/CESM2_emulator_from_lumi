@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=generate_test
-#SBATCH --account=project_462001328
 # small-g partial-node (1 GCD). generate_test.py now sweeps EVERY year of hist
 # (1850-2014) and ssp370 (2015-2100) — 251 years — sampling N_SAMPLES
 # realizations per year, batched into one forward pass per diffusion step.
@@ -23,6 +22,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # Run trainer/generate_test.py — sample an ensemble of stochastic realizations
 # from a trained checkpoint for one scenario / one conditioning window, and
@@ -39,7 +43,7 @@
 # so use run_eval_cmip7.sh for those.
 #
 # OUTPUT is a relative path, so by default it lands in the repo on /projappl.
-# Point it at /scratch/project_462001328/... to keep generated data off the
+# Point it at ${LUMI_SCRATCH}/... to keep generated data off the
 # project filesystem.
 set -euo pipefail
 mkdir -p logs
@@ -71,8 +75,8 @@ SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 # The repo root is appended to PYTHONPATH so `from data.multi_experiment_dataset
 # import ...` resolves: running `python trainer/generate_test.py` puts trainer/
 # on sys.path, NOT the repo root.
-_VENV_SITE=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
-_EXTRA_PKGS=/scratch/project_462001328/python_packages
+_VENV_SITE=${LUMI_VENV}/lib/python3.12/site-packages
+_EXTRA_PKGS=${LUMI_PKGS}
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}:${_EXTRA_PKGS}:$(pwd)"
 export PYTHONNOUSERSITE=1
 export HYDRA_FULL_ERROR=1

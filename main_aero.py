@@ -1,3 +1,4 @@
+import lumi_paths as L
 import os
 # Must be set before any GPU allocation (before torch import)
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -58,7 +59,7 @@ def main(cfg: DictConfig) -> None:
     data_cfg_path = os.path.join(
         hydra.utils.get_original_cwd(), "configs", cfg.data_config
     )
-    data_cfg = OmegaConf.load(data_cfg_path)
+    data_cfg = L.resolve_cfg(OmegaConf.load(data_cfg_path))
 
     # BC clip mode must be set BEFORE any dataset/cond building (it changes the
     # percentile anchors of the BC channel normalisation). Default "v1" keeps

@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # CPU-only: download raw monthly CESM2 source data (LENS2 + SF AAER/GHG) from
 # OSDF, inside the LAIF singularity container (project venv injected). Wraps
 # download_lens2.py (d651056) + download_cesm_lens_sf.py (d651055).
@@ -18,7 +21,7 @@
 #   bash run_download_data.sh PRECT
 #
 # Long downloads; run inside a batch/interactive alloc, NOT on the login node:
-#   srun --account=project_462001328 --partition=small --time=06:00:00 \
+#   srun --account=${LUMI_ACCOUNT} --partition=small --time=06:00:00 \
 #        --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=8G \
 #        bash run_download_data.sh PRECT
 set -euo pipefail
@@ -26,7 +29,7 @@ set -euo pipefail
 VARIABLE="${1:-PRECT}"
 PASSES="${2:-3}"
 
-DATA_ROOT=/scratch/project_462001328/emulator_data
+DATA_ROOT=${LUMI_DATA}
 LENS_DIR="${DATA_ROOT}/lens2"
 SF_DIR="${DATA_ROOT}/sf"
 
@@ -37,8 +40,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
 # Inject the project venv's site-packages into the container (matches run_prepare_data.sh).
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 

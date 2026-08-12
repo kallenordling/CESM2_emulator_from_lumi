@@ -14,6 +14,7 @@ range extends beyond the union of the training scenarios.
 Run on LUMI:
     python diag_cond_distribution.py
 """
+import lumi_paths as L
 import os
 import numpy as np
 import xarray as xr
@@ -21,8 +22,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-EMIS_DIR = os.environ.get("EMIS_DIR", "/scratch/project_462001328/emulator_data")
-OUT_DIR  = os.environ.get("OUT_DIR",  "/scratch/project_462001328/eval_output")
+EMIS_DIR = os.environ.get("EMIS_DIR", f"{L.DATA}")
+OUT_DIR  = os.environ.get("OUT_DIR",  f"{L.EVAL_OUT}")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # (name, path, is_training, color, linestyle)

@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # Rebuild the ssp126 conditioning file with the CO2 fix (drops the spurious
 # concat_and_regrid.py:84 "+ hist_endpoint" ramp). Runs
 # data/concat_and_regrid_ssp126.py inside the LAIF singularity container with the
@@ -14,7 +17,7 @@
 #     # custom grid template / overwrite live names:
 #     bash run_concat_ssp126.sh --target /path/to/cesm2_grid.nc --out-suffix ""
 # If the login node blocks singularity, wrap it:
-#     srun --account=project_462001328 --partition=debug --time=20 \
+#     srun --account=${LUMI_ACCOUNT} --partition=debug --time=20 \
 #          --nodes=1 --ntasks=1 bash run_concat_ssp126.sh
 set -euo pipefail
 
@@ -25,15 +28,15 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
 # Inject the project venv's site-packages into the container (matches run_check_pca.sh).
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 export HYDRA_FULL_ERROR=1
 
 # Default grid template: the existing regridded ssp126 file is already on the
 # CESM2 grid (only its lat/lon are read). Override with --target.
-DEFAULT_TARGET=/scratch/project_462001328/emulator_data/emissions_ssp126_only_timefixed.nc
+DEFAULT_TARGET=${LUMI_DATA}/emissions_ssp126_only_timefixed.nc
 
 # If the caller didn't pass --target, supply the default.
 case " $* " in

@@ -1,12 +1,15 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # LOCAL (workstation) runner for the CMIP7 emissions download + cond-file build.
 # No singularity, no SLURM — plain python from whatever env is active. Points at
 # the sshfs-mounted LUMI directories by default.
 #
 # Mount layout (from `mount`):
-#   /home/nordling/mnt/lumi_sc2  ->  /scratch/project_462001328/     (data)
-#   /home/nordling/mnt/lumi2     ->  /projappl/project_462001328/
-# so LUMI's  /scratch/project_462001328/emulator_data/...  is reachable locally
+#   /home/nordling/mnt/lumi_sc2  ->  ${LUMI_SCRATCH}/     (data)
+#   /home/nordling/mnt/lumi2     ->  ${LUMI_PROJAPPL}/
+# so LUMI's  ${LUMI_DATA}/...  is reachable locally
 # as  ${LUMI_MOUNT}/emulator_data/...
 #
 # Usage:
@@ -68,7 +71,7 @@ check_mount() {
         echo "[cmip7-local]   the sshfs connection has dropped (this is NOT missing data)."
         echo "[cmip7-local]   Remount, e.g.:"
         echo "[cmip7-local]     fusermount -u ${LUMI_MOUNT}"
-        echo "[cmip7-local]     sshfs nordlin1@lumi.csc.fi:/scratch/project_462001328/ ${LUMI_MOUNT}"
+        echo "[cmip7-local]     sshfs nordlin1@lumi.csc.fi:${LUMI_SCRATCH}/ ${LUMI_MOUNT}"
         echo "[cmip7-local]   …then re-run. Or work off local disk:"
         echo "[cmip7-local]     INPUT_DIR=~/cmip7_emissions OUTPUT_DIR=~/cmip7_cond bash $0 ${CMD}"
         return 1
@@ -118,7 +121,7 @@ check)
     else
         echo "[cmip7-local] MISSING grid template: ${TARGET}"
         echo "[cmip7-local]   Any file on the 192x288 CESM2 grid works. From LUMI:"
-        echo "[cmip7-local]   scp nordlin1@lumi.csc.fi:/scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc.nc ~/"
+        echo "[cmip7-local]   scp nordlin1@lumi.csc.fi:${LUMI_DATA}/emissions_hist_only_timefixed_bc.nc ~/"
         echo "[cmip7-local]   then re-run with TARGET=~/emissions_hist_only_timefixed_bc.nc"
         echo "[cmip7-local]   Do NOT synthesize this grid — a fractional offset would"
         echo "[cmip7-local]   silently misalign every cond field against the trained model."

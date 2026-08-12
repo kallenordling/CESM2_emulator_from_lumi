@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=eval_cmip7
-#SBATCH --account=project_462001328
 # small-g partial-node (1 GCD) — this eval is only 3 experiments (~330 sampled
 # years total) and is NOT sharded across ranks like run_eval_aero.sh, so one GPU
 # is enough and a 1-GCD request backfills almost immediately.
@@ -12,6 +11,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 #
 # Model-only evaluation of a checkpoint on the CMIP7 h / vl scenarios.
 # There is NO CESM2 reference under CMIP7 forcing, so this produces projections
@@ -33,12 +37,12 @@
 set -euo pipefail
 mkdir -p logs
 
-SCRATCH=/scratch/project_462001328/emulator_data
+SCRATCH=${LUMI_DATA}
 CHECKPOINT="${CHECKPOINT:-}"                 # empty -> newest in runs/
 MODEL_CONFIG="${MODEL_CONFIG:-configs/config_aero.yaml}"
 DATA_CONFIG="${DATA_CONFIG:-configs/config_data.yaml}"
 COND_DIR="${COND_DIR:-${SCRATCH}}"
-OUTPUT_DIR="${OUTPUT_DIR:-/scratch/project_462001328/eval_output/cmip7}"
+OUTPUT_DIR="${OUTPUT_DIR:-${LUMI_EVAL_OUT}/cmip7}"
 SCENARIOS="${SCENARIOS:-h vl}"
 MEMBERS="${MEMBERS:-5}"
 SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
@@ -52,8 +56,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
-_VENV_SITE=/projappl/project_462001328/venvs/diffesm_laif/lib/python3.12/site-packages
-_EXTRA_PKGS=/scratch/project_462001328/python_packages
+_VENV_SITE=${LUMI_VENV}/lib/python3.12/site-packages
+_EXTRA_PKGS=${LUMI_PKGS}
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}:${_EXTRA_PKGS}"
 
 export HYDRA_FULL_ERROR=1

@@ -9,6 +9,7 @@ automatic fallback to other r1i1p1fX variants if not found on ESGF).
 Output layout: <outdir>/<experiment>/<variable>/<model>/<filename>
 """
 
+import lumi_paths as L
 import os
 import sys
 import time
@@ -26,7 +27,7 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-OUTDIR = "/scratch/project_462001328/emulator_data/"
+OUTDIR = f"{L.DATA}/"
 EXPERIMENT = "historical"  # default; override with --experiment
 
 # Default models/members if --models is not given.

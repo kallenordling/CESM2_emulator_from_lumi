@@ -47,6 +47,7 @@ Usage:
   python data/make_cmip7_cond.py --target ... --dry-run     # check inputs only
 """
 
+import lumi_paths as L
 import argparse
 import glob
 import os
@@ -60,10 +61,10 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--target", required=True,
                     help="NetCDF file to take the output grid from (192x288 CESM2 f09)")
 parser.add_argument("--input-dir", default=os.environ.get(
-    "EMUL_INPUT_DIR", "/scratch/project_462001328/emulator_data/emission_data/inputs4mips/"),
+    "EMUL_INPUT_DIR", f"{L.DATA}/emission_data/inputs4mips/"),
                     help="Flat dir holding the downloaded input4MIPs files")
 parser.add_argument("--output-dir", default=os.environ.get(
-    "EMUL_OUTPUT_DIR", "/scratch/project_462001328/emulator_data/"))
+    "EMUL_OUTPUT_DIR", f"{L.DATA}/"))
 parser.add_argument("--scenarios", nargs="+", default=["h", "vl"],
                     help="CMIP7 warming-level scenarios (only h and vl have "
                          "gridded emissions published as of 2026-08)")

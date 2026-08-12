@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # setup_venv_laif.sh — one-time setup to create a venv inside the LAIF container.
 #
 # Run this ONCE on a LUMI login node (or interactive job) after switching to
@@ -8,7 +11,7 @@
 #   bash setup_venv_laif.sh [project_id]
 #
 # Example:
-#   bash setup_venv_laif.sh project_462001328
+#   bash setup_venv_laif.sh ${LUMI_ACCOUNT}
 #
 # After this script finishes, update VENV in run2_aero.sh to:
 #   VENV=/projappl/<project_id>/venvs/diffesm_laif/bin/activate
@@ -21,7 +24,7 @@ if ! type module &>/dev/null 2>&1; then
     exec bash -l "$0" "$@"
 fi
 
-PROJECT="${1:-project_462001328}"
+PROJECT="${1:-${LUMI_ACCOUNT}}"
 VENV_DIR="/projappl/${PROJECT}/venvs/diffesm_laif"
 
 echo "=== LUMI AI Factory venv setup ==="

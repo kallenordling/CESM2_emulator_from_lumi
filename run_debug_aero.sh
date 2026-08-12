@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=debug_aero
-#SBATCH --account=project_462001328
 #SBATCH --partition=dev-g
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -9,6 +8,11 @@
 #SBATCH --mem=128G
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/%x_%j.out
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+assert_account
+lumi_env_banner
 # Smoke test for the BC 3rd-cond-channel + PRECT 2nd-output-channel changes
 # (2-out/3-cond model, two-tree TREFHT+PRECT data_dir, *_bc.nc cond files).
 # Goal: boot the trainer, run a handful of training steps, persist one
@@ -41,8 +45,8 @@ SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 echo "[CONTAINER] Using: ${SIF}"
 
 # Inject our venv's site-packages into the container.
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 echo "[VENV] SINGULARITYENV_PYTHONPATH=${SINGULARITYENV_PYTHONPATH}"
 
@@ -76,7 +80,7 @@ mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 # visible to training. Stages BOTH target-var trees (config_data.yaml two-tree
 # data_dir: TREFHT ch0, PRECT ch1) and the four "_bc" cond files (CO2+SUL+BC —
 # the EMISSIONS_PATHS reference + config_data feed).
-SRC_DATA_ROOT=/scratch/project_462001328/emulator_data
+SRC_DATA_ROOT=${LUMI_DATA}
 LOCAL_DATA_ROOT=/tmp/emulator_data_${SLURM_JOB_ID}
 
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "

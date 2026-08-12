@@ -1,3 +1,4 @@
+import lumi_paths as L
 import math
 import os
 import random
@@ -781,7 +782,7 @@ class UNetTrainer:
             # Write eval output to scratch (writable), not next to the checkpoint
             # which may be in projappl (read-only on compute nodes).
             run_tag_for_dir = os.path.splitext(os.path.basename(self.save_name))[0]
-            scratch_root = os.environ.get("SCRATCH", "/scratch/project_462001328")
+            scratch_root = os.environ.get("SCRATCH", f"{L.SCRATCH}")
             output_dir = os.path.join(scratch_root, "eval_output", run_tag_for_dir, f"best_ep{epoch:04d}")
 
             run_tag = os.path.splitext(os.path.basename(self.save_name))[0]

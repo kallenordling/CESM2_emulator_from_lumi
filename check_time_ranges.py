@@ -5,6 +5,7 @@ realization with xr.open_mfdataset and the matching cond file, then prints
 their time-dim length and (min, max) year. Also reports the count under the
 trainer's `selected_years` mask (every 5th hist year + every 2nd ssp year).
 """
+import lumi_paths as L
 import os
 import glob
 import argparse
@@ -113,7 +114,7 @@ def main() -> None:
     p.add_argument("--path-prefix", action="append", default=[],
                    metavar="SRC=DST",
                    help="rewrite path prefix; repeatable. "
-                        "e.g. --path-prefix /scratch/project_462001328=/mnt/lumi_sc2")
+                        f"e.g. --path-prefix {L.SCRATCH}=/mnt/lumi_sc2")
     args = p.parse_args()
 
     rewrites = []

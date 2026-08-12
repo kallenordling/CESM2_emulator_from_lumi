@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+f"""
 Download CMIP7 gridded emissions (BC, SO2, CO2) from ESGF input4MIPs.
 
 CMIP7 forcing data lives under project=input4MIPs (NOT project=CMIP7); the
@@ -27,7 +27,7 @@ Output layout is chosen with --layout:
 
 Use `flat` to feed the existing cond-building pipeline: data/make_aerosol_files.py
 and data/make_co2_files.py glob a single flat INPUT_DIR by filename
-(default /scratch/project_462001328/emulator_data/emission_data/inputs4mips/),
+(default {L.DATA}/emission_data/inputs4mips/),
 so nested subdirectories are invisible to them. Filenames are globally unique
 (they encode source_id and date range), so flat has no collisions.
 
@@ -37,7 +37,7 @@ Examples
 python download_input4mips_cmip7.py --list-sources
 
 # default set: BC+SO2+CO2 anthro, CEDS historical + IIASA h/vl scenarios (~12 GB)
-python download_input4mips_cmip7.py --outdir /scratch/project_462001328/emulator_data/input4mips
+python download_input4mips_cmip7.py --outdir {L.DATA}/input4mips
 
 # dry run first
 python download_input4mips_cmip7.py --discover-only
@@ -46,6 +46,7 @@ python download_input4mips_cmip7.py --discover-only
 python download_input4mips_cmip7.py --species SO2 --sources CEDS-CMIP-2025-04-18
 """
 
+import lumi_paths as L
 import os
 import sys
 import time
@@ -63,7 +64,7 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-OUTDIR = "/scratch/project_462001328/emulator_data/input4mips"
+OUTDIR = f"{L.DATA}/input4mips"
 
 # Historical anthropogenic emissions (CEDS) + the published CMIP7 ScenarioMIP
 # gridded scenarios. Verified present on ESGF 2026-08-06.

@@ -1,4 +1,4 @@
-"""Show the conditioning EXACTLY as the model sees it — all three pipeline stages.
+f"""Show the conditioning EXACTLY as the model sees it — all three pipeline stages.
 
 Unlike plot_cond_input.py (which stops at smoothing), this runs the REAL
 ClimateDataset.load_data() three times with progressively more of the pipeline
@@ -28,9 +28,10 @@ Run ON LUMI (needs the /scratch cond files + data.climate_dataset), e.g.:
     singularity exec <SIF> bash -c 'cd <repo> && python diag_cond_model_view.py --scenario aaer'
 
 Or from a local mount with the cond files staged:
-    PATH_REMAP=/scratch/project_462001328:/mnt/lumi_sc2 \
+    PATH_REMAP={L.SCRATCH}:/mnt/lumi_sc2 \
         python diag_cond_model_view.py --scenario aaer
 """
+import lumi_paths as L
 import os
 import argparse
 import numpy as np

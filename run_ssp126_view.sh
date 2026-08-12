@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Single source of truth for the LUMI project id and its paths.
+source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # CPU-only diagnostic: show how the MODEL sees ssp126 emissions, isolating the
 # aaer-PCA-basis artifact (ssp126 is never trained, so eval routes it through the
 # aaer basis — see eval_aero.py:1907 and commit 851b840). Runs
@@ -9,7 +12,7 @@
 # Usage on LUMI (from the repo dir, after `git pull`):
 #     bash run_ssp126_view.sh
 # If the login node blocks singularity, wrap it:
-#     srun --account=project_462001328 --partition=debug --time=15 \
+#     srun --account=${LUMI_ACCOUNT} --partition=debug --time=15 \
 #          --nodes=1 --ntasks=1 bash run_ssp126_view.sh
 #
 # Outputs (written to CWD):
@@ -24,8 +27,8 @@ module load lumi-aif-singularity-bindings
 SIF=/appl/local/laifs/containers/lumi-multitorch-latest.sif
 
 # Inject the project venv's site-packages into the container (matches run_check_pca.sh).
-_VENV_SITE=$(realpath /projappl/project_462001328/venvs/diffesm_laif 2>/dev/null \
-             || echo /projappl/project_462001328/venvs/diffesm_laif)/lib/python3.12/site-packages
+_VENV_SITE=$(realpath ${LUMI_VENV} 2>/dev/null \
+             || echo ${LUMI_VENV})/lib/python3.12/site-packages
 export SINGULARITYENV_PYTHONPATH="${_VENV_SITE}"
 export PYTHONNOUSERSITE=1
 export HYDRA_FULL_ERROR=1

@@ -1,3 +1,4 @@
+import lumi_paths as L
 import os
 import sys
 
@@ -26,12 +27,12 @@ plt.rcParams.update({
 # ---------- data roots ----------
 #
 # Defaults point at the sshfs-mounted LUMI filesystems so this runs LOCALLY:
-#     /home/nordling/mnt/lumi_sc2  ->  /scratch/project_462001328
-#     /home/nordling/mnt/lumi2     ->  /projappl/project_462001328
+#     /home/nordling/mnt/lumi_sc2  ->  ${LUMI_SCRATCH}
+#     /home/nordling/mnt/lumi2     ->  ${LUMI_PROJAPPL}
 #
 # On LUMI itself, override with the real paths:
-#     EMUL_DATA_ROOT=/scratch/project_462001328/emulator_data \
-#     EMUL_GEN_ROOT=/projappl/project_462001328/CESM2_emulator_from_lumi \
+#     EMUL_DATA_ROOT=${LUMI_DATA} \
+#     EMUL_GEN_ROOT=${LUMI_REPO} \
 #     python plot_evaluation_own.py
 #
 DATA_ROOT = Path(os.environ.get(
@@ -58,7 +59,7 @@ for _label, _root in (("EMUL_DATA_ROOT", DATA_ROOT), ("EMUL_GEN_ROOT", GEN_ROOT)
         sys.exit(
             f"{_label} is empty: {_root}\n"
             f"A dropped sshfs mount looks exactly like this — remount it, e.g.\n"
-            f"  sshfs nordlin1@lumi.csc.fi:/scratch/project_462001328/ "
+            f"  sshfs nordlin1@lumi.csc.fi:{L.SCRATCH}/ "
             f"/home/nordling/mnt/lumi_sc2"
         )
 
