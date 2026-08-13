@@ -70,11 +70,14 @@ VARMETA = {
                    blab="Bias (\u00b0C)\nensemble means",
                    title="Emulated vs held-out CESM2 global-mean surface temperature",
                    tree_scale={None: 1.0, "K": 1.0, "degC": 1.0}),
+    # CMIP6 `pr` is kg m-2 s-1 (1 kg m-2 == 1 mm of water) -> x86400 for mm/day;
+    # the LENS2 trees store PRECT as m/s, hence the different factor there.
     "PRECT":  dict(unit="%", unit_plain="%", percent=True,
                    ylab="Precipitation change (%, vs 1850\u20131900)",
                    blab="Bias (percentage points)\nensemble means",
                    title="Emulated vs held-out CESM2 global-mean precipitation",
-                   tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0}),
+                   tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0,
+                               "kg m-2 s-1": 86400.0, None: 1.0}),
 }
 
 # scenario -> (panel label, eval NetCDF, (training-tree subdir, held-out member), colour)
@@ -85,10 +88,35 @@ SCEN = {
     "ssp370": ("SSP3-7.0",                  "ssp370", "ssp370", "#D55E00"),
     "aaer":   ("Aerosol-only (AAER)",       "aaer",   "AAER",   "#E69F00"),
     "ghg":    ("Greenhouse-gas-only (GHG)", "ghg",    "GHG",    "#009E73"),
+    # OUT-OF-TRAINING: forcing combinations the emulator never saw. No LENS2
+    # training tree — the reference comes from CMIP6_REFS instead.
+    "ssp126": ("SSP1-2.6 (unseen)",         "ssp126", None,     "#CC79A7"),
+    "ssp245": ("SSP2-4.5 (unseen)",         "ssp245", None,     "#56B4E9"),
+}
+
+# The four scenarios with a held-out LENS2 reference — the default paper figure.
+DEFAULT_SCENARIOS = ["hist", "ssp370", "aaer", "ghg"]
+
+# CESM2 reference for the unseen scenarios: the same pre-aggregated CMIP6
+# ensembles eval_aero.py evaluates against (eval_aero.py:88-119) — annual,
+# native 192x288 grid, 2015-2100, 3 members (r4/r10/r11).
+#
+# The `_pr` files do NOT ship with the repo's data (the tas ones came from the
+# Pangeo Google-Cloud archive). Build them from ESGF, per scenario:
+#   python download_cmip6_cesm2.py --experiment ssp126 --variables pr \
+#          --members r4i1p1f1 r10i1p1f1 r11i1p1f1
+#   python scripts/build_cmip6_annual_ref.py --experiment ssp126 --variable pr
+# Until they exist a PRECT run of these scenarios is plotted emulator-only.
+CMIP6_REFS = {
+    "ssp126": {"TREFHT": ("cmip6/ssp126.nc", "tas"),
+               "PRECT":  ("cmip6/ssp126_pr.nc", "pr")},
+    "ssp245": {"TREFHT": ("cmip6/ssp245.nc", "tas"),
+               "PRECT":  ("cmip6/ssp245_pr.nc", "pr")},
 }
 
 # scenario key in the data config -> training-tree subdirectory
-CFG_KEY = {"hist": "hist", "ssp370": "ssp370", "aaer": "aaer", "ghg": "ghg"}
+CFG_KEY = {"hist": "hist", "ssp370": "ssp370", "aaer": "aaer", "ghg": "ghg",
+           "ssp126": "ssp126", "ssp245": "ssp245"}
 
 
 def area_mean(da: xr.DataArray) -> xr.DataArray:
@@ -140,6 +168,31 @@ def read_heldout_ensemble(tree_root: Path, subdir: str, members: list) -> pd.Dat
         ds.close()
     if not cols:
         raise FileNotFoundError(f"no readable members under {tree_root / subdir}")
+    return pd.DataFrame(cols).sort_index()
+
+
+def read_cmip6_ensemble(path: Path, ncvar: str) -> pd.DataFrame:
+    """Same shape as read_heldout_ensemble, from a pre-aggregated CMIP6 file.
+
+    Dimensions are (year, member, lat, lon) rather than one directory of chunks
+    per member. Only defined for temperature — see CMIP6_REFS.
+    """
+    ds = xr.open_dataset(path)
+    if ncvar not in ds:
+        raise KeyError(f"{path}: no {ncvar!r}")
+    raw_units = ds[ncvar].attrs.get("units")
+    scale = VARMETA[VAR]["tree_scale"].get(raw_units)
+    if scale is None:
+        raise ValueError(f"{path}: {ncvar} has units {raw_units!r}, which has "
+                         f"no conversion to {VARMETA[VAR]['unit_plain']}")
+    gm = (area_mean(ds[ncvar]) * scale).compute()      # (year, member)
+    years = np.asarray(ds["year"].values).astype(int)
+    cols = {str(m): pd.Series(
+                np.asarray(gm.sel(member=m).values, dtype=float), index=years)
+            for m in ds["member"].values}
+    print(f"      CMIP6 {path.name}: {len(cols)} members {sorted(cols)} "
+          f"{years.min()}-{years.max()}", flush=True)
+    ds.close()
     return pd.DataFrame(cols).sort_index()
 
 
@@ -227,6 +280,11 @@ def main() -> int:
     ap.add_argument("--ref-csv", default=None,
                     help="cache of the held-out reference series; read if present, "
                          "written after computing so re-plots are instant")
+    ap.add_argument("--scenarios", nargs="+", default=DEFAULT_SCENARIOS,
+                    choices=sorted(SCEN),
+                    help="ssp126/ssp245 are OUT-OF-TRAINING; their reference is "
+                         "a 3-member CMIP6 ensemble and exists for TREFHT only "
+                         "(a PRECT run of them is emulator-only)")
     ap.add_argument("--out", default=None,
                     help="default plots/paper_fig_timeseries_<var>.png")
     ap.add_argument("--year-max", type=int, default=2100)
@@ -247,31 +305,61 @@ def main() -> int:
     eval_dir = Path(args.eval_dir)
     tree_root = Path(args.tree_root)
 
+    # hist is always loaded even when it is not plotted: it supplies the
+    # 1850-1900 baseline for every scenario that has no pre-industrial of its own.
+    load_scen = ["hist"] + [s for s in args.scenarios if s != "hist"]
+
     # ── held-out CESM2 reference: EVERY unseen member ───────────────────────
     ref = {}          # scenario -> DataFrame(year x member)
+    cached = {}
     if args.ref_csv and os.path.exists(args.ref_csv):
         df = pd.read_csv(args.ref_csv)
         for sc, g in df.groupby("scenario"):
-            ref[sc] = qc_ensemble(
+            cached[sc] = qc_ensemble(
                 g.pivot(index="year", columns="member", values="gmean_K").sort_index(), sc)
         print(f"[ref] reusing cached ensemble from {args.ref_csv}")
-        for sc, d in ref.items():
+        for sc, d in cached.items():
             print(f"      {sc:7s} {d.shape[1]} unseen members, "
                   f"{int(d.index.min())}-{int(d.index.max())}")
-    else:
+    ref = {sc: cached[sc] for sc in load_scen if sc in cached}
+
+    # Anything requested but not cached is computed now and appended, so a cache
+    # written for the four default scenarios does not silently mean "ssp126 has
+    # no reference".
+    todo = [sc for sc in load_scen if sc not in ref]
+    if todo:
         import yaml
         cfg = yaml.safe_load(open(args.data_config))
         trained = {e["scenario_name"]: set(e.get("realizations", []))
                    for e in cfg["experiment_configs"]}
-        print("[ref] resolving unseen members (on disk MINUS experiment_configs)")
-        for sc, (_, _, sub, _) in SCEN.items():
+        print(f"[ref] resolving {todo} (on disk MINUS experiment_configs)")
+        for sc in todo:
+            sub = SCEN[sc][2]
+            if sc in CMIP6_REFS:
+                spec = CMIP6_REFS[sc].get(VAR)
+                if spec is None or not (Path(args.data_root) / spec[0]).exists():
+                    # The reference for this variable has not been built yet —
+                    # plot the emulator alone rather than fake one.
+                    _rel = spec[0] if spec else f"cmip6/{sc}_<{VAR}>.nc"
+                    print(f"    {sc:7s} no CESM2 {VAR} reference ({_rel} not "
+                          f"found; build with download_cmip6_cesm2.py + "
+                          f"scripts/build_cmip6_annual_ref.py) "
+                          f"— emulator-only panel")
+                    continue
+                rel, ncvar = spec
+                print(f"    {sc:7s} CMIP6 ensemble {rel}")
+                ref[sc] = qc_ensemble(
+                    read_cmip6_ensemble(Path(args.data_root) / rel, ncvar), sc)
+                continue
             mems = unseen_members(tree_root, sub, trained.get(CFG_KEY[sc], set()))
             print(f"    {sc:7s} {len(mems)} unseen: {mems}")
             ref[sc] = qc_ensemble(
                 read_heldout_ensemble(tree_root, sub, mems), sc)
         if args.ref_csv:
+            merged = dict(cached)
+            merged.update(ref)
             rows = [dict(scenario=sc, member=m, year=int(y), gmean_K=float(v))
-                    for sc, d in ref.items()
+                    for sc, d in merged.items()
                     for m in d.columns
                     for y, v in d[m].dropna().items()]
             os.makedirs(os.path.dirname(os.path.abspath(args.ref_csv)) or ".", exist_ok=True)
@@ -299,7 +387,8 @@ def main() -> int:
 
     # ── emulated ────────────────────────────────────────────────────────────
     emu = {}
-    for sc, (_, nc, _, _) in SCEN.items():
+    for sc in load_scen:
+        nc = SCEN[sc][1]
         p = eval_dir / f"{VAR}_{nc}.nc"
         if not p.exists():
             print(f"[emu] MISSING {p} — panel will show reference only")
@@ -333,52 +422,74 @@ def main() -> int:
     # (a) combined overview on top; beneath it one bias panel per experiment,
     # with hist+ssp370 sharing a panel since they are one continuous
     # trajectory (hist ends 2014, ssp370 starts 2015).
-    BIAS_GROUPS = [
-        (("hist", "ssp370"), "Historical + SSP3-7.0"),
-        (("aaer",),          "Aerosol-only (AAER)"),
-        (("ghg",),           "Greenhouse-gas-only (GHG)"),
-    ]
-    fig = plt.figure(figsize=(9.5, 7.6))
-    gs = fig.add_gridspec(2, len(BIAS_GROUPS), height_ratios=[2.3, 1.0],
-                          hspace=0.30, wspace=0.12)
-    ax = fig.add_subplot(gs[0, :])
-    axbs = []
-    for i in range(len(BIAS_GROUPS)):
-        a = fig.add_subplot(gs[1, i], sharey=axbs[0] if axbs else None)
-        axbs.append(a)
+    # hist+ssp370 share a panel when both are plotted: they are one continuous
+    # trajectory (hist ends 2014, ssp370 starts 2015). Everything else gets its
+    # own panel, so the layout follows --scenarios instead of being fixed.
+    # Scenarios with no CESM2 reference have no bias to draw and are omitted.
+    _has_ref = [s for s in args.scenarios if s in ref]
+    BIAS_GROUPS = []
+    if "hist" in _has_ref and "ssp370" in _has_ref:
+        BIAS_GROUPS.append((("hist", "ssp370"), "Historical + SSP3-7.0"))
+    for s in _has_ref:
+        if s in ("hist", "ssp370") and BIAS_GROUPS and \
+                BIAS_GROUPS[0][0] == ("hist", "ssp370"):
+            continue
+        BIAS_GROUPS.append(((s,), SCEN[s][0]))
+    if BIAS_GROUPS:
+        fig = plt.figure(figsize=(9.5, 7.6))
+        gs = fig.add_gridspec(2, len(BIAS_GROUPS), height_ratios=[2.3, 1.0],
+                              hspace=0.30, wspace=0.12)
+        ax = fig.add_subplot(gs[0, :])
+        axbs = []
+        for i in range(len(BIAS_GROUPS)):
+            a = fig.add_subplot(gs[1, i], sharey=axbs[0] if axbs else None)
+            axbs.append(a)
+    else:
+        # No CESM2 reference for any plotted scenario (PRECT + unseen
+        # scenarios): there is no bias to show, so the figure is the
+        # trajectory panel alone rather than a row of empty axes.
+        fig = plt.figure(figsize=(9.5, 5.4))
+        ax = fig.add_subplot(1, 1, 1)
+        axbs = []
     bias_of = {}          # scenario -> (years, bias series)
     rows = []
     sigma_by_scen = {}
+    plotted_years = []    # every year actually drawn, for the x-limit
 
-    for sc, (label, _, sub, colour) in SCEN.items():
-        R = ref[sc]                              # DataFrame(year x member)
-        r_years = R.index.values
+    for sc in args.scenarios:
+        label, _, sub, colour = SCEN[sc]
+        R = ref.get(sc)                          # DataFrame(year x member), or None
         # scenarios without their own pre-industrial inherit the historical one
-        rb = ref_base_hist if sc == "ssp370" else baseline_of(
-            r_years, R.mean(axis=1, skipna=True).values)
         eb = emu_base_hist if sc == "ssp370" else (
             baseline_of(emu[sc][2], emu[sc][0]) if sc in emu else np.nan)
-        if not np.isfinite(rb):
-            rb = ref_base_hist
         if not np.isfinite(eb):
             eb = emu_base_hist
 
-        keep_r = r_years <= args.year_max
-        Ra = anom(R[keep_r], rb)                  # anomalies, per member
-        r_mean = Ra.mean(axis=1, skipna=True)
+        Ra = r_mean = None
+        if R is not None:
+            r_years = R.index.values
+            rb = ref_base_hist if sc == "ssp370" else baseline_of(
+                r_years, R.mean(axis=1, skipna=True).values)
+            if not np.isfinite(rb):
+                rb = ref_base_hist
+            keep_r = r_years <= args.year_max
+            Ra = anom(R[keep_r], rb)              # anomalies, per member
+            r_mean = Ra.mean(axis=1, skipna=True)
+            plotted_years += [float(Ra.index.min()), float(Ra.index.max())]
 
-        # CESM2 held-out ensemble: mean dashed + member spread
-        ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True), Ra.max(axis=1, skipna=True),
-                        color=colour, alpha=0.12, lw=0, zorder=1)
-        # CESM2 reference gets OPEN CIRCLE MARKERS, not just a dash pattern.
-        # Solid-vs-dashed in the same colour is not readable where the two
-        # curves coincide (which is most of the record); a marker shape stays
-        # distinguishable regardless of colour, overlap or print size.
-        ax.plot(Ra.index, r_mean.values, color=colour, lw=1.2, ls="--",
-                marker="o", markersize=3.4, markevery=8,
-                markerfacecolor="white", markeredgecolor=colour,
-                markeredgewidth=1.0, zorder=5,
-                path_effects=[pe.withStroke(linewidth=3.0, foreground="white")])
+            # CESM2 held-out ensemble: mean dashed + member spread
+            ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True),
+                            Ra.max(axis=1, skipna=True),
+                            color=colour, alpha=0.12, lw=0, zorder=1)
+            # CESM2 reference gets OPEN CIRCLE MARKERS, not just a dash pattern.
+            # Solid-vs-dashed in the same colour is not readable where the two
+            # curves coincide (which is most of the record); a marker shape stays
+            # distinguishable regardless of colour, overlap or print size.
+            ax.plot(Ra.index, r_mean.values, color=colour, lw=1.2, ls="--",
+                    marker="o", markersize=3.4, markevery=8,
+                    markerfacecolor="white", markeredgecolor=colour,
+                    markeredgewidth=1.0, zorder=5,
+                    path_effects=[pe.withStroke(linewidth=3.0, foreground="white")])
 
         if sc not in emu:
             continue
@@ -390,12 +501,15 @@ def main() -> int:
                             color=colour, alpha=0.28, lw=0, zorder=2)
         ax.plot(years[keep], anom(mean[keep], eb), color=colour, lw=2.6, zorder=4,
                 solid_capstyle="round", label=label)
+        plotted_years += [float(years[keep].min()), float(years[keep].max())]
 
         # ── bias panel ──────────────────────────────────────────────────────
         # Line: difference of ENSEMBLE MEANS. Band: the spread of individual
         # CESM2 members about their own mean — i.e. what a single realization
         # departs from the forced response by chance. A bias line inside that
         # band is indistinguishable from internal variability.
+        if Ra is None:                # emulator-only scenario: nothing to bias
+            continue
         common = np.intersect1d(years[keep], Ra.index.values)
         if not len(common):
             continue
@@ -458,7 +572,8 @@ def main() -> int:
         # numbers on the figure rather than only in the console
         txt = "\n".join(
             f"{SCEN[sc][0].split(' (')[0]}: "
-            f"{stats[sc]['bias']:+.2f} \u00b1 {stats[sc]['rmse']:.2f} \u00b0C, "
+            f"{stats[sc]['bias']:+.2f} \u00b1 {stats[sc]['rmse']:.2f} "
+            f"{META['unit']}, "
             f"{stats[sc]['pct_within_spread']:.0f}% in band"
             for sc in group if sc in stats)
         if txt:
@@ -474,10 +589,16 @@ def main() -> int:
     # legend: scenario colours, plus what solid/dashed mean
     # Member counts for the legend: emulator is the same everywhere; CESM2
     # differs by scenario (6-11), so show the range rather than a single number.
-    _n_emu = sorted({r["n_emu"] for r in rows}) or [0]
-    _n_emu = str(_n_emu[0]) if len(_n_emu) == 1 else f"{min(_n_emu)}\u2013{max(_n_emu)}"
+    # Emulator counts come from the eval files, not from `rows`: an
+    # emulator-only run produces no bias rows but still draws member curves,
+    # and reading "0 members" off the legend of a 25-member ensemble is worse
+    # than having no legend at all.
+    _ne = sorted({e[1].shape[0] for sc, e in emu.items()
+                  if sc in args.scenarios and e[1] is not None}) or [0]
+    _n_emu = str(_ne[0]) if len(_ne) == 1 else f"{min(_ne)}\u2013{max(_ne)}"
     _n_c = sorted({r["n_unseen"] for r in rows}) or [0]
     _n_cesm = str(_n_c[0]) if len(_n_c) == 1 else f"{min(_n_c)}\u2013{max(_n_c)}"
+    _has_cesm = any(sc in ref for sc in args.scenarios)
 
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
@@ -485,43 +606,73 @@ def main() -> int:
     style = [
         Line2D([], [], color="0.35", lw=2.6,
                label=f"EMULATOR \u2014 ensemble mean ({_n_emu} members)"),
-        Line2D([], [], color="0.35", lw=1.2, ls="--", marker="o", markersize=3.4,
-               markerfacecolor="white", markeredgecolor="0.35",
-               label=f"CESM2 \u2014 unseen ensemble mean ({_n_cesm} members)"),
         Patch(facecolor="0.35", alpha=0.28, label="EMULATOR member range"),
-        Patch(facecolor="0.35", alpha=0.12, label="CESM2 member range"),
-        Patch(facecolor="0.55", alpha=0.20,
-              label=f"CESM2 spread about its mean, b\u2013d "
-                    f"(\u00b12\u03c3, mean \u00b1{2*_sig:.2f} {META['unit']})"),
     ]
+    # Only advertise the reference when one was actually drawn.
+    if _has_cesm:
+        style[1:1] = [
+            Line2D([], [], color="0.35", lw=1.2, ls="--", marker="o",
+                   markersize=3.4, markerfacecolor="white",
+                   markeredgecolor="0.35",
+                   label=f"CESM2 \u2014 unseen ensemble mean "
+                         f"({_n_cesm} members)"),
+        ]
+        style.append(Patch(facecolor="0.35", alpha=0.12,
+                           label="CESM2 member range"))
+    if BIAS_GROUPS:
+        style.append(Patch(
+            facecolor="0.55", alpha=0.20,
+            label=f"CESM2 spread about its mean, "
+                  + ("b" if len(BIAS_GROUPS) == 1 else
+                     f"b\u2013{'bcde'[len(BIAS_GROUPS) - 1]}") + " "
+                  f"(\u00b12\u03c3, mean \u00b1{2*_sig:.2f} {META['unit']})"))
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
     # Legends ABOVE the axes so they take no data area.
+    # The scenario legend sits ABOVE the style legend, so its offset has to
+    # clear however many rows the style legend takes. Deriving it from the
+    # axes height in inches keeps the two from colliding when the figure is
+    # short (emulator-only runs drop the bias row AND two style entries).
+    _rows_style = int(np.ceil(len(style) / 2))
+    _axh = ax.get_position().height * fig.get_size_inches()[1]
     leg1 = ax.legend(frameon=False, ncols=4, loc="lower left",
-                     bbox_to_anchor=(0.0, 1.13), handlelength=2.2)
+                     bbox_to_anchor=(0.0, 1.005 + _rows_style * 0.165 / _axh),
+                     handlelength=2.2)
     ax.add_artist(leg1)
-    ax.legend(handles=style, frameon=False, ncols=2, fontsize=8.2,
-              loc="lower left", bbox_to_anchor=(0.0, 1.005), handlelength=2.6)
+    leg2 = ax.legend(handles=style, frameon=False, ncols=2, fontsize=8.2,
+                     loc="lower left", bbox_to_anchor=(0.0, 1.005),
+                     handlelength=2.6)
 
     ax.axhline(0, ls=":", lw=0.8, color="0.3")
-    ax.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
+    # The baseline window is only worth shading when it is actually on the axis:
+    # scenarios that start in 2015 would otherwise carry a legend-grey block far
+    # off to the left of every curve.
+    _xmin = min(plotted_years) if plotted_years else BASELINE[0]
+    if _xmin <= BASELINE[1]:
+        ax.axvspan(*BASELINE, color="0.9", alpha=0.6, lw=0, zorder=0)
     ax.set_ylabel(META["ylab"])
     ax.text(0.005, 0.97, "(a)", transform=ax.transAxes, fontweight="bold",
             va="top", ha="left")
 
 
     ax.set_xlabel("Year")
-    ax.set_xlim(BASELINE[0], args.year_max)
+    ax.set_xlim(min(BASELINE[0], _xmin) if _xmin <= BASELINE[1] else _xmin - 2,
+                args.year_max)
     # y-limit must clear both the bias lines and the +/-2 sigma band
     _floor = 0.35 if not VARMETA[VAR].get('percent') else 1.0
     _lim = max([_floor]
                + [abs(float(d.min())) for _, d, _sd in bias_of.values()]
                + [abs(float(d.max())) for _, d, _sd in bias_of.values()]
                + [2 * float(_sd.max()) for _, _d, _sd in bias_of.values()]) * 1.15
-    axbs[0].set_ylim(-_lim, _lim)
+    if axbs:
+        axbs[0].set_ylim(-_lim, _lim)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
-    fig.savefig(args.out, bbox_inches="tight")
-    fig.savefig(str(Path(args.out).with_suffix(".pdf")), bbox_inches="tight")   # vector for the journal
+    # Legends live ABOVE the axes; without listing them explicitly the tight
+    # bbox can crop their top row.
+    _extra = [leg1, leg2]
+    fig.savefig(args.out, bbox_inches="tight", bbox_extra_artists=_extra)
+    fig.savefig(str(Path(args.out).with_suffix(".pdf")),                       # vector for the journal
+                bbox_inches="tight", bbox_extra_artists=_extra)
     print(f"\nwrote {args.out}")
     print(f"wrote {Path(args.out).with_suffix('.pdf')}")
 
@@ -533,7 +684,8 @@ def main() -> int:
             _v = list(sigma_by_scen.values())
             print(f"\nCESM2 inter-member sigma by scenario ({META['unit_plain']}): "
                   + ", ".join(f"{k}={v:.3f}" for k, v in sigma_by_scen.items()))
-            print(f"  spread across scenarios: {max(_v)-min(_v):.4f} \u00b0C "
+            print(f"  spread across scenarios: {max(_v)-min(_v):.4f} "
+                  f"{META['unit_plain']} "
                   f"({100*(max(_v)-min(_v))/np.mean(_v):.1f}% of the mean) "
                   f"-> a single shared envelope is representative")
     return 0
