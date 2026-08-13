@@ -75,10 +75,15 @@ VARS = {
                    cmap="RdBu_r", vmax=1.0,
                    tree_scale={None: 1.0, "K": 1.0, "degC": 1.0},
                    tree_offset={"K": -273.15, "degC": 0.0, None: 0.0}),
+    # CMIP6 `pr` is a mass flux in kg m-2 s-1; 1 kg m-2 == 1 mm of water, so
+    # x86400 gives mm/day. The LENS2 trees store PRECT as a velocity in m/s,
+    # hence the different factor for that key.
     "PRECT":  dict(row="Precipitation", unit="mm day$^{-1}$", unit_plain="mm/day",
                    cmap="BrBG", vmax=0.5, vmax_pct=20.0,
-                   tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0},
-                   tree_offset={"m/s": 0.0, "mm/day": 0.0, None: 0.0}),
+                   tree_scale={"m/s": 86400.0 * 1000.0, "mm/day": 1.0,
+                               "kg m-2 s-1": 86400.0, None: 1.0},
+                   tree_offset={"m/s": 0.0, "mm/day": 0.0,
+                                "kg m-2 s-1": 0.0, None: 0.0}),
 }
 
 SCEN = {
@@ -86,6 +91,39 @@ SCEN = {
     "ssp370": ("SSP3-7.0",                  "ssp370", "ssp370"),
     "aaer":   ("Aerosol-only (AAER)",       "aaer",   "AAER"),
     "ghg":    ("Greenhouse-gas-only (GHG)", "ghg",    "GHG"),
+    # OUT-OF-TRAINING scenarios: the emulator never saw these forcing
+    # combinations. They have no LENS2 training tree, so their CESM2 reference
+    # comes from the CMIP6 archive instead (see CMIP6_REFS).
+    "ssp126": ("SSP1-2.6 (unseen)",         "ssp126", None),
+    "ssp245": ("SSP2-4.5 (unseen)",         "ssp245", None),
+}
+
+# The four scenarios with a held-out LENS2 reference — the default paper figure.
+# ssp126/ssp245 are opt-in via --scenarios because their reference is a
+# different ensemble with far fewer members (see CMIP6_REFS).
+DEFAULT_SCENARIOS = ["hist", "ssp370", "aaer", "ghg"]
+
+# CESM2 reference for the unseen scenarios: pre-aggregated CMIP6 ensembles on
+# the native 192x288 model grid, 2015-2100, annual, (year, member, lat, lon).
+# `tas` is what eval_aero.py already evaluates against (eval_aero.py:88-119).
+#
+# n = 3 members (r4/r10/r11) against 10-11 held-out LENS2 members: the Welch SE
+# is dominated by this side, so significance is nearly unreachable — read the
+# colours, not the hatching.
+#
+# The `_pr` files do NOT ship with the repo's data. The tas ones came out of the
+# Pangeo Google-Cloud archive, which is why precipitation was missing entirely.
+# Build them from ESGF, per scenario:
+#   python download_cmip6_cesm2.py --experiment ssp126 --variables pr \
+#          --members r4i1p1f1 r10i1p1f1 r11i1p1f1
+#   python scripts/build_cmip6_annual_ref.py --experiment ssp126 --variable pr
+# Until they exist, PRECT for these scenarios is skipped — or plotted as the
+# emulator's own anomaly under --emulator-only. Never faked.
+CMIP6_REFS = {
+    "ssp126": {"TREFHT": ("cmip6/ssp126.nc", "tas"),
+               "PRECT":  ("cmip6/ssp126_pr.nc", "pr")},
+    "ssp245": {"TREFHT": ("cmip6/ssp245.nc", "tas"),
+               "PRECT":  ("cmip6/ssp245_pr.nc", "pr")},
 }
 
 
@@ -209,6 +247,38 @@ def cesm_fields(tree_root: Path, subdir: str, members: list, var: str,
     return np.stack(decs), base, lat, lon, len(decs), yr
 
 
+def cesm_fields_cmip6(path: Path, ncvar: str, var: str, n_years: int):
+    """Same as cesm_fields, from a pre-aggregated CMIP6 ensemble file.
+
+    Shape (year, member, lat, lon) rather than one directory of chunks per
+    member. Returns base=None always: these files start in 2015, so the
+    1850-1900 baseline has to come from the historical tree — exactly as it
+    already does for ssp370.
+    """
+    meta = VARS[var]
+    ds = xr.open_dataset(path)
+    if ncvar not in ds:
+        raise KeyError(f"{path}: no {ncvar!r}")
+    u = ds[ncvar].attrs.get("units")
+    sc = meta["tree_scale"].get(u)
+    off = meta["tree_offset"].get(u, 0.0)
+    if sc is None:
+        raise ValueError(f"{path}: {ncvar} units {u!r} have no conversion to "
+                         f"{meta['unit_plain']}")
+    years = np.asarray(ds["year"].values).astype(int)
+    keep = np.where(years >= years.max() - n_years + 1)[0]
+    da = (ds[ncvar] * sc + off).isel(year=keep).mean("year")     # (mem, lat, lon)
+    da = da.transpose("member", "lat", "lon")
+    dec = da.values
+    lat, lon = ds["lat"].values, ds["lon"].values
+    mems = [str(m) for m in ds["member"].values]
+    yr = (int(years[keep].min()), int(years[keep].max()))
+    print(f"      CMIP6 {path.name}: {len(mems)} members {mems} {yr[0]}-{yr[1]}",
+          flush=True)
+    ds.close()
+    return dec, None, lat, lon, len(mems), yr
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Spatial bias maps: emulator minus held-out CESM2",
@@ -220,7 +290,10 @@ def main() -> int:
                     default="configs/config_data_ybias_BCprect.yaml")
     ap.add_argument("--vars", nargs="+", default=["TREFHT", "PRECT"],
                     choices=sorted(VARS))
-    ap.add_argument("--scenarios", nargs="+", default=list(SCEN))
+    ap.add_argument("--scenarios", nargs="+", default=DEFAULT_SCENARIOS,
+                    choices=sorted(SCEN),
+                    help="ssp126/ssp245 are OUT-OF-TRAINING and referenced "
+                         "against 3-member CMIP6 ensembles, temperature only")
     ap.add_argument("--n-years", type=int, default=10)
     ap.add_argument("--n-ref-members", type=int, default=5)
     ap.add_argument("--absolute", action="store_true",
@@ -234,6 +307,12 @@ def main() -> int:
                     help="mask grid points whose baseline precip (mm/day) is "
                          "below this before dividing; without it, dividing by a "
                          "near-zero desert baseline produces meaningless values")
+    ap.add_argument("--emulator-only", action="store_true",
+                    help="plot the emulator's OWN ensemble-mean anomaly instead "
+                         "of its difference from CESM2. The only option for "
+                         "PRECT under ssp126/ssp245, which have no CESM2 "
+                         "precipitation reference at all; no difference means "
+                         "no significance test, so nothing is hatched")
     ap.add_argument("--no-stipple", action="store_true",
                     help="omit the significance hatching")
     ap.add_argument("--allow-no-cartopy", action="store_true",
@@ -271,17 +350,41 @@ def main() -> int:
             if not p.exists():
                 print(f"[skip] {var}/{sc}: {p} not found")
                 continue
+            # Resolve the CMIP6 reference for the unseen scenarios up front: the
+            # file for a given variable may simply not have been built yet.
+            cmip6_ref = None
+            if sc in CMIP6_REFS and not args.emulator_only:
+                spec = CMIP6_REFS[sc].get(var)
+                if spec is not None and (Path(args.data_root) / spec[0]).exists():
+                    cmip6_ref = spec
+                else:
+                    _rel = spec[0] if spec else f"cmip6/{sc}_<{var}>.nc"
+                    print(f"[skip] {var}/{sc}: no CESM2 {var} reference for this "
+                          f"unseen scenario ({_rel} not found). Build it with "
+                          f"download_cmip6_cesm2.py + "
+                          f"scripts/build_cmip6_annual_ref.py, or pass "
+                          f"--emulator-only to plot the emulator's own anomaly.")
+                    continue
             print(f"\n[{var}/{sc}] emulator …", flush=True)
             edec, ebase, lat, lon, n_emu, eyr = emulator_fields(
                 p, var, args.n_years)
-            mems = unseen_members(tree_root, sub, trained.get(sc, set()))
-            if args.n_ref_members > 0:
-                mems = mems[:args.n_ref_members]
-            print(f"[{var}/{sc}] CESM2 held-out {mems} …", flush=True)
-            need_base = sc == "hist" or hist_base["cesm"] is None
-            cdec, cbase, clat, clon, n_c, cyr = cesm_fields(
-                tree_root, sub, mems, var, args.n_years,
-                want_baseline=(sc != "ssp370"))
+            if args.emulator_only:
+                # No reference at all: the panel shows the emulator's own
+                # anomaly, so nothing on the CESM2 side is loaded or read.
+                cdec, cbase, n_c, cyr = None, None, 0, eyr
+            elif cmip6_ref is not None:
+                rel, ncvar = cmip6_ref
+                print(f"[{var}/{sc}] CESM2 CMIP6 ensemble {rel} …", flush=True)
+                cdec, cbase, clat, clon, n_c, cyr = cesm_fields_cmip6(
+                    Path(args.data_root) / rel, ncvar, var, args.n_years)
+            else:
+                mems = unseen_members(tree_root, sub, trained.get(sc, set()))
+                if args.n_ref_members > 0:
+                    mems = mems[:args.n_ref_members]
+                print(f"[{var}/{sc}] CESM2 held-out {mems} …", flush=True)
+                cdec, cbase, clat, clon, n_c, cyr = cesm_fields(
+                    tree_root, sub, mems, var, args.n_years,
+                    want_baseline=(sc != "ssp370"))
             if sc == "hist":
                 hist_base = {"emu": ebase, "cesm": cbase}
             if ebase is None:
@@ -329,80 +432,123 @@ def main() -> int:
         "xtick.labelsize": 8, "ytick.labelsize": 8,
     })
 
-    nrow, ncol = len(args.vars), len([s for s in args.scenarios if s in SCEN])
+    # Only rows/columns that actually have data get an axis: asking for PRECT
+    # alongside an unseen scenario leaves that cell unreferenced, and an empty
+    # axis would render as a blank white panel in the paper figure.
+    plot_vars = [v for v in args.vars
+                 if any((v, s) in F for s in args.scenarios)]
+    plot_scen = [s for s in args.scenarios
+                 if any((v, s) in F for v in plot_vars)]
+    nrow, ncol = len(plot_vars), len(plot_scen)
     proj = dict(projection=ccrs.Robinson(central_longitude=0)) if HAVE_CARTOPY else {}
     fig, axes = plt.subplots(nrow, ncol, figsize=(3.3 * ncol, 2.15 * nrow + 0.9),
                              subplot_kw=proj, squeeze=False)
 
     rows = []
     _counts = []
-    for r, var in enumerate(args.vars):
+    for r, var in enumerate(plot_vars):
         meta = VARS[var]
         pct = (var == "PRECT") and not args.precip_mm
         unit = "%" if pct else meta["unit"]
         # common colour scale across the row so panels are comparable
         fields, masked_pct = {}, {}
-        for sc in args.scenarios:
+        for sc in plot_scen:
             if (var, sc) not in F:
                 continue
             d = F[(var, sc)]
+            solo = d["cdec"] is None          # emulator-only: no reference
             if args.absolute:
-                eM, cM = d["edec"], d["cdec"]
+                eM = d["edec"]
+                cM = None if solo else d["cdec"]
             else:
-                eM, cM = d["edec"] - d["ebase"], d["cdec"] - d["cbase"]
-            eA, cA = eM.mean(axis=0), cM.mean(axis=0)
-            spread = cM.std(axis=0, ddof=1)
+                eM = d["edec"] - d["ebase"]
+                cM = None if solo else d["cdec"] - d["cbase"]
+            eA = eM.mean(axis=0)
+            cA = None if solo else cM.mean(axis=0)
+            spread = None if solo else cM.std(axis=0, ddof=1)
             # p-values from the UNSCALED members: the percent conversion below
             # divides both ensembles by the same per-grid-point baseline, which
             # cancels in t, so significance is identical either way.
-            pval, _ = welch_p(eM, cM)
+            pval = None if solo else welch_p(eM, cM)[0]
             if pct:
-                dry = d["cbase"] < args.percent_floor
-                base = np.where(dry, np.nan, d["cbase"])
-                eA, cA, spread = (100 * eA / base, 100 * cA / base,
-                                  100 * spread / base)
-                pval = np.where(dry, np.nan, pval)   # don't hatch masked desert
+                # Without a CESM2 baseline the emulator's own is the only
+                # denominator available; it is the same field the anomaly is
+                # taken against, so the percentage stays self-consistent.
+                pbase = d["ebase"] if solo else d["cbase"]
+                dry = pbase < args.percent_floor
+                base = np.where(dry, np.nan, pbase)
+                eA = 100 * eA / base
+                if not solo:
+                    cA, spread = 100 * cA / base, 100 * spread / base
+                if pval is not None:
+                    pval = np.where(dry, np.nan, pval)  # don't hatch masked desert
                 wgt = area_w(d["lat"], d["lon"])
                 masked_pct[sc] = 100 * float(np.average(dry.astype(float),
                                                         weights=wgt))
             fields[sc] = (eA, cA, spread, pval, d)
         if not fields:
             continue
+        # The plotted quantity is the difference where there is a reference and
+        # the emulator's own anomaly where there is not; the colour scale is set
+        # from whichever is actually drawn.
+        # 99th percentile suits a DIFFERENCE field, whose tail is thin. A raw
+        # anomaly has a fat one — the ITCZ band alone reaches several hundred
+        # percent — and letting it set the scale washes out every other feature,
+        # so the emulator-only mode clips at the 95th instead and lets
+        # extend="both" carry the tail.
+        _q = 95 if args.emulator_only else 99
         vmax = float(np.nanpercentile(
-            np.abs(np.concatenate([(e - c).ravel()
+            np.abs(np.concatenate([(e if c is None else e - c).ravel()
                                    for e, c, _, _, _ in fields.values()])),
-            99)) or (meta.get("vmax_pct") if pct else meta["vmax"])
+            _q)) or (meta.get("vmax_pct") if pct else meta["vmax"])
 
         im = None
-        for c, sc in enumerate([s for s in args.scenarios if s in fields]):
+        # Iterate the FULL column list so column c means the same scenario in
+        # every row; a scenario missing from this row hides its axis instead of
+        # shifting the ones after it.
+        for c, sc in enumerate(plot_scen):
+            if sc not in fields:
+                axes[r][c].set_visible(False)
+                continue
             eA, cA, spread, pval, d = fields[sc]
             ax = axes[r][c]
-            bias = eA - cA
+            solo = cA is None
+            bias = eA if solo else eA - cA
             w = area_w(d["lat"], d["lon"])
             m = np.isfinite(bias)
-            rmse = float(np.sqrt(np.average(bias[m] ** 2, weights=w[m])))
-            # area-weighted pattern correlation of the two responses
-            ew = np.average(eA[m], weights=w[m]); cw_ = np.average(cA[m], weights=w[m])
-            cov = np.average((eA[m] - ew) * (cA[m] - cw_), weights=w[m])
-            corr = cov / np.sqrt(np.average((eA[m] - ew) ** 2, weights=w[m])
-                                 * np.average((cA[m] - cw_) ** 2, weights=w[m]))
-            frac = float(np.average((np.abs(bias[m]) < spread[m]).astype(float),
-                                    weights=w[m])) * 100
-            # significance of the emulator-minus-CESM2 difference
-            if args.no_fdr:
-                sig = np.isfinite(pval) & (pval < args.alpha)
-                p_thr = args.alpha
+            if solo:
+                # Nothing to compare against: every skill statistic below is a
+                # comparison, so report the anomaly's own area-weighted mean and
+                # leave the rest undefined rather than filling it with zeros.
+                gmean = float(np.average(bias[m], weights=w[m]))
+                rmse = corr = frac = np.nan
+                sig = np.zeros(bias.shape, dtype=bool)
+                sig_pct = raw_pct = p_thr = np.nan
             else:
-                sig, p_thr = fdr_mask(pval, 2.0 * args.alpha)
-            raw = np.isfinite(pval) & (pval < args.alpha)
-            sig_pct = float(np.average(sig[m].astype(float), weights=w[m])) * 100
-            raw_pct = float(np.average(raw[m].astype(float), weights=w[m])) * 100
+                rmse = float(np.sqrt(np.average(bias[m] ** 2, weights=w[m])))
+                # area-weighted pattern correlation of the two responses
+                ew = np.average(eA[m], weights=w[m]); cw_ = np.average(cA[m], weights=w[m])
+                cov = np.average((eA[m] - ew) * (cA[m] - cw_), weights=w[m])
+                corr = cov / np.sqrt(np.average((eA[m] - ew) ** 2, weights=w[m])
+                                     * np.average((cA[m] - cw_) ** 2, weights=w[m]))
+                frac = float(np.average((np.abs(bias[m]) < spread[m]).astype(float),
+                                        weights=w[m])) * 100
+                gmean = np.nan
+                # significance of the emulator-minus-CESM2 difference
+                if args.no_fdr:
+                    sig = np.isfinite(pval) & (pval < args.alpha)
+                    p_thr = args.alpha
+                else:
+                    sig, p_thr = fdr_mask(pval, 2.0 * args.alpha)
+                raw = np.isfinite(pval) & (pval < args.alpha)
+                sig_pct = float(np.average(sig[m].astype(float), weights=w[m])) * 100
+                raw_pct = float(np.average(raw[m].astype(float), weights=w[m])) * 100
 
             kw = dict(cmap=meta["cmap"], vmin=-vmax, vmax=vmax, shading="auto")
             if HAVE_CARTOPY:
                 kw["transform"] = ccrs.PlateCarree()
             im = ax.pcolormesh(d["lon"], d["lat"], bias, **kw)
-            if not args.no_stipple:
+            if not args.no_stipple and not solo:
                 # hatch where the emulator differs from CESM2 SIGNIFICANTLY
                 hk = dict(colors="none", hatches=["", "...."], levels=[0.5, 1.5, 2.5])
                 if HAVE_CARTOPY:
@@ -418,9 +564,14 @@ def main() -> int:
                 ax.set_title(f"{d['label']}\n{d['yr'][0]}\u2013{d['yr'][1]}"
                              f"  ({args.n_years} yr)", fontsize=9.5)
             _msk = masked_pct.get(sc)
+            # Solo panels carry only the number: the "no reference" caveat is
+            # already the loudest line of the suptitle, and repeated under every
+            # panel it is wide enough to collide with the neighbouring column.
+            _stat = (f"global mean {gmean:+.2f} {unit}" if solo else
+                     f"r = {corr:.3f}   RMSE = {rmse:.3f} {unit}\n"
+                     f"{sig_pct:.0f}% of area significantly different")
             ax.text(0.5, -0.10,
-                    f"r = {corr:.3f}   RMSE = {rmse:.3f} {unit}\n"
-                    f"{sig_pct:.0f}% of area significantly different"
+                    _stat
                     # own line: appended inline it overruns into the neighbour
                     + (f"\n({_msk:.0f}% arid, masked)" if _msk else ""),
                     transform=ax.transAxes, ha="center", va="top", fontsize=7.2,
@@ -428,7 +579,7 @@ def main() -> int:
             if c == 0:
                 ax.text(-0.06, 0.5, meta["row"], transform=ax.transAxes,
                         rotation=90, va="center", ha="right", fontsize=10)
-            if d["n_emu"] != d["n_c"]:
+            if d["n_emu"] != d["n_c"] and not solo:
                 # Unequal sizes are fine for the Welch test (that is the point
                 # of Welch), and equalising is usually IMPOSSIBLE anyway: only
                 # 10/10/11/6 CESM2 members are held out of hist/ssp370/aaer/ghg.
@@ -440,6 +591,7 @@ def main() -> int:
             _counts.append(dict(n_emu=d["n_emu"], n_cesm=d["n_c"]))
             rows.append(dict(var=var, scenario=sc, years=f"{d['yr'][0]}-{d['yr'][1]}",
                              n_emu=d["n_emu"], n_cesm=d["n_c"],
+                             emulator_gmean=round(gmean, 4),
                              pattern_corr=round(corr, 4), rmse=round(rmse, 4),
                              pct_area_significant=round(sig_pct, 1),
                              pct_area_significant_raw=round(raw_pct, 1),
@@ -452,23 +604,52 @@ def main() -> int:
             continue
         cb = fig.colorbar(im, ax=list(axes[r]), orientation="vertical",
                           fraction=0.018, pad=0.012, extend="both")
-        cb.set_label(f"emulator − CESM2 ({unit})", fontsize=8.5)
+        cb.set_label(f"emulator anomaly ({unit})" if args.emulator_only
+                     else f"emulator − CESM2 ({unit})", fontsize=8.5)
 
     _ne = sorted({r_["n_emu"] for r_ in _counts}) or [0]
     _nc = sorted({r_["n_cesm"] for r_ in _counts}) or [0]
     _fmt = lambda v: str(v[0]) if len(v) == 1 else "\u2013".join(
         (str(min(v)), str(max(v))))
     _what = "field" if args.absolute else "anomaly vs 1850\u20131900"
-    fig.suptitle(
-        f"ENSEMBLE-MEAN emulator minus held-out CESM2 "
-        f"({_fmt(_ne)} emulator vs {_fmt(_nc)} CESM2 members), "
-        f"{args.n_years}-year mean " + _what + "\n"
-        f"hatching = difference significant at p < {args.alpha:g} "
-        f"(Welch t-test"
-        + ("" if args.no_fdr else f", FDR-controlled at q = {2*args.alpha:g}") + ")"
-        + ("" if args.precip_mm else
-           "; precipitation as % of its 1850\u20131900 baseline"),
-        fontsize=9.5, y=1.005)
+    # "held-out" is only true of the LENS2 reference; the unseen scenarios are
+    # referenced against a separate CMIP6 ensemble, not a withheld part of the
+    # training ensemble.
+    _unseen = [s for s in plot_scen if s in CMIP6_REFS]
+    _ref = "CESM2" if _unseen else "held-out CESM2"
+    _pct_note = ("" if args.precip_mm or "PRECT" not in plot_vars else
+                 "; precipitation as % of its 1850\u20131900 baseline")
+    if args.emulator_only:
+        # Nothing is differenced and nothing is tested, so a title promising a
+        # bias map and a significance test would misdescribe every panel.
+        _unseen_lbl = "/".join(SCEN[s][0].split(" (")[0] for s in plot_scen)
+        # Kept to short lines: a single long suptitle widens the tight bounding
+        # box far past the panels and leaves the maps stranded in the middle.
+        fig.suptitle(
+            f"EMULATOR ensemble-mean {_what} ({_fmt(_ne)} members), "
+            f"{args.n_years}-year mean" + _pct_note + "\n"
+            f"{_unseen_lbl}: forcing combination NEVER SEEN in training\n"
+            f"NO CESM2 reference exists for this variable \u2014 the emulator's own "
+            f"projection, not verified against CESM2",
+            fontsize=9.5, y=1.005)
+    else:
+        if _unseen:
+            _un_nc = sorted({r_["n_cesm"] for r_ in rows
+                             if r_["scenario"] in _unseen}) or [0]
+            _note = (f"{'/'.join(SCEN[s][0].split(' (')[0] for s in _unseen)}: "
+                     f"forcing combination NEVER SEEN in training; CESM2 "
+                     f"reference is the {_fmt(_un_nc)}-member CMIP6 ensemble\n")
+        else:
+            _note = ""
+        fig.suptitle(
+            f"ENSEMBLE-MEAN emulator minus {_ref} "
+            f"({_fmt(_ne)} emulator vs {_fmt(_nc)} CESM2 members), "
+            f"{args.n_years}-year mean " + _what + "\n" + _note
+            + f"hatching = difference significant at p < {args.alpha:g} "
+            f"(Welch t-test"
+            + ("" if args.no_fdr else f", FDR-controlled at q = {2*args.alpha:g}") + ")"
+            + _pct_note,
+            fontsize=9.5, y=1.005)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight")
     fig.savefig(str(Path(args.out).with_suffix(".pdf")), bbox_inches="tight")
