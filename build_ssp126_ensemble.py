@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Build a per-realization symlink directory of CESM2 ssp126 tas members for
-the eval's multi-member reference loader.
+"""Build a per-realization symlink directory of CESM2 members for one variable,
+for the eval's multi-member reference loader.
 
 eval_aero.py loads the ssp126 CESM2 reference as ``data_dir/<realization>/*.nc``
 (open_mfdataset combine="by_coords", then resample to annual, then year-
@@ -16,6 +16,11 @@ whole ensemble and drop the low-forcing early period.
 Run ON LUMI (so the symlink targets resolve to real /scratch paths):
     python build_ssp126_ensemble.py
     python build_ssp126_ensemble.py --start 2015 --end 2100   # explicit window
+    python build_ssp126_ensemble.py --experiment ssp245 --variable pr
+
+The paper figures do not read these directories — they read the single
+aggregated `cmip6/<experiment>[_<variable>].nc`. Build that with
+`scripts/build_cmip6_annual_ref.py` after downloading.
 
 Then point eval_aero.py's ssp126 experiment at the directory:
     data_dir     = os.path.join(SCRATCH, "cmip6", "CESM2_ssp126_ens")
@@ -39,16 +44,31 @@ def main():
     ap.add_argument("--cmip6-dir", default=CMIP6_DIR)
     ap.add_argument("--model", default="CESM2")
     ap.add_argument("--experiment", default="ssp126")
-    ap.add_argument("--out-name", default="CESM2_ssp126_ens",
-                    help="ensemble dir created under --cmip6-dir")
+    ap.add_argument("--variable", default="tas",
+                    help="CMIP6 variable_id to group, e.g. tas or pr")
+    ap.add_argument("--table", default="Amon", help="CMIP6 table_id")
+    ap.add_argument("--out-name", default=None,
+                    help="ensemble dir created under --cmip6-dir "
+                         "(default CESM2_<experiment>_ens for tas, "
+                         "CESM2_<experiment>_<variable>_ens otherwise)")
     ap.add_argument("--start", type=int, default=2015, help="required first year")
     ap.add_argument("--end", type=int, default=2100, help="required last year")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    pat = os.path.join(args.cmip6_dir,
-                       f"tas_Amon_{args.model}_{args.experiment}_r*_gn_*.nc")
-    files = sorted(glob.glob(pat))
+    if args.out_name is None:
+        # tas keeps the historical directory name so existing eval_aero.py
+        # data_dir settings and already-built ensembles stay valid.
+        args.out_name = (f"CESM2_{args.experiment}_ens" if args.variable == "tas"
+                         else f"CESM2_{args.experiment}_{args.variable}_ens")
+
+    # Recursive: download_cmip6_cesm2.py writes a nested
+    # <experiment>/<variable>/<member>/ tree while the older files sit flat in
+    # cmip6/. `**` with recursive=True matches zero directories, so one pattern
+    # handles both.
+    name = f"{args.variable}_{args.table}_{args.model}_{args.experiment}_r*_gn_*.nc"
+    pat = os.path.join(args.cmip6_dir, "**", name)
+    files = sorted(set(glob.glob(pat, recursive=True)))
     if not files:
         raise SystemExit(f"no files match {pat}")
 

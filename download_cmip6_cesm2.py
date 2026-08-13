@@ -309,11 +309,16 @@ def discover_members(experiment, variable_id, table_id, timeout=60, verify=True)
         except Exception:
             continue
         vals = data.get("facet_counts", {}).get("facet_fields", {}).get("member_id", [])
-        for i in range(0, len(vals) - 1, 2):
-            members.add(str(vals[i]))
-        print(f"  discover_members: {len(members)} member(s) found via {node}")
-        if members:
-            break
+        new = {str(vals[i]) for i in range(0, len(vals) - 1, 2)}
+        members |= new
+        print(f"  discover_members: {len(new)} member(s) via {node} "
+              f"({len(members)} total so far)")
+    # EVERY node is queried and the results UNIONED. Stopping at the first node
+    # that returns anything under-reports badly: index nodes hold different
+    # subsets, and for CESM2 ssp126/pr the first responder lists only
+    # r1/r2/r4 while r10/r11 — the members the eval reference is built from —
+    # live on other nodes. A silent 1-of-3 member download is worse than the
+    # few extra seconds this costs.
     return sorted(members)
 
 
