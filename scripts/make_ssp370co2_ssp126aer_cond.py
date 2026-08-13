@@ -16,6 +16,8 @@ CO2/SUL/BC vars, same per-variable units/long_name attrs, regrid_method
 attr) so it drops straight into an eval_aero.py experiment entry or a
 config_data.yaml experiment_configs block with no other changes needed.
 """
+import argparse
+
 import xarray as xr
 
 EMIS_DIR = "/home/nordling/mnt/lumi_sc2/emulator_data"
@@ -23,8 +25,42 @@ SSP370_FILE = f"{EMIS_DIR}/emissions_ssp370_only_timefixed_bc.nc"
 SSP126_FILE = f"{EMIS_DIR}/emissions_ssp126_only_timefixed_co2fix_bc.nc"
 OUT_FILE = f"{EMIS_DIR}/emissions_ssp370co2_ssp126aer_bc.nc"
 
+ap = argparse.ArgumentParser(description=__doc__,
+                             formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("--emis-dir", default=EMIS_DIR)
+ap.add_argument("--start", type=int, default=None,
+                help="first year to keep (default: all)")
+ap.add_argument("--end", type=int, default=None,
+                help="last year to keep. eval_aero.py takes the GENERATION "
+                     "window straight off this file's time axis "
+                     "(eval_aero.py:363), so capping it here is what stops the "
+                     "emulator generating years the reference cannot cover — "
+                     "e.g. --end 2079 for the RAMIP ssp370-126aer run, whose "
+                     "truth stops in 2079 while the forcing runs to 2100")
+ap.add_argument("--out", default=None,
+                help="default emissions_ssp370co2_ssp126aer_bc[_<start>-<end>].nc")
+args = ap.parse_args()
+
+EMIS_DIR = args.emis_dir
+SSP370_FILE = f"{EMIS_DIR}/emissions_ssp370_only_timefixed_bc.nc"
+SSP126_FILE = f"{EMIS_DIR}/emissions_ssp126_only_timefixed_co2fix_bc.nc"
+OUT_FILE = args.out or (
+    f"{EMIS_DIR}/emissions_ssp370co2_ssp126aer_bc.nc"
+    if args.start is None and args.end is None else
+    f"{EMIS_DIR}/emissions_ssp370co2_ssp126aer_bc_"
+    f"{args.start or 'start'}-{args.end or 'end'}.nc")
+
 ds370 = xr.open_dataset(SSP370_FILE)
 ds126 = xr.open_dataset(SSP126_FILE)
+
+if args.start is not None or args.end is not None:
+    # Slice BOTH sources identically, before any assertions, so the time-axis
+    # equality check below still validates what actually gets written.
+    _sl = slice(args.start, args.end)
+    ds370 = ds370.sel(time=_sl)
+    ds126 = ds126.sel(time=_sl)
+    print(f"[window] {int(ds370.time.values[0])}-{int(ds370.time.values[-1])} "
+          f"({ds370.sizes['time']} steps)")
 
 assert (ds370.time.values == ds126.time.values).all(), "time axis mismatch"
 assert abs(ds370.lat.values - ds126.lat.values).max() < 1e-6, "lat grid mismatch"
@@ -52,6 +88,9 @@ out.attrs["description"] = (
 )
 out.attrs["co2_source"] = "emissions_ssp370_only_timefixed_bc.nc"
 out.attrs["aerosol_source"] = "emissions_ssp126_only_timefixed_co2fix_bc.nc"
+if args.start is not None or args.end is not None:
+    out.attrs["time_window"] = (f"{int(out.time.values[0])}-"
+                                f"{int(out.time.values[-1])}")
 
 out.to_netcdf(OUT_FILE)
 print(f"wrote {OUT_FILE}")

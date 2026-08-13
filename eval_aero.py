@@ -125,6 +125,39 @@ EXPERIMENTS = [
         color        = "#17becf",
     ),
     dict(
+        name         = "ssp370-126aer",
+        # RAMIP-design experiment: ssp370's CO2 with ssp126's aerosols, i.e.
+        # maximum greenhouse forcing with the aerosol mask removed. By 2100 the
+        # cond file carries 12x less SUL and 7x less BC than ssp370 at identical
+        # CO2, so the emulator should run WARMER than its own ssp370 run; that
+        # offset is the result the experiment exists to measure.
+        #
+        # NOT IN PROJECTIONS, deliberately: the TCRE panels plot against
+        # cumulative CO2, which is ssp370's here, so this scenario would overlay
+        # ssp370 rather than add information.
+        #
+        # REFERENCE IS A SINGLE MEMBER (r1i1p1f1, RAMIP activity, 2015-2079),
+        # built into the standard annual layout by
+        # scripts/build_cmip6_annual_ref.py. With n=1 there is no CESM2 spread:
+        # anything derived from inter-member variance is degenerate, and the
+        # residual is dominated by that one realization's internal variability.
+        # Do not read significance into this comparison.
+        data_dir     = os.path.join(SCRATCH, "cmip6", "ssp370-126aer.nc"),
+        # WINDOWED cond file (2015-2079). eval_aero takes the generation years
+        # off the cond file's time axis (build_cond_tensor), so capping it here
+        # is what keeps the emulator inside the RAMIP window instead of
+        # generating 21 years the reference cannot cover.
+        # Full-length 2015-2100 build: emissions_ssp370co2_ssp126aer_bc.nc
+        cond_file    = os.path.join(
+            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079.nc"),
+        realizations = [],                   # ignored: single-file ensemble
+        time_dim     = "time",
+        target_var   = "tas",
+        map_years    = [2015, 2050, 2079],
+        gen_cost     = 65,                   # ~year span; for shard load-balancing
+        color        = "#8c564b",
+    ),
+    dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
         cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc.nc"),
