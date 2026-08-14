@@ -47,7 +47,14 @@
 # Resumable: existing, verified files are skipped; partial ones resume (curl -C).
 set -uo pipefail
 
-BASE="https://data.ceda.ac.uk/badc/cmip6/data/CMIP6Plus/RAMIP/NCAR/CESM2"
+# TWO HOSTS, and using the wrong one is the whole difficulty here:
+#   data.ceda.ac.uk  browse UI + ?json listings. IGNORES the Bearer token and
+#                    serves an HTML login page with HTTP 200 for file GETs.
+#   dap.ceda.ac.uk   the actual data endpoint. Honours the token, returns the
+#                    NetCDF (verified: HTTP 206, magic bytes \x89HDF).
+# Same path on both; only the host differs.
+LIST_BASE="https://data.ceda.ac.uk/badc/cmip6/data/CMIP6Plus/RAMIP/NCAR/CESM2"
+DAP_BASE="https://dap.ceda.ac.uk/badc/cmip6/data/CMIP6Plus/RAMIP/NCAR/CESM2"
 EXPERIMENTS="ssp370-126aer ssp370"
 MEMBERS=""                      # empty = discover all from the archive listing
 VARIABLES="tas pr"
@@ -91,7 +98,8 @@ for i in d.get('items',[]):
 " "${1:-}"
 }
 
-echo "[ramip] archive   ${BASE}"
+echo "[ramip] listings  ${LIST_BASE}"
+echo "[ramip] downloads ${DAP_BASE}"
 echo "[ramip] outdir    ${OUTDIR}"
 echo "[ramip] variables ${VARIABLES}   table ${TABLE}"
 [ "${APPLY}" = "1" ] || echo "[ramip] DRY RUN — add --apply to download"
@@ -100,7 +108,7 @@ total=0; got=0; skipped=0; failed=0
 for exp in ${EXPERIMENTS}; do
     mems="${MEMBERS}"
     if [ -z "${mems}" ]; then
-        mems=$(_ls "${BASE}/${exp}" | _names dir | tr '\n' ' ')
+        mems=$(_ls "${LIST_BASE}/${exp}" | _names dir | tr '\n' ' ')
     fi
     if [ -z "${mems}" ]; then
         echo "[ramip] ${exp}: no members found (is the experiment name right?)" >&2
@@ -110,7 +118,8 @@ for exp in ${EXPERIMENTS}; do
 
     for mem in ${mems}; do
         for var in ${VARIABLES}; do
-            vdir="${BASE}/${exp}/${mem}/${TABLE}/${var}/${GRID}"
+            vdir="${LIST_BASE}/${exp}/${mem}/${TABLE}/${var}/${GRID}"
+            ddir="${DAP_BASE}/${exp}/${mem}/${TABLE}/${var}/${GRID}"
             # The version directory (vYYYYMMDD) is not fixed across experiments,
             # so it is discovered rather than hardcoded.
             ver=$(_ls "${vdir}" | _names dir | sort | tail -1)
@@ -132,7 +141,7 @@ for exp in ${EXPERIMENTS}; do
                 mkdir -p "$(dirname "${dest}")"
                 echo "  [get ] ${fn}"
                 curl -sS -L --fail --retry 3 --retry-delay 5 -C - \
-                     "${AUTH[@]}" -o "${dest}" "${vdir}/${ver}/${fn}"
+                     "${AUTH[@]}" -o "${dest}" "${ddir}/${ver}/${fn}"
                 rc=$?
                 # HTTP 200 + HTML login page is the failure mode this guards.
                 if [ "${rc}" -ne 0 ] || ! head -c4 "${dest}" 2>/dev/null | grep -qa -e 'CDF' -e 'HDF'; then
