@@ -84,11 +84,13 @@ def _gmean_members(ds, prefix):
     return np.stack([ds[n].values for n in names])          # (member, year)
 
 
-def emu_gmean(path, var):
+def emu_gmean(path, var, n_members=0):
     ds = xr.open_dataset(path)
     M = _gmean_members(ds, f"{var}_model_gmean")
     if M is None:
         raise KeyError(f"{path}: no {var}_model_gmean_m* fields")
+    if n_members and n_members < M.shape[0]:
+        M = M[:n_members]          # first N, deterministic — never random
     return ds["year"].values.astype(int), M
 
 
@@ -114,7 +116,7 @@ def _year_slice(years, lo, hi):
     return np.where((years >= lo) & (years <= hi))[0]
 
 
-def emu_maps(path, var, windows):
+def emu_maps(path, var, windows, n_members=0):
     """(lat, lon) mean map per window, from an eval NetCDF's per-member maps.
 
     Only the requested years are read. The full field is 25 members x 65 years
@@ -126,6 +128,8 @@ def emu_maps(path, var, windows):
                    key=lambda x: int(x.rsplit("_m", 1)[1]))
     if not names:
         return None, None, None, 0
+    if n_members and n_members < len(names):
+        names = names[:n_members]
     yrs = ds["year"].values.astype(int)
     out = []
     for lo, hi in windows:
@@ -182,6 +186,13 @@ def main() -> int:
                     help="eval dir holding <VAR>_ssp370.nc (--mode signal only)")
     ap.add_argument("--data-root", default=DATA)
     ap.add_argument("--experiment", default="ssp370-126aer")
+    ap.add_argument("--n-emu-members", type=int, default=0, metavar="N",
+                    help="use only the first N emulator members (0 = all). "
+                         "Set it to the CESM2 member count for a like-for-like "
+                         "comparison: with 25 vs 10 the emulator's ensemble "
+                         "mean is better converged and its band ~1.6x tighter, "
+                         "which flatters it. Selection is the first N, "
+                         "deterministic, never random.")
     ap.add_argument("--maps", action="store_true",
                     help="also write a 3-panel map figure per variable: "
                          "emulator, CESM2, and their difference, for the final "
@@ -218,7 +229,8 @@ def main() -> int:
 
         sc, off = V.get("scale", 1.0), V.get("offset", 0.0)
         cy, CM = cesm_gmean_from_ref(p_cesm, V["nc"], sc, off)
-        ey, EM = (emu_gmean(p_emu, var) if os.path.exists(p_emu) else (None, None))
+        ey, EM = (emu_gmean(p_emu, var, args.n_emu_members)
+                  if os.path.exists(p_emu) else (None, None))
 
         # ── baselines ────────────────────────────────────────────────────────
         if args.baseline == "self":
@@ -243,7 +255,7 @@ def main() -> int:
                 print(f"[{var}] hist file MISSING: {hp} — cannot build a "
                       f"baseline (use --baseline self to avoid needing it)")
                 continue
-            hy, HE = emu_gmean(hp, var)
+            hy, HE = emu_gmean(hp, var, args.n_emu_members)
             e_base = baseline_of(hy, HE)
             chy, HC = cesm_gmean_from_eval(hp, var)
             if HC is None:
@@ -268,7 +280,7 @@ def main() -> int:
             if EM is not None and not os.path.exists(pe):
                 print(f"[{var}] emulator control MISSING: {pe}")
             if have_emu:
-                ey2, EC = emu_gmean(pe, var)
+                ey2, EC = emu_gmean(pe, var, args.n_emu_members)
                 yrs = np.intersect1d(np.intersect1d(cy, ey),
                                      np.intersect1d(cy2, ey2))
             else:
@@ -427,14 +439,14 @@ def main() -> int:
                   flush=True)
             E, lat, lon, ne = emu_maps(
                 os.path.join(args.emu_dir, f"{var}_{args.experiment}.nc"),
-                var, wins)
+                var, wins, args.n_emu_members)
             C, _, _, nc2 = cesm_maps(
                 f"{args.data_root}/cmip6/ramip_{args.experiment}{suffix}.nc",
                 V["nc"], wins, sc, off)
             if args.mode == "signal":
                 Ec, _, _, _ = emu_maps(
                     os.path.join(args.emu_ctrl_dir or "", f"{var}_ssp370.nc"),
-                    var, [fin])
+                    var, [fin], args.n_emu_members)
                 Cc, _, _, _ = cesm_maps(
                     f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc",
                     V["nc"], [fin], sc, off)
