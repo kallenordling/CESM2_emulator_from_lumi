@@ -1682,6 +1682,32 @@ def _normalized_bias_bands(pct_field: np.ndarray, lat: np.ndarray):
     }
 
 
+def safe_plot(fn, *args, **kwargs):
+    """Run a plotting function; never let it abort the run.
+
+    WHY THIS EXISTS: the per-experiment loop writes TREFHT_*.nc, THEN plots,
+    THEN writes PRECT_*.nc. On 2026-08-13 a cartopy/shapely incompatibility
+    raised inside plot_anomaly_maps (GEOSException from _draw_gridliner) and
+    killed the process between those two writes, so a ~5 h 25-member
+    ssp370-126aer run produced its temperature file and silently lost the
+    precipitation field that had already been generated and was sitting in RAM.
+
+    Figures are cheap and reproducible from the NetCDF (replot_eval.py); the
+    samples are not. A plotting failure is therefore logged and stepped over,
+    not raised.
+    """
+    import traceback
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        label = getattr(fn, "__name__", str(fn))
+        print(f"  [PLOT-FAIL] {label}: {type(exc).__name__}: {exc}")
+        print(f"  [PLOT-FAIL] continuing — NetCDF output is unaffected; "
+              f"re-plot later with replot_eval.py")
+        traceback.print_exc()
+        return None
+
+
 def plot_anomaly_maps(name: str, gen_data: np.ndarray, gen_years: np.ndarray,
                       baseline_map: np.ndarray, map_years: list,
                       cesm_data: np.ndarray | None, cesm_years: np.ndarray | None,
@@ -2466,7 +2492,8 @@ def main():
         if baseline_map is not None:
             map_out = os.path.join(args.output_dir, f"anomaly_maps_{name}.png")
             print(f"  Plotting anomaly maps …")
-            norm_bias_scalars = plot_anomaly_maps(
+            norm_bias_scalars = safe_plot(
+                plot_anomaly_maps,
                 name         = name,
                 gen_data     = gen_celsius,
                 gen_years    = cond_years,
@@ -2559,7 +2586,8 @@ def main():
                 map_out_pr = os.path.join(args.output_dir,
                                           f"anomaly_maps_prect_{name}.png")
                 print(f"  Plotting PRECT anomaly maps …")
-                plot_anomaly_maps(
+                safe_plot(
+                    plot_anomaly_maps,
                     name         = name,
                     gen_data     = gen_pr,
                     gen_years    = cond_years,
@@ -2769,7 +2797,7 @@ def main():
             ts_out  = os.path.join(args.output_dir, "global_mean_anomaly.png")
             csv_out = os.path.join(args.output_dir, "global_mean_anomaly.csv")
             print(f"\n[PLOT] Time series → {ts_out}")
-            plot_timeseries(timeseries_results, ts_out)
+            safe_plot(plot_timeseries, timeseries_results, ts_out)
             print(f"[CSV]  Global anomaly + bias → {csv_out}")
             save_csv(timeseries_results, csv_out)
 
@@ -2786,7 +2814,7 @@ def main():
                 dec_pr = os.path.join(args.output_dir,
                                       "global_mean_anomaly_precip_decadal.csv")
                 print(f"[PLOT] Precip time series → {ts_pr}")
-                plot_timeseries(pr_results, ts_pr, var="PRECT", units="mm/day",
+                safe_plot(plot_timeseries, pr_results, ts_pr, var="PRECT", units="mm/day",
                                 title_word="precipitation", include_mmm=False)
                 print(f"[CSV]  Precip global anomaly + bias → {csv_pr}")
                 save_csv(pr_results, csv_pr, unit_tag="mmday")
@@ -2798,7 +2826,7 @@ def main():
             if not args.experiments:
                 tcre_out = os.path.join(args.output_dir, "tcre.png")
                 print(f"[PLOT] TCRE → {tcre_out}")
-                plot_tcre(timeseries_results, tcre_out)
+                safe_plot(plot_tcre, timeseries_results, tcre_out)
 
                 # ── ADDITIVE: normalized multiplicative-bias scalars (sibling JSON).
                 # Kept OUT of tcre_summary.json so that file stays byte-for-byte

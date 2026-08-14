@@ -59,10 +59,14 @@ VARS = {
     "TREFHT": dict(nc="tas", label="Temperature", percent=False, offset=-273.15,
                    ylab="Temperature anomaly (K, vs 1850–1900)",
                    ylab_sig="Aerosol-removal warming (K)", colour="#D55E00"),
+    # percent applies to the ANOMALY only. In signal mode the two experiments
+    # are differenced directly, so the result is an absolute mm/day difference
+    # with no baseline to divide by — labelling it "%" overstates it ~35x.
     "PRECT":  dict(nc="pr", label="Precipitation", percent=True, scale=86400.0,
                    ylab="Precipitation change (%, vs 1850–1900)",
-                   ylab_sig="Aerosol-removal precipitation change (%)",
-                   colour="#0072B2"),
+                   ylab_sig="Aerosol-removal precipitation change "
+                            "(mm day$^{-1}$)",
+                   unit_sig="mm/day", colour="#0072B2"),
 }
 C_EMU, C_CESM = "#D55E00", "#0072B2"
 
@@ -202,21 +206,37 @@ def main() -> int:
         if args.mode == "signal":
             cp = f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc"
             pe = os.path.join(args.emu_ctrl_dir or "", f"{var}_ssp370.nc")
-            if not (os.path.exists(cp) and os.path.exists(pe)):
-                print(f"[{var}] signal mode needs both controls; skipping")
+            if not os.path.exists(cp):
+                print(f"[{var}] signal mode needs {cp}; skipping")
                 continue
             cy2, CC = cesm_gmean_from_ref(cp, V["nc"], sc, off)
-            ey2, EC = emu_gmean(pe, var)
-            yrs = np.intersect1d(np.intersect1d(cy, ey), np.intersect1d(cy2, ey2))
+            # The emulator side needs BOTH its perturbed run and its control.
+            # Either can be absent — the ssp370-126aer eval crashed before
+            # writing PRECT — in which case the CESM2 signal is still shown,
+            # exactly as anomaly mode already does.
+            have_emu = EM is not None and os.path.exists(pe)
+            if EM is not None and not os.path.exists(pe):
+                print(f"[{var}] emulator control MISSING: {pe}")
+            if have_emu:
+                ey2, EC = emu_gmean(pe, var)
+                yrs = np.intersect1d(np.intersect1d(cy, ey),
+                                     np.intersect1d(cy2, ey2))
+            else:
+                yrs = np.intersect1d(cy, cy2)
             gi = lambda y, A: A[:, np.searchsorted(y, yrs)]
             c_v = gi(cy, CM).mean(0) - gi(cy2, CC).mean(0)
-            e_v = gi(ey, EM).mean(0) - gi(ey2, EC).mean(0)
             c_se = np.sqrt(gi(cy, CM).var(0, ddof=1)/CM.shape[0]
                            + gi(cy2, CC).var(0, ddof=1)/CC.shape[0])
-            e_se = np.sqrt(gi(ey, EM).var(0, ddof=1)/EM.shape[0]
-                           + gi(ey2, EC).var(0, ddof=1)/EC.shape[0])
+            nc_ = CM.shape[0]
+            if have_emu:
+                e_v = gi(ey, EM).mean(0) - gi(ey2, EC).mean(0)
+                e_se = np.sqrt(gi(ey, EM).var(0, ddof=1)/EM.shape[0]
+                               + gi(ey2, EC).var(0, ddof=1)/EC.shape[0])
+                ne_ = EM.shape[0]
+            else:
+                e_v = e_se = None
+                ne_ = 0
             ylab = V["ylab_sig"]
-            nc_, ne_ = CM.shape[0], EM.shape[0]
         else:
             yrs = cy if EM is None else np.intersect1d(cy, ey)
             Ca = anom(CM[:, np.searchsorted(cy, yrs)], c_base, V["percent"])
@@ -236,7 +256,8 @@ def main() -> int:
 
         series[var] = dict(yrs=yrs, c=c_v, cse=c_se, e=e_v, ese=e_se,
                            ylab=ylab, nc=nc_, ne=ne_,
-                           unit="%" if V["percent"] else "K")
+                           unit=(V.get("unit_sig", "K") if args.mode == "signal"
+                                 else ("%" if V["percent"] else "K")))
         print(f"[{var}] {yrs.min()}-{yrs.max()}  CESM2 {nc_} members, "
               f"emulator {ne_} members")
 
