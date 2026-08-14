@@ -285,6 +285,9 @@ def main() -> int:
                     help="ssp126/ssp245 are OUT-OF-TRAINING; their reference is "
                          "a 3-member CMIP6 ensemble and exists for TREFHT only "
                          "(a PRECT run of them is emulator-only)")
+    ap.add_argument("--dump-data", default=None, metavar="DIR",
+                    help="write the exact series plotted (per member, in the "
+                         "figure's own units) as tidy CSVs under DIR")
     ap.add_argument("--out", default=None,
                     help="default plots/paper_fig_timeseries_<var>.png")
     ap.add_argument("--year-max", type=int, default=2100)
@@ -455,6 +458,7 @@ def main() -> int:
     rows = []
     sigma_by_scen = {}
     plotted_years = []    # every year actually drawn, for the x-limit
+    dump = []             # tidy rows of exactly what is plotted, for --dump-data
 
     for sc in args.scenarios:
         label, _, sub, colour = SCEN[sc]
@@ -476,6 +480,13 @@ def main() -> int:
             Ra = anom(R[keep_r], rb)              # anomalies, per member
             r_mean = Ra.mean(axis=1, skipna=True)
             plotted_years += [float(Ra.index.min()), float(Ra.index.max())]
+            if args.dump_data:
+                for _m in Ra.columns:
+                    for _y, _v in Ra[_m].items():
+                        if np.isfinite(_v):
+                            dump.append(dict(scenario=sc, year=int(_y),
+                                             source="cesm2", member=str(_m),
+                                             value=float(_v)))
 
             # CESM2 held-out ensemble: mean dashed + member spread
             ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True),
@@ -502,6 +513,18 @@ def main() -> int:
         ax.plot(years[keep], anom(mean[keep], eb), color=colour, lw=2.6, zorder=4,
                 solid_capstyle="round", label=label)
         plotted_years += [float(years[keep].min()), float(years[keep].max())]
+        if args.dump_data:
+            _emean = anom(mean[keep], eb)
+            for _i, _y in enumerate(years[keep]):
+                dump.append(dict(scenario=sc, year=int(_y), source="emulator",
+                                 member="ensemble_mean", value=float(_emean[_i])))
+            if members is not None:
+                _em = anom(members[:, keep], eb)
+                for _j in range(_em.shape[0]):
+                    for _i, _y in enumerate(years[keep]):
+                        dump.append(dict(scenario=sc, year=int(_y),
+                                         source="emulator", member=f"m{_j+1}",
+                                         value=float(_em[_j, _i])))
 
         # ── bias panel ──────────────────────────────────────────────────────
         # Line: difference of ENSEMBLE MEANS. Band: the spread of individual
@@ -524,6 +547,14 @@ def main() -> int:
         sd_series = spread.std(axis=1, skipna=True)
         sigma_by_scen[sc] = float(sd_series.mean())
         bias_of[sc] = (common, d, sd_series)
+        if args.dump_data:
+            for _y in common:
+                dump.append(dict(scenario=sc, year=int(_y), source="bias",
+                                 member="emulator_minus_cesm2",
+                                 value=float(d.loc[_y])))
+                dump.append(dict(scenario=sc, year=int(_y), source="bias",
+                                 member="cesm2_sigma",
+                                 value=float(sd_series.loc[_y])))
 
         inside = float((d.abs() <= 2 * sd_series).mean()) * 100
         rows.append(dict(scenario=sc,
@@ -675,6 +706,15 @@ def main() -> int:
                 bbox_inches="tight", bbox_extra_artists=_extra)
     print(f"\nwrote {args.out}")
     print(f"wrote {Path(args.out).with_suffix('.pdf')}")
+
+    if args.dump_data and dump:
+        os.makedirs(args.dump_data, exist_ok=True)
+        _dp = os.path.join(args.dump_data, f"timeseries_{VAR}.csv")
+        _d = pd.DataFrame(dump)
+        _d["unit"] = META["unit_plain"]
+        _d.to_csv(_dp, index=False)
+        print(f"\n[data] {_dp}  ({len(_d)} rows: per-member anomalies, "
+              f"ensemble means and the bias/sigma series)")
 
     if rows:
         t = pd.DataFrame(rows)

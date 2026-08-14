@@ -61,8 +61,20 @@ SCEN = {
     "ssp370": ("SSP3-7.0",                  "ssp370", "ssp370", "#D55E00"),
     "aaer":   ("Aerosol-only (AAER)",       "aaer",   "AAER",   "#E69F00"),
     "ghg":    ("Greenhouse-gas-only (GHG)", "ghg",    "GHG",    "#009E73"),
+    # OUT-OF-TRAINING: no LENS2 tree. Their CESM2 side comes from the CMIP6
+    # ensembles, which paper_fig_timeseries.py writes into the same global-mean
+    # cache this script reads — so nothing extra is loaded here.
+    "ssp126": ("SSP1-2.6 (unseen)",         "ssp126", None,     "#CC79A7"),
+    "ssp245": ("SSP2-4.5 (unseen)",         "ssp245", None,     "#56B4E9"),
 }
 CFG_KEY = {k: k for k in SCEN}
+
+# The four scenarios with a held-out LENS2 reference — the default paper figure.
+DEFAULT_SCENARIOS = ["hist", "ssp370", "aaer", "ghg"]
+
+# Scenarios whose reference is the CMIP6 ensemble rather than withheld LENS2
+# members — they are labelled differently, since "held-out" would be wrong.
+CMIP6_SCEN = {"ssp126", "ssp245"}
 
 
 def unseen_members(tree_root: Path, subdir: str, trained: set) -> list:
@@ -144,6 +156,14 @@ def main() -> int:
                     help="paper_fig_timeseries.py's cached CESM2 global means "
                          "for the same --var; default "
                          "plots/heldout_cesm2_ensemble_<var>.csv")
+    ap.add_argument("--scenarios", nargs="+", default=DEFAULT_SCENARIOS,
+                    choices=sorted(SCEN),
+                    help="ssp126/ssp245 are OUT-OF-TRAINING; their reference is "
+                         "a 3-member CMIP6 ensemble, so the CESM2 histogram is "
+                         "built from 3x n_years samples instead of 10x")
+    ap.add_argument("--dump-data", default=None, metavar="DIR",
+                    help="write the pooled samples that form each histogram "
+                         "as a tidy CSV under DIR")
     ap.add_argument("--bins", type=int, default=16)
     ap.add_argument("--out", default=None)
     ap.add_argument("--csv", default=None)
@@ -157,8 +177,17 @@ def main() -> int:
     if args.tree_root is None:
         args.tree_root = os.path.join(args.data_root, "training_data", VAR)
     if args.ref_csv is None:
-        args.ref_csv = (f"plots/heldout_cesm2_ensemble.csv" if VAR == "TREFHT"
-                        else f"plots/heldout_cesm2_ensemble_{VAR}.csv")
+        # paper_fig_timeseries.py WRITES heldout_cesm2_ensemble_<VAR>.csv for
+        # every variable, including TREFHT. This script used to read an
+        # unsuffixed heldout_cesm2_ensemble.csv for TREFHT only, so the two
+        # scripts kept separate temperature caches and this one silently missed
+        # whatever the other had just added (e.g. the ssp126/ssp245 CMIP6
+        # reference). Prefer the suffixed name, fall back to the legacy one.
+        args.ref_csv = f"plots/heldout_cesm2_ensemble_{VAR}.csv"
+        _legacy = "plots/heldout_cesm2_ensemble.csv"
+        if not os.path.exists(args.ref_csv) and os.path.exists(_legacy):
+            print(f"[ref] {args.ref_csv} absent — falling back to {_legacy}")
+            args.ref_csv = _legacy
     if not os.path.exists(args.ref_csv):
         print(f"ERROR: CESM2 global-mean cache not found: {args.ref_csv}\n"
               f"Build it first (it extracts the held-out members from the "
@@ -192,7 +221,8 @@ def main() -> int:
                      if "hist" in emu_abs else np.nan)
 
     data = {}
-    for sc, (label, ncname, sub, colour) in SCEN.items():
+    for sc in args.scenarios:
+        label, ncname, sub, colour = SCEN[sc]
         if sc not in emu_abs or sc not in ref_all:
             print(f"[skip] {sc}: missing emulator or reference data")
             continue
@@ -226,6 +256,19 @@ def main() -> int:
               f"({ev.size} values = {data[sc]['n_emu']}m x {ekeep.sum()}y), "
               f"CESM2 {data[sc]['cy'][0]}-{data[sc]['cy'][1]} ({cv.size} values)")
 
+    if args.dump_data:
+        os.makedirs(args.dump_data, exist_ok=True)
+        _rows = [dict(scenario=sc,
+                      source=("cesm2" if nm == "cv" else "emulator"),
+                      value=float(v))
+                 for sc, d in data.items()
+                 for nm in ("ev", "cv") for v in d[nm]]
+        _dp = os.path.join(args.dump_data, f"histogram_{VAR}.csv")
+        _df = pd.DataFrame(_rows)
+        _df["unit"] = META["unit_plain"]
+        _df.to_csv(_dp, index=False)
+        print(f"[data] {_dp}  ({len(_df)} pooled samples)")
+
     if not data:
         print("no data", file=sys.stderr)
         return 1
@@ -244,7 +287,15 @@ def main() -> int:
         "axes.grid": True, "grid.alpha": 0.25,
     })
 
-    fig, axes = plt.subplots(2, 2, figsize=(9.6, 6.6))
+    # Grid follows the scenario count: the default four keep the 2x2 the paper
+    # uses; a two-scenario run gets one row instead of two half-empty ones.
+    _n = len(data)
+    ncol = 2 if _n > 1 else 1
+    nrow = int(np.ceil(_n / ncol))
+    fig, axes = plt.subplots(nrow, ncol, squeeze=False,
+                             figsize=(4.8 * ncol, 3.3 * nrow))
+    for _j in range(_n, nrow * ncol):
+        axes.flat[_j].set_visible(False)
     rows = []
     for i, (ax, (sc, d)) in enumerate(zip(axes.flat, data.items())):
         label, _, _, colour = SCEN[sc]
@@ -257,8 +308,9 @@ def main() -> int:
         pad = 0.05 * (hi - lo) if hi > lo else 1.0
         bins = np.linspace(lo - pad, hi + pad, args.bins + 1)
 
+        _reflab = "CESM2 (CMIP6)" if sc in CMIP6_SCEN else "CESM2 (held-out)"
         ax.hist(cv, bins=bins, density=True, histtype="stepfilled",
-                color="0.55", alpha=0.45, label="CESM2 (held-out)")
+                color="0.55", alpha=0.45, label=_reflab)
         ax.hist(ev, bins=bins, density=True, histtype="step",
                 color=colour, lw=1.8, label="Emulator")
         # No rug marks: below the axis they collided with the tick labels, and
@@ -297,7 +349,9 @@ def main() -> int:
                 color="0.25")
 
     axes.flat[0].legend(frameon=False, loc="upper left")
-    fig.suptitle(f"Emulated vs held-out CESM2 global-mean {META['title']} "
+    _refname = ("CESM2" if any(sc in CMIP6_SCEN for sc in data)
+                else "held-out CESM2")
+    fig.suptitle(f"Emulated vs {_refname} global-mean {META['title']} "
                  f"anomaly, final {args.n_years} years "
                  f"(all years x all members pooled)",
                  fontsize=10.5, y=0.995)
