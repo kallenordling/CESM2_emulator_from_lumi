@@ -20,21 +20,61 @@
 
 # shellcheck disable=SC2155
 
-LUMI_PROJECT="${LUMI_PROJECT:-462001328}"
+# ── SITE ─────────────────────────────────────────────────────────────────────
+# The variables below keep their LUMI_* names on every site. That is a
+# historical name, not a claim about the machine: ~85 files source this file
+# and read LUMI_REPO / LUMI_DATA / LUMI_ACCOUNT, and renaming them would be a
+# large diff for no behavioural gain. Only the VALUES change per site.
+#
+#   export SITE=roihu           # then everything below points at Roihu
+#
+# Roihu differs structurally from LUMI: there is no /projappl, so the repo and
+# venv live under the project's scratch instead. GPUs are NVIDIA/CUDA rather
+# than AMD/ROCm, which matters for the container and for the ROCm-specific
+# workaround in models/video_net.py.
+SITE="${SITE:-lumi}"
 
+case "${SITE}" in
+  lumi)
+    LUMI_PROJECT="${LUMI_PROJECT:-462001328}"
+    export LUMI_ACCOUNT="project_${LUMI_PROJECT}"
+    export LUMI_SCRATCH="/scratch/project_${LUMI_PROJECT}"
+    export LUMI_PROJAPPL="/projappl/project_${LUMI_PROJECT}"
+    export LUMI_REPO="${LUMI_PROJAPPL}/CESM2_emulator_from_lumi"
+    export LUMI_VENV="${LUMI_PROJAPPL}/venvs/diffesm_laif"
+    export SITE_GPU_VENDOR="amd"
+    ;;
+  roihu)
+    LUMI_PROJECT="${LUMI_PROJECT:-2019839}"
+    export LUMI_ACCOUNT="project_${LUMI_PROJECT}"
+    export LUMI_SCRATCH="/scratch/project_${LUMI_PROJECT}"
+    # No /projappl on Roihu — repo and venv live under scratch.
+    export LUMI_PROJAPPL="${LUMI_SCRATCH}"
+    export LUMI_REPO="${LUMI_SCRATCH}/CESM2_emulator_from_lumi"
+    export LUMI_VENV="${LUMI_SCRATCH}/venvs/diffesm"
+    export SITE_GPU_VENDOR="nvidia"
+    # FILL IN from scripts/probe_site.sh output before running anything:
+    export SITE_MODULE_CMD="${SITE_MODULE_CMD:-}"     # e.g. "module load pytorch"
+    export SITE_CONTAINER="${SITE_CONTAINER:-}"       # path to the .sif, if used
+    ;;
+  *)
+    echo "[lumi_env] ERROR: unknown SITE='${SITE}' (expected lumi or roihu)" >&2
+    return 1 2>/dev/null || exit 1
+    ;;
+esac
+export SITE
 export LUMI_PROJECT
-export LUMI_ACCOUNT="project_${LUMI_PROJECT}"
-export LUMI_SCRATCH="/scratch/project_${LUMI_PROJECT}"
-export LUMI_PROJAPPL="/projappl/project_${LUMI_PROJECT}"
-export LUMI_REPO="${LUMI_PROJAPPL}/CESM2_emulator_from_lumi"
-export LUMI_VENV="${LUMI_PROJAPPL}/venvs/diffesm_laif"
 export LUMI_PKGS="${LUMI_SCRATCH}/python_packages"
 export LUMI_DATA="${LUMI_SCRATCH}/emulator_data"
 export LUMI_EVAL_OUT="${LUMI_SCRATCH}/eval_output"
 
 # Container-internal view of projappl. Some launchers need this exact prefix
 # because the bind mount inside the singularity image resolves differently.
-export LUMI_REPO_PFS="/pfs/lustrep1/projappl/project_${LUMI_PROJECT}/CESM2_emulator_from_lumi"
+if [ "${SITE}" = "lumi" ]; then
+    export LUMI_REPO_PFS="/pfs/lustrep1/projappl/project_${LUMI_PROJECT}/CESM2_emulator_from_lumi"
+else
+    export LUMI_REPO_PFS="${LUMI_REPO}"   # no /pfs bind-mount view off LUMI
+fi
 
 # Make `sbatch` default to the right account even when called bare.
 export SBATCH_ACCOUNT="${LUMI_ACCOUNT}"
@@ -64,6 +104,6 @@ assert_account() {
 # One-line banner so every job log opens with the resolved configuration; a
 # misfire is then visible in the first lines instead of after hours.
 lumi_env_banner() {
-    echo "[lumi_env] LUMI_PROJECT=${LUMI_PROJECT} account=${LUMI_ACCOUNT}" \
+    echo "[lumi_env] SITE=${SITE} LUMI_PROJECT=${LUMI_PROJECT} account=${LUMI_ACCOUNT}" \
          "scratch=${LUMI_SCRATCH} repo=${LUMI_WORK_DIR}"
 }
