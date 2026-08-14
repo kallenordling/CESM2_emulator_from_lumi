@@ -116,6 +116,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["anomaly", "signal"], default="anomaly")
+    ap.add_argument("--baseline", choices=["hist", "self"], default="hist",
+                    help="'hist' references each side to its own 1850-1900 "
+                         "climatology (needs the hist eval files); 'self' uses "
+                         "the first --baseline-years of the experiment itself, "
+                         "which needs no historical run at all and cancels any "
+                         "drift the two sides carry into 2015")
+    ap.add_argument("--baseline-years", type=int, default=10,
+                    help="length of the --baseline self window")
     ap.add_argument("--vars", nargs="+", default=["TREFHT", "PRECT"],
                     choices=sorted(VARS))
     ap.add_argument("--emu-dir", default=None,
@@ -132,7 +140,8 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.out is None:
-        args.out = f"plots/paper_fig_ramip_{args.mode}.png"
+        _tag = args.mode + ("" if args.baseline == "hist" else "_selfbase")
+        args.out = f"plots/paper_fig_ramip_{_tag}.png"
     if args.emu_hist_dir is None:
         args.emu_hist_dir = args.emu_ctrl_dir
 
@@ -157,20 +166,38 @@ def main() -> int:
         cy, CM = cesm_gmean_from_ref(p_cesm, V["nc"], sc, off)
         ey, EM = (emu_gmean(p_emu, var) if os.path.exists(p_emu) else (None, None))
 
-        # ── baselines from each side's own historical ────────────────────────
-        hp = os.path.join(args.emu_hist_dir, f"{var}_hist.nc")
-        if not os.path.exists(hp):
-            print(f"[{var}] hist file MISSING: {hp} — cannot build a baseline")
-            continue
-        hy, HE = emu_gmean(hp, var)
-        e_base = baseline_of(hy, HE)
-        chy, HC = cesm_gmean_from_eval(hp, var)
-        if HC is None:
-            print(f"[{var}] no CESM2 members in {hp}")
-            continue
-        c_base = baseline_of(chy, HC)
-        print(f"[{var}] baseline 1850-1900: emulator {e_base:.4f}, "
-              f"CESM2 {c_base:.4f}")
+        # ── baselines ────────────────────────────────────────────────────────
+        if args.baseline == "self":
+            # First N years of the experiment, per side. No historical run is
+            # involved, so this also removes any 1850-1900 climatology mismatch
+            # and any drift accumulated before 2015 from the comparison — what
+            # is left is purely the change ACROSS the experiment.
+            b0 = int(cy.min()); b1 = b0 + args.baseline_years - 1
+            cm = (cy >= b0) & (cy <= b1)
+            c_base = float(np.nanmean(CM[:, cm]))
+            if EM is None:
+                e_base = np.nan
+            else:
+                em = (ey >= b0) & (ey <= b1)
+                e_base = float(np.nanmean(EM[:, em]))
+            print(f"[{var}] baseline {b0}-{b1} (experiment's own first "
+                  f"{args.baseline_years} yr): emulator {e_base:.4f}, "
+                  f"CESM2 {c_base:.4f}")
+        else:
+            hp = os.path.join(args.emu_hist_dir or "", f"{var}_hist.nc")
+            if not os.path.exists(hp):
+                print(f"[{var}] hist file MISSING: {hp} — cannot build a "
+                      f"baseline (use --baseline self to avoid needing it)")
+                continue
+            hy, HE = emu_gmean(hp, var)
+            e_base = baseline_of(hy, HE)
+            chy, HC = cesm_gmean_from_eval(hp, var)
+            if HC is None:
+                print(f"[{var}] no CESM2 members in {hp}")
+                continue
+            c_base = baseline_of(chy, HC)
+            print(f"[{var}] baseline 1850-1900: emulator {e_base:.4f}, "
+                  f"CESM2 {c_base:.4f}")
 
         if args.mode == "signal":
             cp = f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc"
@@ -203,7 +230,9 @@ def main() -> int:
                 e_v = Ea.mean(0)
                 e_se = Ea.std(0, ddof=1) / np.sqrt(Ea.shape[0])
                 ne_ = Ea.shape[0]
-            ylab = V["ylab"]
+            ylab = (V["ylab"] if args.baseline == "hist"
+                    else V["ylab"].replace("1850–1900", f"{int(yrs.min())}–"
+                                           f"{int(yrs.min())+args.baseline_years-1}"))
 
         series[var] = dict(yrs=yrs, c=c_v, cse=c_se, e=e_v, ese=e_se,
                            ylab=ylab, nc=nc_, ne=ne_,
@@ -245,7 +274,8 @@ def main() -> int:
                     continue
                 d += [dict(var=var, year=int(y), source=nm, value=float(v),
                            unit=s["unit"]) for y, v in zip(s["yrs"], arr)]
-        p = os.path.join(args.dump_data, f"ramip_{args.mode}.csv")
+        p = os.path.join(args.dump_data, f"ramip_{args.mode}"
+                         f"{'' if args.baseline == 'hist' else '_selfbase'}.csv")
         pd.DataFrame(d).to_csv(p, index=False)
         print(f"[data] {p}")
 
@@ -282,7 +312,10 @@ def main() -> int:
         if args.mode == "signal":
             ax.axhline(0, ls=":", lw=0.8, color="0.3")
     axes[-1][0].set_xlabel("Year")
-    ttl = ("SSP3-7.0 with SSP1-2.6 aerosols (ssp370-126aer): anomaly vs 1850–1900"
+    _bl = ("1850–1900" if args.baseline == "hist" else
+           f"{int(list(series.values())[0]['yrs'].min())}–"
+           f"{int(list(series.values())[0]['yrs'].min())+args.baseline_years-1}")
+    ttl = (f"SSP3-7.0 with SSP1-2.6 aerosols (ssp370-126aer): anomaly vs {_bl}"
            if args.mode == "anomaly" else
            "ssp370-126aer minus ssp370: the aerosol-removal signal")
     fig.suptitle(ttl + "\nbands: ±2 SE of the ensemble mean", fontsize=10,
