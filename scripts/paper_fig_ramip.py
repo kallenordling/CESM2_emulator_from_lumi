@@ -1,40 +1,42 @@
 #!/usr/bin/env python3
 """
-Paper figure: the RAMIP aerosol-removal signal, emulator vs CESM2.
+Paper figure: the RAMIP ssp370-126aer experiment, emulator vs CESM2.
 
-THE QUANTITY IS A DIFFERENCE OF DIFFERENCES
--------------------------------------------
-RAMIP's ssp370-126aer is ssp370's greenhouse forcing with ssp126's aerosols.
-The signal it isolates is
+TWO VIEWS, --mode
+-----------------
+anomaly (default)
+    The experiment's own response: ssp370-126aer as an ANOMALY vs each side's
+    own 1850-1900 climatology. Temperature in K, precipitation as percent
+    change (a few hundredths of a mm/day means nothing without the ~2.9 mm/day
+    it is relative to — same convention as paper_fig_timeseries.py).
 
-    dT(t) = ssp370-126aer(t) - ssp370(t)
+signal
+    The aerosol-removal signal, ssp370-126aer MINUS ssp370, computed separately
+    on each side. That is the quantity RAMIP exists to isolate, and it needs no
+    baseline at all because the control subtracts the climatology.
 
-i.e. the warming unmasked by removing the aerosol load, and it is computed
-SEPARATELY on each side. That construction is what makes the comparison fair:
-each side differences against its own control, so any climatological offset
-between emulator and CESM2 cancels exactly and no 1850-1900 baseline is needed.
+Each side is referenced to ITSELF in both views — the emulator to its own
+emulated historical, CESM2 to CESM2 historical — so any climatological offset
+between them cancels and what is compared is the RESPONSE.
 
-Both controls must come from the same ensemble as their perturbed run. CESM2
-uses RAMIP's own 10-member ssp370, NOT the 3-member CMIP6 ssp370 — differencing
-across ensembles would leave a model-configuration difference in the answer.
+For --mode signal the CESM2 control is RAMIP's OWN 10-member ssp370, not the
+3-member CMIP6 ssp370: differencing across ensembles would leave a
+model-configuration difference inside the answer.
 
 UNCERTAINTY
 -----------
-Bands are the standard error of the difference of two ensemble means,
-
-    SE = sqrt(s_a^2/n_a + s_b^2/n_b)
-
-which is the right scale for "could this difference be sampling noise?", and is
-~sqrt(n) smaller than the inter-member spread. Note the two sides' spreads mean
-different things: CESM2's is climate internal variability, the emulator's is
-diffusion sampling noise. Neither is an uncertainty on the FORCED response in
-the same sense, so read the bands as sampling error, not as model spread.
+Bands are +/-2 x the standard error of the ensemble mean (or of the difference
+of two means, in signal mode), which is the right scale for "could this be
+sampling noise". The two sides' spreads mean different things — CESM2's is
+climate internal variability, the emulator's is diffusion sampling noise — so
+read the bands as sampling error, not as model uncertainty.
 
 Usage
 -----
     python scripts/paper_fig_ramip.py \\
-        --emu-pert  <eval>/ramip_ens25/TREFHT_ssp370-126aer.nc \\
-        --emu-ctrl  <eval>/ep0490_ens25/TREFHT_ssp370.nc
+        --emu-pert <eval>/ramip_ens25/TREFHT_ssp370-126aer.nc \\
+        --emu-hist <eval>/ep0490_ens25/TREFHT_hist.nc
+    # add --vars TREFHT PRECT once the emulator's PRECT run exists
 """
 
 import argparse
@@ -47,144 +49,203 @@ import pandas as pd
 import xarray as xr
 
 DATA = "/home/nordling/mnt/lumi_sc/emulator_data"
+BASELINE = (1850, 1900)
+
 VARS = {
-    "TREFHT": dict(nc="tas", label="Temperature", unit="K", cmap="RdBu_r",
-                   ylab="Aerosol-removal warming (K)"),
-    "PRECT":  dict(nc="pr", label="Precipitation", unit="mm day$^{-1}$",
-                   cmap="BrBG", scale=86400.0,
-                   ylab="Aerosol-removal precipitation change (mm day$^{-1}$)"),
+    # The eval NetCDFs store the CESM2 reference already converted (tas K->degC,
+    # pr -> mm/day), while the ramip_*.nc references hold raw CMIP6 units. The
+    # baseline comes from the former and the series from the latter, so the
+    # reference must be converted here or an "anomaly" of 274 K comes out.
+    "TREFHT": dict(nc="tas", label="Temperature", percent=False, offset=-273.15,
+                   ylab="Temperature anomaly (K, vs 1850–1900)",
+                   ylab_sig="Aerosol-removal warming (K)", colour="#D55E00"),
+    "PRECT":  dict(nc="pr", label="Precipitation", percent=True, scale=86400.0,
+                   ylab="Precipitation change (%, vs 1850–1900)",
+                   ylab_sig="Aerosol-removal precipitation change (%)",
+                   colour="#0072B2"),
 }
 C_EMU, C_CESM = "#D55E00", "#0072B2"
 
 
-def area_w(lat, lon):
-    return np.broadcast_to(np.cos(np.deg2rad(np.asarray(lat)))[:, None],
-                           (len(lat), len(lon)))
-
-
-def cesm(path, ncvar, scale=1.0):
-    """(years, members, lat, lon) from an annual multi-member reference."""
-    ds = xr.open_dataset(path)
-    da = (ds[ncvar] * scale).transpose("year", "member", "lat", "lon")
-    return (ds["year"].values.astype(int), da.values,
-            ds["lat"].values, ds["lon"].values)
-
-
-def emulator(path, var):
-    """(years, members, lat, lon) from an eval NetCDF's per-member maps."""
-    ds = xr.open_dataset(path)
+def _gmean_members(ds, prefix):
+    """Per-member global-mean series already stored in an eval NetCDF."""
     names = sorted([v for v in ds.data_vars
-                    if re.fullmatch(rf"{var}_model_m\d+", v)],
+                    if re.fullmatch(rf"{prefix}_m\d+", v)],
                    key=lambda x: int(x.rsplit("_m", 1)[1]))
     if not names:
-        raise KeyError(f"{path}: no per-member {var}_model_m* fields")
-    M = np.stack([ds[n].values for n in names])          # (mem, yr, lat, lon)
-    return (ds["year"].values.astype(int), M.transpose(1, 0, 2, 3),
-            ds["lat"].values, ds["lon"].values)
+        return None
+    return np.stack([ds[n].values for n in names])          # (member, year)
 
 
-def gmean(F, lat, lon):
-    """(year, member, lat, lon) -> (year, member) area-weighted global mean."""
-    w = area_w(lat, lon)
-    return (F * w).sum(axis=(2, 3)) / w.sum()
+def emu_gmean(path, var):
+    ds = xr.open_dataset(path)
+    M = _gmean_members(ds, f"{var}_model_gmean")
+    if M is None:
+        raise KeyError(f"{path}: no {var}_model_gmean_m* fields")
+    return ds["year"].values.astype(int), M
+
+
+def cesm_gmean_from_eval(path, var):
+    """CESM2 reference global means as stored in an eval NetCDF (hist)."""
+    ds = xr.open_dataset(path)
+    M = _gmean_members(ds, f"{var}_cesm_gmean")
+    if M is None:
+        return None, None
+    return ds["year"].values.astype(int), M
+
+
+def cesm_gmean_from_ref(path, ncvar, scale=1.0, offset=0.0):
+    """CESM2 global means computed from an annual multi-member reference."""
+    ds = xr.open_dataset(path)
+    w = np.cos(np.deg2rad(ds["lat"]))
+    g = (ds[ncvar] * scale + offset).weighted(w).mean(("lat", "lon"))
+    g = g.transpose("member", "year")
+    return ds["year"].values.astype(int), g.values
+
+
+def baseline_of(years, M):
+    m = (years >= BASELINE[0]) & (years <= BASELINE[1])
+    return float(np.nanmean(M[:, m])) if m.any() else np.nan
+
+
+def anom(M, base, percent):
+    return 100.0 * (M - base) / base if percent else M - base
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--var", default="TREFHT", choices=sorted(VARS))
-    ap.add_argument("--emu-pert", required=True,
-                    help="eval NetCDF for the emulator's ssp370-126aer run")
-    ap.add_argument("--emu-ctrl", required=True,
-                    help="eval NetCDF for the emulator's ssp370 run "
-                         "(same checkpoint, or the comparison is meaningless)")
-    ap.add_argument("--cesm-pert", default=None)
-    ap.add_argument("--cesm-ctrl", default=None)
+    ap.add_argument("--mode", choices=["anomaly", "signal"], default="anomaly")
+    ap.add_argument("--vars", nargs="+", default=["TREFHT", "PRECT"],
+                    choices=sorted(VARS))
+    ap.add_argument("--emu-dir", default=None,
+                    help="eval dir holding <VAR>_ssp370-126aer.nc")
+    ap.add_argument("--emu-hist-dir", default=None,
+                    help="eval dir holding <VAR>_hist.nc for the baselines")
+    ap.add_argument("--emu-ctrl-dir", default=None,
+                    help="eval dir holding <VAR>_ssp370.nc (--mode signal only)")
     ap.add_argument("--data-root", default=DATA)
-    ap.add_argument("--n-years", type=int, default=10,
-                    help="final-decade window for the map panels")
+    ap.add_argument("--experiment", default="ssp370-126aer")
     ap.add_argument("--out", default=None)
     ap.add_argument("--csv", default=None)
     ap.add_argument("--dump-data", default=None, metavar="DIR")
     args = ap.parse_args()
 
-    V = VARS[args.var]
-    suffix = "" if args.var == "TREFHT" else f"_{V['nc']}"
-    if args.cesm_pert is None:
-        args.cesm_pert = f"{args.data_root}/cmip6/ramip_ssp370-126aer{suffix}.nc"
-    if args.cesm_ctrl is None:
-        args.cesm_ctrl = f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc"
     if args.out is None:
-        args.out = f"plots/paper_fig_ramip_{args.var}.png"
+        args.out = f"plots/paper_fig_ramip_{args.mode}.png"
+    if args.emu_hist_dir is None:
+        args.emu_hist_dir = args.emu_ctrl_dir
 
-    for p in (args.emu_pert, args.emu_ctrl, args.cesm_pert, args.cesm_ctrl):
-        if not os.path.exists(p):
-            print(f"ERROR: missing input {p}", file=sys.stderr)
-            if "PRECT" in p or V["nc"] == "pr":
-                print("       (the emulator's PRECT run for ssp370-126aer was "
-                      "never written — its eval crashed in plotting before "
-                      "that stage)", file=sys.stderr)
-            return 1
-
-    sc = V.get("scale", 1.0)
-    print(f"[{args.var}] loading …", flush=True)
-    cy, CP, lat, lon = cesm(args.cesm_pert, V["nc"], sc)
-    _,  CC, _, _     = cesm(args.cesm_ctrl, V["nc"], sc)
-    ey, EP, _, _     = emulator(args.emu_pert, args.var)
-    sy, EC, _, _     = emulator(args.emu_ctrl, args.var)
-
-    yrs = np.intersect1d(np.intersect1d(cy, ey), sy)
-    ic, ie, isx = (np.searchsorted(cy, yrs), np.searchsorted(ey, yrs),
-                   np.searchsorted(sy, yrs))
-    CP, CC, EP, EC = CP[ic], CC[ic], EP[ie], EC[isx]
-    print(f"  CESM2    {CP.shape[1]} vs {CC.shape[1]} members")
-    print(f"  emulator {EP.shape[1]} vs {EC.shape[1]} members")
-    print(f"  years    {yrs.min()}-{yrs.max()}")
-
-    # ── global-mean signal, per side ─────────────────────────────────────────
-    gCP, gCC = gmean(CP, lat, lon), gmean(CC, lat, lon)
-    gEP, gEC = gmean(EP, lat, lon), gmean(EC, lat, lon)
-    c_sig = gCP.mean(1) - gCC.mean(1)
-    e_sig = gEP.mean(1) - gEC.mean(1)
-    c_se = np.sqrt(gCP.var(1, ddof=1)/gCP.shape[1] + gCC.var(1, ddof=1)/gCC.shape[1])
-    e_se = np.sqrt(gEP.var(1, ddof=1)/gEP.shape[1] + gEC.var(1, ddof=1)/gEC.shape[1])
-
-    rows = []
-    for lo in range(int(yrs.min())//10*10, int(yrs.max()), 10):
-        hi = lo + 9
-        m = (yrs >= lo) & (yrs <= hi)
-        if m.sum() < 5:
+    series, missing = {}, []
+    for var in args.vars:
+        V = VARS[var]
+        suffix = "" if var == "TREFHT" else f"_{V['nc']}"
+        p_emu = os.path.join(args.emu_dir, f"{var}_{args.experiment}.nc")
+        p_cesm = f"{args.data_root}/cmip6/ramip_{args.experiment}{suffix}.nc"
+        if not os.path.exists(p_emu):
+            # The emulator's PRECT run for this experiment does not exist yet:
+            # its eval crashed in the plotting stage before writing it. Report
+            # it plainly and keep the CESM2 side, rather than dropping the
+            # variable silently.
+            print(f"[{var}] emulator file MISSING: {p_emu}")
+            missing.append(var)
+        if not os.path.exists(p_cesm):
+            print(f"[{var}] CESM2 reference MISSING: {p_cesm} — skipping")
             continue
-        rows.append(dict(decade=f"{lo}-{hi}",
-                         cesm=round(float(c_sig[m].mean()), 3),
-                         cesm_se=round(float(np.sqrt((c_se[m]**2).mean())), 3),
-                         emulator=round(float(e_sig[m].mean()), 3),
-                         emulator_se=round(float(np.sqrt((e_se[m]**2).mean())), 3),
-                         difference=round(float(e_sig[m].mean()-c_sig[m].mean()), 3),
-                         unit=V["unit"] if args.var == "TREFHT" else "mm/day"))
-    t = pd.DataFrame(rows)
-    print(f"\nAerosol-removal signal ({args.var})")
-    print(t.to_string(index=False))
 
-    # ── final-decade maps ────────────────────────────────────────────────────
-    keep = yrs >= yrs.max() - args.n_years + 1
-    c_map = CP[keep].mean((0, 1)) - CC[keep].mean((0, 1))
-    e_map = EP[keep].mean((0, 1)) - EC[keep].mean((0, 1))
-    w = area_w(lat, lon)
-    pc = float(np.average(c_map, weights=w)); pe = float(np.average(e_map, weights=w))
-    cw = np.average((c_map-pc)*(e_map-pe), weights=w)
-    corr = cw / np.sqrt(np.average((c_map-pc)**2, weights=w)
-                        * np.average((e_map-pe)**2, weights=w))
-    print(f"\nfinal decade {int(yrs[keep].min())}-{int(yrs[keep].max())}: "
-          f"pattern r = {corr:.3f}, global mean emu {pe:+.3f} vs CESM2 {pc:+.3f}")
+        sc, off = V.get("scale", 1.0), V.get("offset", 0.0)
+        cy, CM = cesm_gmean_from_ref(p_cesm, V["nc"], sc, off)
+        ey, EM = (emu_gmean(p_emu, var) if os.path.exists(p_emu) else (None, None))
+
+        # ── baselines from each side's own historical ────────────────────────
+        hp = os.path.join(args.emu_hist_dir, f"{var}_hist.nc")
+        if not os.path.exists(hp):
+            print(f"[{var}] hist file MISSING: {hp} — cannot build a baseline")
+            continue
+        hy, HE = emu_gmean(hp, var)
+        e_base = baseline_of(hy, HE)
+        chy, HC = cesm_gmean_from_eval(hp, var)
+        if HC is None:
+            print(f"[{var}] no CESM2 members in {hp}")
+            continue
+        c_base = baseline_of(chy, HC)
+        print(f"[{var}] baseline 1850-1900: emulator {e_base:.4f}, "
+              f"CESM2 {c_base:.4f}")
+
+        if args.mode == "signal":
+            cp = f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc"
+            pe = os.path.join(args.emu_ctrl_dir or "", f"{var}_ssp370.nc")
+            if not (os.path.exists(cp) and os.path.exists(pe)):
+                print(f"[{var}] signal mode needs both controls; skipping")
+                continue
+            cy2, CC = cesm_gmean_from_ref(cp, V["nc"], sc, off)
+            ey2, EC = emu_gmean(pe, var)
+            yrs = np.intersect1d(np.intersect1d(cy, ey), np.intersect1d(cy2, ey2))
+            gi = lambda y, A: A[:, np.searchsorted(y, yrs)]
+            c_v = gi(cy, CM).mean(0) - gi(cy2, CC).mean(0)
+            e_v = gi(ey, EM).mean(0) - gi(ey2, EC).mean(0)
+            c_se = np.sqrt(gi(cy, CM).var(0, ddof=1)/CM.shape[0]
+                           + gi(cy2, CC).var(0, ddof=1)/CC.shape[0])
+            e_se = np.sqrt(gi(ey, EM).var(0, ddof=1)/EM.shape[0]
+                           + gi(ey2, EC).var(0, ddof=1)/EC.shape[0])
+            ylab = V["ylab_sig"]
+            nc_, ne_ = CM.shape[0], EM.shape[0]
+        else:
+            yrs = cy if EM is None else np.intersect1d(cy, ey)
+            Ca = anom(CM[:, np.searchsorted(cy, yrs)], c_base, V["percent"])
+            c_v = Ca.mean(0)
+            c_se = Ca.std(0, ddof=1) / np.sqrt(Ca.shape[0])
+            nc_ = Ca.shape[0]
+            if EM is None:
+                e_v = e_se = None; ne_ = 0
+            else:
+                Ea = anom(EM[:, np.searchsorted(ey, yrs)], e_base, V["percent"])
+                e_v = Ea.mean(0)
+                e_se = Ea.std(0, ddof=1) / np.sqrt(Ea.shape[0])
+                ne_ = Ea.shape[0]
+            ylab = V["ylab"]
+
+        series[var] = dict(yrs=yrs, c=c_v, cse=c_se, e=e_v, ese=e_se,
+                           ylab=ylab, nc=nc_, ne=ne_,
+                           unit="%" if V["percent"] else "K")
+        print(f"[{var}] {yrs.min()}-{yrs.max()}  CESM2 {nc_} members, "
+              f"emulator {ne_} members")
+
+    if not series:
+        print("no data to plot", file=sys.stderr)
+        return 1
+
+    # ── numbers ──────────────────────────────────────────────────────────────
+    rows = []
+    for var, s in series.items():
+        for lo in range(int(s["yrs"].min())//10*10, int(s["yrs"].max()), 10):
+            hi = lo + 9
+            m = (s["yrs"] >= lo) & (s["yrs"] <= hi)
+            if m.sum() < 8:      # skip partial decades (2015-2019 is not "2010-2019")
+                continue
+            r = dict(var=var, decade=f"{lo}-{hi}", unit=s["unit"],
+                     cesm=round(float(s["c"][m].mean()), 3),
+                     cesm_se=round(float(np.sqrt((s["cse"][m]**2).mean())), 3))
+            if s["e"] is not None:
+                r.update(emulator=round(float(s["e"][m].mean()), 3),
+                         emulator_se=round(float(np.sqrt((s["ese"][m]**2).mean())), 3),
+                         difference=round(float(s["e"][m].mean()-s["c"][m].mean()), 3))
+            rows.append(r)
+    t = pd.DataFrame(rows)
+    print(f"\nssp370-126aer, {args.mode}")
+    print(t.to_string(index=False))
 
     if args.dump_data:
         os.makedirs(args.dump_data, exist_ok=True)
-        d = [dict(year=int(y), source=s, value=float(v))
-             for s, arr in (("cesm2", c_sig), ("emulator", e_sig),
-                            ("cesm2_se", c_se), ("emulator_se", e_se))
-             for y, v in zip(yrs, arr)]
-        p = os.path.join(args.dump_data, f"ramip_signal_{args.var}.csv")
+        d = []
+        for var, s in series.items():
+            for nm, arr in (("cesm2", s["c"]), ("cesm2_se", s["cse"]),
+                            ("emulator", s["e"]), ("emulator_se", s["ese"])):
+                if arr is None:
+                    continue
+                d += [dict(var=var, year=int(y), source=nm, value=float(v),
+                           unit=s["unit"]) for y, v in zip(s["yrs"], arr)]
+        p = os.path.join(args.dump_data, f"ramip_{args.mode}.csv")
         pd.DataFrame(d).to_csv(p, index=False)
         print(f"[data] {p}")
 
@@ -192,53 +253,40 @@ def main() -> int:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    try:
-        import cartopy.crs as ccrs
-        HAVE_CARTOPY = True
-    except ImportError:
-        HAVE_CARTOPY = False
-        print("[warn] cartopy missing — map panels will be flat lat/lon")
-
-    plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9,
+    plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9.5,
                          "axes.spines.top": False, "axes.spines.right": False,
                          "axes.grid": True, "grid.alpha": 0.25})
-    fig = plt.figure(figsize=(9.6, 6.4))
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.25, 1.0], hspace=0.32, wspace=0.10)
-    ax = fig.add_subplot(gs[0, :])
-
-    for sig, se, c, lab, n in ((c_sig, c_se, C_CESM, "CESM2 (RAMIP)", CP.shape[1]),
-                               (e_sig, e_se, C_EMU, "Emulator", EP.shape[1])):
-        ax.fill_between(yrs, sig-2*se, sig+2*se, color=c, alpha=0.20, lw=0)
-        ax.plot(yrs, sig, color=c, lw=2.2, label=f"{lab} ({n} members)")
-    ax.axhline(0, ls=":", lw=0.8, color="0.3")
-    ax.set_ylabel(V["ylab"]); ax.set_xlabel("Year")
-    ax.set_xlim(yrs.min(), yrs.max())
-    ax.legend(frameon=False, loc="upper left")
-    ax.set_title("(a)  Aerosol-removal signal: ssp370-126aer minus ssp370, "
-                 "each side vs its own control", loc="left", fontsize=9.5)
-    ax.text(0.99, 0.03, "bands: ±2 SE of the difference of ensemble means",
-            transform=ax.transAxes, ha="right", va="bottom",
-            fontsize=7.4, color="0.3")
-
-    vmax = float(np.nanpercentile(np.abs(np.concatenate(
-        [c_map.ravel(), e_map.ravel()])), 99)) or 1.0
-    proj = dict(projection=ccrs.Robinson(central_longitude=0)) if HAVE_CARTOPY else {}
-    im = None
-    for j, (M, ttl) in enumerate(((c_map, "CESM2 (RAMIP)"), (e_map, "Emulator"))):
-        axm = fig.add_subplot(gs[1, j], **proj)
-        kw = dict(cmap=V["cmap"], vmin=-vmax, vmax=vmax, shading="auto")
-        if HAVE_CARTOPY:
-            kw["transform"] = ccrs.PlateCarree()
-        im = axm.pcolormesh(lon, lat, M, **kw)
-        if HAVE_CARTOPY:
-            axm.coastlines(linewidth=0.35, color="0.25"); axm.set_global()
-        axm.set_title(f"({'bc'[j]})  {ttl}   {int(yrs[keep].min())}–"
-                      f"{int(yrs[keep].max())}", loc="left", fontsize=9.5)
-    cb = fig.colorbar(im, ax=[fig.axes[1], fig.axes[2]], orientation="vertical",
-                      fraction=0.02, pad=0.012, extend="both")
-    cb.set_label(f"aerosol-removal signal ({V['unit']})", fontsize=8.5)
-    fig.text(0.5, 0.02, f"pattern correlation r = {corr:.3f}", ha="center",
-             fontsize=8.5, color="0.25")
+    n = len(series)
+    fig, axes = plt.subplots(n, 1, figsize=(8.4, 3.3*n + 0.4), squeeze=False,
+                             sharex=True)
+    for i, (var, s) in enumerate(series.items()):
+        ax = axes[i][0]
+        ax.fill_between(s["yrs"], s["c"]-2*s["cse"], s["c"]+2*s["cse"],
+                        color=C_CESM, alpha=0.20, lw=0)
+        ax.plot(s["yrs"], s["c"], color=C_CESM, lw=2.2,
+                label=f"CESM2 (RAMIP, {s['nc']} members)")
+        if s["e"] is not None:
+            ax.fill_between(s["yrs"], s["e"]-2*s["ese"], s["e"]+2*s["ese"],
+                            color=C_EMU, alpha=0.20, lw=0)
+            ax.plot(s["yrs"], s["e"], color=C_EMU, lw=2.2,
+                    label=f"Emulator ({s['ne']} members)")
+        else:
+            ax.text(0.5, 0.08, "emulator run for this variable not generated yet",
+                    transform=ax.transAxes, ha="center", fontsize=8.5,
+                    color=C_EMU, style="italic")
+        ax.set_ylabel(s["ylab"])
+        ax.legend(frameon=False, loc="upper left")
+        ax.set_title(f"({'abc'[i]})  {VARS[var]['label']}", loc="left",
+                     fontsize=10)
+        ax.set_xlim(s["yrs"].min(), s["yrs"].max())
+        if args.mode == "signal":
+            ax.axhline(0, ls=":", lw=0.8, color="0.3")
+    axes[-1][0].set_xlabel("Year")
+    ttl = ("SSP3-7.0 with SSP1-2.6 aerosols (ssp370-126aer): anomaly vs 1850–1900"
+           if args.mode == "anomaly" else
+           "ssp370-126aer minus ssp370: the aerosol-removal signal")
+    fig.suptitle(ttl + "\nbands: ±2 SE of the ensemble mean", fontsize=10,
+                 y=1.005)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight")
@@ -247,6 +295,10 @@ def main() -> int:
     if args.csv:
         t.to_csv(args.csv, index=False)
         print(f"wrote {args.csv}")
+    if missing:
+        print(f"\nNOT PLOTTED (emulator side): {', '.join(missing)} — the eval "
+              f"that produced {args.experiment} crashed in its plotting stage "
+              f"before writing them. Rerun it to complete the figure.")
     return 0
 
 
