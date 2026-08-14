@@ -327,6 +327,10 @@ def main() -> int:
                          "the false discovery rate at q=2*alpha; with ~55k grid "
                          "points the raw test flags ~alpha of the map by chance")
     ap.add_argument("--out", default="plots/paper_fig_maps.png")
+    ap.add_argument("--dump-data", default=None, metavar="DIR",
+                    help="write the GRIDDED fields behind each panel (emulator "
+                         "anomaly, CESM2 anomaly, their difference, p-value and "
+                         "significance mask) as a tidy CSV under DIR")
     ap.add_argument("--csv", default=None)
     args = ap.parse_args()
 
@@ -446,6 +450,7 @@ def main() -> int:
 
     rows = []
     _counts = []
+    grid_dump = []          # gridded panel fields, for --dump-data
     for r, var in enumerate(plot_vars):
         meta = VARS[var]
         pct = (var == "PRECT") and not args.precip_mm
@@ -543,6 +548,21 @@ def main() -> int:
                 raw = np.isfinite(pval) & (pval < args.alpha)
                 sig_pct = float(np.average(sig[m].astype(float), weights=w[m])) * 100
                 raw_pct = float(np.average(raw[m].astype(float), weights=w[m])) * 100
+
+            if args.dump_data:
+                _lat2, _lon2 = np.meshgrid(d["lat"], d["lon"], indexing="ij")
+                _n = bias.size
+                _blk = dict(var=np.repeat(var, _n), scenario=np.repeat(sc, _n),
+                            years=np.repeat(f"{d['yr'][0]}-{d['yr'][1]}", _n),
+                            lat=_lat2.ravel(), lon=_lon2.ravel(),
+                            emulator=eA.ravel(),
+                            cesm2=(np.full(_n, np.nan) if solo else cA.ravel()),
+                            difference=bias.ravel(),
+                            p_value=(np.full(_n, np.nan) if pval is None
+                                     else pval.ravel()),
+                            significant=sig.ravel().astype(int),
+                            unit=np.repeat(unit if pct else meta["unit_plain"], _n))
+                grid_dump.append(pd.DataFrame(_blk))
 
             kw = dict(cmap=meta["cmap"], vmin=-vmax, vmax=vmax, shading="auto")
             if HAVE_CARTOPY:
@@ -655,6 +675,16 @@ def main() -> int:
     fig.savefig(str(Path(args.out).with_suffix(".pdf")), bbox_inches="tight")
     print(f"\nwrote {args.out}")
     print(f"wrote {Path(args.out).with_suffix('.pdf')}")
+
+    if args.dump_data and grid_dump:
+        os.makedirs(args.dump_data, exist_ok=True)
+        _dp = os.path.join(args.dump_data, "maps_gridded.csv")
+        _g = pd.concat(grid_dump, ignore_index=True)
+        for _c in ("lat", "lon", "emulator", "cesm2", "difference", "p_value"):
+            _g[_c] = _g[_c].astype(float).round(5)
+        _g.to_csv(_dp, index=False)
+        print(f"\n[data] {_dp}  ({len(_g)} grid points across "
+              f"{len(grid_dump)} panels)")
 
     t = pd.DataFrame(rows)
     print("\nSpatial comparison")
