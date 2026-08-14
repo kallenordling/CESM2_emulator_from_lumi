@@ -107,6 +107,47 @@ def cesm_gmean_from_ref(path, ncvar, scale=1.0, offset=0.0):
     return ds["year"].values.astype(int), g.values
 
 
+def _year_slice(years, lo, hi):
+    return np.where((years >= lo) & (years <= hi))[0]
+
+
+def emu_maps(path, var, windows):
+    """(lat, lon) mean map per window, from an eval NetCDF's per-member maps.
+
+    Only the requested years are read. The full field is 25 members x 65 years
+    x 192 x 288 (~0.9 GB over the mount); the baseline and final decades are
+    20 years of it.
+    """
+    ds = xr.open_dataset(path)
+    names = sorted([v for v in ds.data_vars if re.fullmatch(rf"{var}_model_m\d+", v)],
+                   key=lambda x: int(x.rsplit("_m", 1)[1]))
+    if not names:
+        return None, None, None, 0
+    yrs = ds["year"].values.astype(int)
+    out = []
+    for lo, hi in windows:
+        idx = _year_slice(yrs, lo, hi)
+        acc = None
+        for n in names:                      # accumulate to avoid a big stack
+            v = ds[n].isel(year=idx).values.mean(axis=0)
+            acc = v if acc is None else acc + v
+        out.append(acc / len(names))
+    return out, ds["lat"].values, ds["lon"].values, len(names)
+
+
+def cesm_maps(path, ncvar, windows, scale=1.0, offset=0.0):
+    """Same, from an annual multi-member reference (year, member, lat, lon)."""
+    ds = xr.open_dataset(path)
+    yrs = ds["year"].values.astype(int)
+    da = ds[ncvar]
+    out = []
+    for lo, hi in windows:
+        idx = _year_slice(yrs, lo, hi)
+        out.append((da.isel(year=idx).mean(("year", "member")).values * scale
+                    + offset))
+    return out, ds["lat"].values, ds["lon"].values, ds.sizes["member"]
+
+
 def baseline_of(years, M):
     m = (years >= BASELINE[0]) & (years <= BASELINE[1])
     return float(np.nanmean(M[:, m])) if m.any() else np.nan
@@ -138,6 +179,12 @@ def main() -> int:
                     help="eval dir holding <VAR>_ssp370.nc (--mode signal only)")
     ap.add_argument("--data-root", default=DATA)
     ap.add_argument("--experiment", default="ssp370-126aer")
+    ap.add_argument("--maps", action="store_true",
+                    help="also write a 3-panel map figure per variable: "
+                         "emulator, CESM2, and their difference, for the final "
+                         "--n-years of the experiment")
+    ap.add_argument("--n-years", type=int, default=10,
+                    help="length of the final-decade window used by --maps")
     ap.add_argument("--out", default=None)
     ap.add_argument("--csv", default=None)
     ap.add_argument("--dump-data", default=None, metavar="DIR")
@@ -349,6 +396,99 @@ def main() -> int:
     if args.csv:
         t.to_csv(args.csv, index=False)
         print(f"wrote {args.csv}")
+    # ── map panels ───────────────────────────────────────────────────────────
+    if args.maps:
+        try:
+            import cartopy.crs as ccrs
+            proj = dict(projection=ccrs.Robinson(central_longitude=0))
+            HAVE_CARTOPY = True
+        except ImportError:
+            proj, HAVE_CARTOPY = {}, False
+            print("[warn] cartopy missing — flat lat/lon panels")
+
+        for var, s in series.items():
+            if s["e"] is None:
+                print(f"[maps] {var}: no emulator run — skipping maps")
+                continue
+            V = VARS[var]
+            sc, off = V.get("scale", 1.0), V.get("offset", 0.0)
+            suffix = "" if var == "TREFHT" else f"_{V['nc']}"
+            y0, y1 = int(s["yrs"].min()), int(s["yrs"].max())
+            fin = (y1 - args.n_years + 1, y1)
+            base = (y0, y0 + args.baseline_years - 1)
+            # anomaly mode differences the final decade against the baseline
+            # window; signal mode differences the two EXPERIMENTS instead, so
+            # each side needs its control's final decade rather than a baseline.
+            wins = [fin, base]
+            print(f"[maps] {var}: reading final {fin} and baseline {base} …",
+                  flush=True)
+            E, lat, lon, ne = emu_maps(
+                os.path.join(args.emu_dir, f"{var}_{args.experiment}.nc"),
+                var, wins)
+            C, _, _, nc2 = cesm_maps(
+                f"{args.data_root}/cmip6/ramip_{args.experiment}{suffix}.nc",
+                V["nc"], wins, sc, off)
+            if args.mode == "signal":
+                Ec, _, _, _ = emu_maps(
+                    os.path.join(args.emu_ctrl_dir or "", f"{var}_ssp370.nc"),
+                    var, [fin])
+                Cc, _, _, _ = cesm_maps(
+                    f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc",
+                    V["nc"], [fin], sc, off)
+                e_map, c_map = E[0] - Ec[0], C[0] - Cc[0]
+                what = "aerosol-removal signal"
+            else:
+                e_map, c_map = E[0] - E[1], C[0] - C[1]
+                what = f"anomaly vs {base[0]}–{base[1]}"
+                if V["percent"]:
+                    e_map = 100.0 * e_map / np.where(E[1] == 0, np.nan, E[1])
+                    c_map = 100.0 * c_map / np.where(C[1] == 0, np.nan, C[1])
+            d_map = e_map - c_map
+
+            w = np.cos(np.deg2rad(lat))[:, None] * np.ones((1, len(lon)))
+            m = np.isfinite(e_map) & np.isfinite(c_map)
+            pe = np.average(e_map[m], weights=w[m])
+            pc = np.average(c_map[m], weights=w[m])
+            corr = (np.average((e_map[m]-pe)*(c_map[m]-pc), weights=w[m])
+                    / np.sqrt(np.average((e_map[m]-pe)**2, weights=w[m])
+                              * np.average((c_map[m]-pc)**2, weights=w[m])))
+            rmse = np.sqrt(np.average(d_map[m]**2, weights=w[m]))
+            unit = "%" if (V["percent"] and args.mode != "signal") else \
+                   ("K" if var == "TREFHT" else "mm day$^{-1}$")
+            print(f"[maps] {var}: emulator {pe:+.3f}, CESM2 {pc:+.3f}, "
+                  f"pattern r = {corr:.3f}, RMSE = {rmse:.3f}")
+
+            fig, axes = plt.subplots(1, 3, figsize=(13.2, 3.4),
+                                     subplot_kw=proj, squeeze=False)
+            # Shared scale for the two fields so they are visually comparable;
+            # the difference gets its own, much smaller, symmetric scale.
+            vmax = float(np.nanpercentile(
+                np.abs(np.concatenate([e_map.ravel(), c_map.ravel()])), 99))
+            dmax = float(np.nanpercentile(np.abs(d_map), 99)) or vmax
+            for j, (M, ttl, vm, cmap) in enumerate((
+                    (e_map, f"Emulator ({ne} members)", vmax, V.get("cmap", "RdBu_r")),
+                    (c_map, f"CESM2 RAMIP ({nc2} members)", vmax, V.get("cmap", "RdBu_r")),
+                    (d_map, "Emulator − CESM2", dmax, "PuOr_r"))):
+                ax = axes[0][j]
+                kw = dict(cmap=cmap, vmin=-vm, vmax=vm, shading="auto")
+                if HAVE_CARTOPY:
+                    kw["transform"] = ccrs.PlateCarree()
+                im = ax.pcolormesh(lon, lat, M, **kw)
+                if HAVE_CARTOPY:
+                    ax.coastlines(linewidth=0.35, color="0.25"); ax.set_global()
+                ax.set_title(f"({'abc'[j]})  {ttl}", loc="left", fontsize=9.5)
+                cb = fig.colorbar(im, ax=ax, orientation="horizontal",
+                                  fraction=0.05, pad=0.04, extend="both")
+                cb.set_label(unit, fontsize=8)
+            fig.suptitle(f"{var} {what}, {fin[0]}–{fin[1]}   "
+                         f"(pattern r = {corr:.3f}, RMSE = {rmse:.3f} "
+                         f"{unit.replace('$^{-1}$','/day') if 'mm' in unit else unit})",
+                         fontsize=10, y=1.04)
+            mp = os.path.splitext(args.out)[0] + f"_maps_{var}.png"
+            fig.savefig(mp, bbox_inches="tight")
+            fig.savefig(os.path.splitext(mp)[0] + ".pdf", bbox_inches="tight")
+            print(f"wrote {mp}")
+
     if missing:
         print(f"\nNOT PLOTTED (emulator side): {', '.join(missing)} — the eval "
               f"that produced {args.experiment} crashed in its plotting stage "
