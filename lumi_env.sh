@@ -43,19 +43,35 @@ case "${SITE}" in
     export LUMI_REPO="${LUMI_PROJAPPL}/CESM2_emulator_from_lumi"
     export LUMI_VENV="${LUMI_PROJAPPL}/venvs/diffesm_laif"
     export SITE_GPU_VENDOR="amd"
+    export SITE_MODULE_CMD="${SITE_MODULE_CMD:-module use /appl/local/laifs/modules; module load lumi-aif-singularity-bindings}"
+    export SITE_CONTAINER="${SITE_CONTAINER:-/appl/local/laifs/containers/lumi-multitorch-latest.sif}"
+    export SITE_GPU_PARTITION="${SITE_GPU_PARTITION:-standard-g}"
+    export SITE_GPUS_PER_NODE="${SITE_GPUS_PER_NODE:-8}"
+    export SITE_GRES="${SITE_GRES:-gpu:8}"
     ;;
   roihu)
+    # Verified from scripts/probe_site.sh on roihu-gpu-login2, 2026-08-14.
     LUMI_PROJECT="${LUMI_PROJECT:-2019839}"
     export LUMI_ACCOUNT="project_${LUMI_PROJECT}"
-    export LUMI_SCRATCH="/scratch/project_${LUMI_PROJECT}"
-    # No /projappl on Roihu — repo and venv live under scratch.
-    export LUMI_PROJAPPL="${LUMI_SCRATCH}"
-    export LUMI_REPO="${LUMI_SCRATCH}/CESM2_emulator_from_lumi"
-    export LUMI_VENV="${LUMI_SCRATCH}/venvs/diffesm"
+    export LUMI_SCRATCH="/scratch/project_${LUMI_PROJECT}"   # 250 G, 180-day cleanup
+    export LUMI_PROJAPPL="/projappl/project_${LUMI_PROJECT}" # 15 G — code only
+    export LUMI_REPO="${LUMI_PROJAPPL}/CESM2_emulator_from_lumi"
+    export LUMI_VENV="${LUMI_PROJAPPL}/venvs/diffesm"
     export SITE_GPU_VENDOR="nvidia"
-    # FILL IN from scripts/probe_site.sh output before running anything:
-    export SITE_MODULE_CMD="${SITE_MODULE_CMD:-}"     # e.g. "module load pytorch"
-    export SITE_CONTAINER="${SITE_CONTAINER:-}"       # path to the .sif, if used
+    # NO CONTAINER NEEDED. Roihu ships PyTorch as a module and has no site .sif
+    # images, so the LUMI pattern (singularity exec + injected venv) has nothing
+    # to mirror. Load the module instead; use tykky (0.5.2) only if extra
+    # packages are required beyond what the module provides.
+    export SITE_MODULE_CMD="${SITE_MODULE_CMD:-module load python-pytorch/2.10}"
+    export SITE_CONTAINER=""
+    # GH200, 4 per node. Partitions available to project_2019839:
+    #   gputest        15 min   (smoke tests)
+    #   gpuinteractive 12 h
+    #   gpumedium      1-12:00  (the workhorse)
+    #   gpularge       1-12:00
+    export SITE_GPU_PARTITION="${SITE_GPU_PARTITION:-gpumedium}"
+    export SITE_GPUS_PER_NODE="${SITE_GPUS_PER_NODE:-4}"
+    export SITE_GRES="${SITE_GRES:-gpu:gh200:4}"
     ;;
   *)
     echo "[lumi_env] ERROR: unknown SITE='${SITE}' (expected lumi or roihu)" >&2
