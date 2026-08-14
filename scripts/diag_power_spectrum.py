@@ -124,12 +124,29 @@ def main() -> int:
     ap.add_argument("--field", choices=["internal", "anomaly"], default="internal")
     ap.add_argument("--n-years", type=int, default=30,
                     help="use the last N years of the experiment")
+    ap.add_argument("--space", choices=["physical", "normalized"],
+                    default="physical",
+                    help="'physical' = the field as stored (degC, mm/day). "
+                         "'normalized' re-applies NORM_FN, i.e. the space the "
+                         "model was actually TRAINED and scored in — for PRECT "
+                         "that is (log1p(mm/day) - mean)/std. Comparing the two "
+                         "separates a genuine failure to resolve small scales "
+                         "(deficit in BOTH spaces) from one manufactured by the "
+                         "convex expm1 back-transform (deficit in physical "
+                         "space only). log1p is pointwise and exactly "
+                         "invertible, so it cannot remove spatial variance by "
+                         "itself; only its interaction with MSE can.")
     ap.add_argument("--lat-max", type=float, default=60.0,
                     help="exclude poleward of this, where zonal wavelength "
                          "collapses and the grid is badly anisotropic")
-    ap.add_argument("--out", default="plots/diag_power_spectrum.png")
-    ap.add_argument("--csv", default="plots/power_spectrum.csv")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--csv", default=None)
     args = ap.parse_args()
+    tag = "" if args.space == "physical" else "_normspace"
+    if args.out is None:
+        args.out = f"plots/diag_power_spectrum{tag}.png"
+    if args.csv is None:
+        args.csv = f"plots/power_spectrum{tag}.csv"
 
     rows, spectra = [], {}
     for var in args.vars:
@@ -145,6 +162,21 @@ def main() -> int:
             continue
         print(f"[{var}] emulator {E.shape[0]} members, CESM2 {C.shape[0]} members, "
               f"{args.n_years} yr, |lat|<={args.lat_max:g}")
+
+        if args.space == "normalized":
+            # Round-trip is exact for the emulator (the eval denormalised these
+            # very arrays), and puts CESM2 in the same space, so the ratio is
+            # computed where the loss actually acted.
+            # scripts/ is not the repo root; put the root on the path so the
+            # normalisation used in TRAINING is the one applied here, rather
+            # than a copy that could drift from it.
+            sys.path.insert(0, os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))
+            from data.climate_dataset import NORM_FN
+            if var not in NORM_FN:
+                print(f"[{var}] no NORM_FN entry — cannot use --space normalized")
+                continue
+            E, C = NORM_FN[var](E), NORM_FN[var](C)
 
         Pe = (zonal_power(prepare(E, args.field), lat, args.lat_max)
               / dof_correction(args.field, E.shape[0]))
@@ -166,7 +198,8 @@ def main() -> int:
                 k_break = int(k[i]); break
         # total variance ratio, and the ratio restricted to the small scales
         small = k >= 20
-        rows.append(dict(var=var, field=args.field, experiment=args.experiment,
+        rows.append(dict(var=var, field=args.field, space=args.space,
+                         experiment=args.experiment,
                          n_emu=E.shape[0], n_cesm=C.shape[0],
                          total_power_ratio=round(float(Pe.sum()/Pc.sum()), 4),
                          ratio_k1_5=round(float(Pe[:5].sum()/Pc[:5].sum()), 4),
@@ -223,7 +256,8 @@ def main() -> int:
             ax.text(kb, 0.05, f" deficit from k={int(kb)}", color="#D55E00",
                     fontsize=8, va="bottom")
     fig.suptitle(f"Zonal power spectra, {args.experiment}, "
-                 f"{args.field} field, last {args.n_years} yr, "
+                 f"{args.field} field, {args.space} space, "
+                 f"last {args.n_years} yr, "
                  f"|lat| <= {args.lat_max:g}°\n"
                  f"ratio < 1 = emulator has LESS variance at that scale",
                  fontsize=10, y=1.01)
