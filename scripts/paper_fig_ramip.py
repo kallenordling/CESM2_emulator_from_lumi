@@ -62,7 +62,10 @@ VARS = {
     # percent applies to the ANOMALY only. In signal mode the two experiments
     # are differenced directly, so the result is an absolute mm/day difference
     # with no baseline to divide by — labelling it "%" overstates it ~35x.
+    # BrBG, not the temperature RdBu_r: brown=drying, green=wetting is the
+    # precipitation convention, and red-for-wet reads as backwards.
     "PRECT":  dict(nc="pr", label="Precipitation", percent=True, scale=86400.0,
+                   cmap="BrBG",
                    ylab="Precipitation change (%, vs 1850–1900)",
                    ylab_sig="Aerosol-removal precipitation change "
                             "(mm day$^{-1}$)",
