@@ -68,6 +68,13 @@ MODEL_CONFIG="${MODEL_CONFIG:-}"
 DATA_CONFIG="${DATA_CONFIG:-}"
 # Per-channel CFG scales: < 1.0 reduces CO2 warming, > 1.0 amplifies aerosol cooling.
 # Set to 1.0 (default) to disable CFG and use direct conditioning (single forward pass).
+# Sampling steps: overridable so the sampler can be A/B'd without editing this
+# file. The grid-scale power diagnostic needs exactly that — TREFHT carries 4.6x
+# too much variance at the grid scale and PRECT only 0.41x, which is the
+# signature of a mis-set denoising schedule, and the test is to raise this and
+# re-measure (scripts/diag_power_spectrum.py).
+SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
 GUIDANCE_CO2="${GUIDANCE_CO2:-1.0}"
 GUIDANCE_SUL="${GUIDANCE_SUL:-1.0}"
 GUIDANCE_BC="${GUIDANCE_BC:-1.0}"
@@ -103,6 +110,7 @@ MEMBERS="${members:-${MEMBERS:-5}}"
 # bare `VAR=val sbatch ...` prefix does NOT reliably propagate on LUMI.
 echo "[EVAL-CFG] CHECKPOINT=${CHECKPOINT:-<empty>}"
 echo "[EVAL-CFG] OUTPUT_DIR=${OUTPUT_DIR}"
+echo "[EVAL-CFG] SAMPLE_STEPS=${SAMPLE_STEPS} BATCH_SIZE=${BATCH_SIZE}"
 echo "[EVAL-CFG] EXPERIMENTS=${EXPERIMENTS:-<all>}  MEMBERS=${MEMBERS}  GUIDANCE_CO2=${GUIDANCE_CO2} GUIDANCE_SUL=${GUIDANCE_SUL} GUIDANCE_BC=${GUIDANCE_BC} NULL_BC=${NULL_BC}"
 echo "[EVAL-CFG] MODEL_CONFIG=${MODEL_CONFIG:-<default configs/config_aero.yaml>}  DATA_CONFIG=${DATA_CONFIG:-<default configs/config_data.yaml>}"
 if [ -z "${CHECKPOINT}" ]; then
@@ -139,8 +147,8 @@ fi
 
 PY_ARGS="${CKPT_FLAG} ${RUNS_FLAG} \
     --output-dir ${OUTPUT_DIR} \
-    --sample-steps 50 \
-    --batch-size 16 \
+    --sample-steps ${SAMPLE_STEPS} \
+    --batch-size ${BATCH_SIZE} \
     --guidance-co2 ${GUIDANCE_CO2} \
     --guidance-sul ${GUIDANCE_SUL} \
     --guidance-bc ${GUIDANCE_BC} \
