@@ -455,6 +455,19 @@ class ClimateDataset(Dataset):
         # e.g.  n_components_cond=[10, 40]  → 10 EOFs for CO2, 40 for SO2
         n_components_target: Optional[Union[int, list[int]]] = None,
         n_components_cond:   Optional[Union[int, list[int]]] = None,
+        # ── previous-state conditioning (AR-1 style), OPT-IN ──────────────────
+        # Append the PREVIOUS timestep's first target variable as an extra
+        # conditioning channel, so the model can carry year-to-year memory.
+        # Measured motivation: CESM2's global-mean temperature has lag-1
+        # autocorrelation +0.435 while the emulator's is -0.028, because f=1
+        # makes every year an independent sample (scripts/diag_interannual.py).
+        # CESM2's lag-2 is only +0.077 — far below the 0.189 an AR(1) with
+        # phi=0.435 would give — so ONE previous step carries essentially all
+        # of the memory and a single extra channel is the right size of fix.
+        #
+        # DEFAULT OFF: with it off the cond tensor is byte-identical to before,
+        # so existing checkpoints and configs are unaffected.
+        prev_target_channel: bool = False,
         # Per-channel spatial gaussian σ (in gridpoints) applied to normalised
         # cond fields before PCA.  None or 0 disables smoothing for that channel.
         # Used to suppress fine-scale inventory artefacts (shipping lanes, flight
@@ -478,6 +491,7 @@ class ClimateDataset(Dataset):
         external_climatology: Optional[torch.Tensor] = None,
     ):
         self.seq_len = seq_len
+        self.prev_target_channel = prev_target_channel
         self.realizations = realizations
         # data_dir may be a single tree (one mfdataset holding ALL target vars,
         # legacy) or a LIST of one tree per target var (e.g. TREFHT and PRECT
@@ -737,6 +751,9 @@ class ClimateDataset(Dataset):
         self.dataset_cond = _ds_cond[self.cond_vars]#.sel({self.time_dim: selected_years})
         raw_cond.close()
         del raw_cond
+
+        if self.prev_target_channel:
+            self._append_prev_target_channel()
 
         # ── Spatial smoothing on conditioning (before PCA) ───────────────────
         # Applied per-channel via cond_smooth_sigma list. Removes line features
@@ -1081,6 +1098,65 @@ class ClimateDataset(Dataset):
         if self.cond_only:
             return len(self.dataset_cond[self.time_dim]) - self.seq_len + 1
         return len(self.xr_data[self.time_dim]) - self.seq_len + 1
+
+    def _append_prev_target_channel(self):
+        """Append the previous timestep's first target variable to the cond tensor.
+
+        Gives the model an explicit state in which to carry memory — the AR-1
+        term that f=1 otherwise makes impossible. Measured motivation
+        (scripts/diag_interannual.py): the emulator's global-mean temperature
+        has lag-1 autocorrelation -0.028 against CESM2's +0.435. CESM2's lag-2
+        is only +0.077, far below the 0.189 an AR(1) with phi=0.435 implies, so
+        ONE previous step carries essentially all of the memory and a single
+        extra channel is the right size of fix.
+
+        THE TIME AXIS MUST BE EVENLY SPACED for this to mean "previous year".
+        _select_years subsamples training to every 5th historical year and every
+        other future year, so shifting by one ELEMENT there would quietly give a
+        5-year lag and the model would learn the wrong memory. That is checked
+        and raises rather than training on a silent mistake.
+
+        The first timestep has no predecessor and keeps its own field
+        (persistence). Zeros would be far out of distribution for a normalised
+        map and would teach the model that "no history" looks like a uniform
+        anomaly everywhere.
+
+        THIS IS TEACHER FORCING: the true previous state is supplied at training
+        time. At inference the model must be fed its OWN previous output, which
+        is a separate change in the eval loop; the gap between the two is the
+        usual exposure-bias risk, and this project has already seen the sampled
+        level drift without any feedback loop at all
+        (see memory: training_not_diverging_eval_noise).
+        """
+        if self.tensor_data is None:
+            raise RuntimeError(
+                "prev_target_channel needs the target tensor; it cannot be "
+                "combined with cond_only=True"
+            )
+        t = getattr(self, "_time_values", None)
+        if t is not None and len(t) > 1:
+            steps = np.diff(np.asarray(t))
+            if not (steps == steps[0]).all():
+                raise ValueError(
+                    "prev_target_channel requires an evenly spaced time axis; "
+                    f"got irregular steps {sorted(set(steps.tolist()))[:5]}. "
+                    "Training subsamples years (_select_years) — override it to "
+                    "a contiguous range before enabling this."
+                )
+            if steps[0] != 1:
+                print(f"[DATASET] prev_target_channel: time step is {steps[0]}, "
+                      f"not 1 — the 'previous' state is {steps[0]} steps back.")
+
+        prev = self.tensor_data[0:1].clone()          # (1, T, H, W), first target
+        prev[:, 1:] = self.tensor_data[0:1, :-1]      # shift forward one step
+        # prev[:, 0] keeps its own value: persistence at the boundary
+        n_before = self.tensor_data_cond.shape[0]
+        self.tensor_data_cond = torch.cat(
+            [self.tensor_data_cond, prev], dim=0
+        ).contiguous()
+        print(f"[DATASET] prev_target_channel ON: cond channels {n_before} -> "
+              f"{self.tensor_data_cond.shape[0]} "
+              f"(appended previous-step {self.vars[0]})")
 
     def __getitem__(self, idx: int):
         """Defines how to get a specific index from the dataset"""

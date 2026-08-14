@@ -6,6 +6,7 @@ import pandas as pd
 import xarray as xr
 import s3fs
 import os
+import glob
 import re
 from joblib import Parallel, delayed
 
@@ -18,6 +19,20 @@ parser.add_argument("--output-dir", default=f"{L.DATA}/training_data",
                     help="Root output directory; data saved to <output-dir>/<variable>/")
 parser.add_argument("--n-jobs",     type=int, default=4,
                     help="Parallel save workers")
+parser.add_argument("--monthly", action="store_true",
+                    help="Keep MONTHLY resolution instead of collapsing to annual "
+                         "means. The AWS catalog is monthly either way; the "
+                         "default groupby('time.year').mean() is what throws the "
+                         "seasonal cycle away. Needed for seq_len>1 training, "
+                         "and for aerosols in particular, whose forcing depends "
+                         "on WHEN they are emitted (insolation, monsoon washout, "
+                         "BC-on-snow are all seasonal). ~12x the data: budget "
+                         "~80 MB per member-year per variable against ~200 kB "
+                         "annual.")
+parser.add_argument("--skip-existing", action="store_true",
+                    help="Skip any realization whose output directory already "
+                         "holds chunk files, so an interrupted download resumes "
+                         "instead of re-fetching everything.")
 args = parser.parse_args()
 
 N_JOBS = args.n_jobs
@@ -60,9 +75,18 @@ for variable in args.variable:
     print(f"\n[LOAD] {variable}")
     catalog_subset = catalog.search(variable=variable, frequency='monthly', forcing_variant="cmip6")
     dsets = catalog_subset.to_dataset_dict(storage_options={'anon': True})
-    historical = dsets['atm.historical.monthly.cmip6'].groupby('time.year').mean()
-    future     = dsets['atm.ssp370.monthly.cmip6'].groupby('time.year').mean()
-    merged_by_var[variable] = xr.concat([historical, future], dim='year')
+    historical = dsets['atm.historical.monthly.cmip6']
+    future     = dsets['atm.ssp370.monthly.cmip6']
+    if args.monthly:
+        # Keep every month. The concat dim stays 'time', which is also what
+        # ClimateDataset expects when time_dim="time".
+        merged_by_var[variable] = xr.concat([historical, future], dim='time')
+        print(f"  [{variable}] MONTHLY: "
+              f"{merged_by_var[variable].sizes.get('time', '?')} timesteps")
+    else:
+        historical = historical.groupby('time.year').mean()
+        future     = future.groupby('time.year').mean()
+        merged_by_var[variable] = xr.concat([historical, future], dim='year')
 
 # Intersect member_id across all variables to guarantee alignment
 common_members = None
@@ -83,8 +107,20 @@ for variable, merged in merged_by_var.items():
     output_dir = os.path.join(args.output_dir, variable)
     merged = merged.sel(member_id=common_members)
 
-    print(f"  {len(common_members)} members → {output_dir}")
+    todo = common_members
+    if args.skip_existing:
+        # A member counts as done only if its directory holds chunk files; an
+        # empty directory from a killed run is retried rather than skipped.
+        done = [m for m in common_members
+                if glob.glob(os.path.join(output_dir, m, "chunk_*.nc"))]
+        todo = [m for m in common_members if m not in set(done)]
+        print(f"  --skip-existing: {len(done)} already present, {len(todo)} to fetch")
+    if not todo:
+        print(f"  nothing to do for {variable}")
+        continue
+
+    print(f"  {len(todo)} members → {output_dir}")
     Parallel(n_jobs=N_JOBS, backend="multiprocessing")(
-        delayed(save_dataset)(merged, m, output_dir, NUM_CHUNKS) for m in common_members
+        delayed(save_dataset)(merged, m, output_dir, NUM_CHUNKS) for m in todo
     )
-    print(f"  Saved {len(common_members)} members to {output_dir}")
+    print(f"  Saved {len(todo)} members to {output_dir}")
