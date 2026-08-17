@@ -84,10 +84,49 @@ print(catalog)
 merged_by_var = {}
 for variable in args.variable:
     print(f"\n[LOAD] {variable}")
-    catalog_subset = catalog.search(variable=variable, frequency='monthly', forcing_variant="cmip6")
-    dsets = catalog_subset.to_dataset_dict(storage_options={'anon': True})
-    historical = dsets['atm.historical.monthly.cmip6']
-    future     = dsets['atm.ssp370.monthly.cmip6']
+    # PRECT IS NOT IN THE AWS CATALOG. CESM2-LE stores precipitation as its
+    # components — PRECC (convective) and PRECL (large-scale), both m/s — and
+    # total precipitation is their sum. The existing annual PRECT trees came
+    # from the OSDF archive, where PRECT is stored directly; from AWS it has to
+    # be derived, or the search returns an empty dict and the load fails with
+    # KeyError: 'atm.historical.monthly.cmip6'.
+    DERIVED = {"PRECT": ("PRECC", "PRECL")}
+
+    def _load_one(v):
+        sub = catalog.search(variable=v, frequency='monthly', forcing_variant="cmip6")
+        d = sub.to_dataset_dict(storage_options={'anon': True})
+        missing = [k for k in ('atm.historical.monthly.cmip6',
+                               'atm.ssp370.monthly.cmip6') if k not in d]
+        if missing:
+            raise KeyError(
+                f"{v}: catalog returned no data for {missing}. Available keys: "
+                f"{sorted(d)}. Variables in the catalog starting with the same "
+                f"letters: "
+                f"{sorted({x for x in catalog.df.variable.unique() if str(x)[:4] == v[:4]})}")
+        return d['atm.historical.monthly.cmip6'], d['atm.ssp370.monthly.cmip6']
+
+    if variable in DERIVED:
+        parts = DERIVED[variable]
+        print(f"  [{variable}] not in the catalog — deriving as "
+              f"{' + '.join(parts)}")
+        hs, fs, units = [], [], set()
+        for part in parts:
+            h, f = _load_one(part)
+            units.add(h[part].attrs.get("units", "?"))
+            hs.append(h[part]); fs.append(f[part])
+        if len(units) > 1:
+            raise ValueError(f"{variable}: components disagree on units {units} "
+                             f"— refusing to add them")
+        print(f"  [{variable}] components in {units.pop()}; summing")
+        historical = sum(hs[1:], hs[0]).to_dataset(name=variable)
+        future     = sum(fs[1:], fs[0]).to_dataset(name=variable)
+        for d_ in (historical, future):
+            d_[variable].attrs.update(
+                units="m/s",
+                long_name="Total precipitation rate (PRECC + PRECL)",
+                derived_from=" + ".join(parts))
+    else:
+        historical, future = _load_one(variable)
     if args.monthly:
         # Keep every month. The concat dim stays 'time', which is also what
         # ClimateDataset expects when time_dim="time".
