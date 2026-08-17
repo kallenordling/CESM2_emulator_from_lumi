@@ -70,8 +70,15 @@ cd "${LUMI_REPO}"
 mkdir -p logs
 
 # ── environment ─────────────────────────────────────────────────────────────
+# CPU module, NOT the PyTorch one. On Roihu the GPU nodes are Grace/ARM64 and
+# python-pytorch/2.10 is an aarch64 container, which dies on the x86_64 CPU
+# partitions with "the image's architecture (arm64) could not run on the host's
+# (amd64)". This job is a download: it needs xarray/intake/s3fs, not torch.
 module purge
-eval "${SITE_MODULE_CMD}"
+eval "${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}"
+[ -n "${LUMI_VENV_CPU:-}" ] && [ -f "${LUMI_VENV_CPU}/bin/activate" ] \
+    && { echo "[get_data] activating ${LUMI_VENV_CPU}"; source "${LUMI_VENV_CPU}/bin/activate"; }
+echo "[get_data] arch   $(uname -m)"
 echo "[get_data] python $(command -v python3) — $(python3 -V 2>&1)"
 
 # get_data.py needs intake-esm / s3fs, which the PyTorch module may not carry.
@@ -81,9 +88,11 @@ for m in xarray intake intake_esm s3fs joblib; do
 done
 if [ -n "${missing}" ]; then
     echo "[get_data] ERROR: missing python packages:${missing}" >&2
-    echo "[get_data]        Install into a venv on \$LUMI_PROJAPPL (15 G on Roihu):" >&2
-    echo "[get_data]          python3 -m venv --system-site-packages ${LUMI_VENV}" >&2
-    echo "[get_data]          source ${LUMI_VENV}/bin/activate" >&2
+    echo "[get_data]        Build an x86_64 venv (arch-specific — the GPU nodes" >&2
+    echo "[get_data]        are ARM64 and cannot share it):" >&2
+    echo "[get_data]          ${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}" >&2
+    echo "[get_data]          python3 -m venv --system-site-packages ${LUMI_VENV_CPU:-${LUMI_VENV}}" >&2
+    echo "[get_data]          source ${LUMI_VENV_CPU:-${LUMI_VENV}}/bin/activate" >&2
     echo "[get_data]          pip install intake intake-esm s3fs" >&2
     echo "[get_data]        then re-submit with SITE_MODULE_CMD extended to activate it," >&2
     echo "[get_data]        or build the env with tykky/0.5.2." >&2

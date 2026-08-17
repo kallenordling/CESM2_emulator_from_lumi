@@ -48,6 +48,8 @@ case "${SITE}" in
     export SITE_GPU_PARTITION="${SITE_GPU_PARTITION:-standard-g}"
     export SITE_GPUS_PER_NODE="${SITE_GPUS_PER_NODE:-8}"
     export SITE_GRES="${SITE_GRES:-gpu:8}"
+    export SITE_MODULE_CMD_CPU="${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}"
+    export LUMI_VENV_CPU="${LUMI_VENV_CPU:-${LUMI_VENV}}"
     ;;
   roihu)
     # Verified from scripts/probe_site.sh on roihu-gpu-login2, 2026-08-14.
@@ -62,8 +64,21 @@ case "${SITE}" in
     # images, so the LUMI pattern (singularity exec + injected venv) has nothing
     # to mirror. Load the module instead; use tykky (0.5.2) only if extra
     # packages are required beyond what the module provides.
+    # ROIHU IS HETEROGENEOUS — this bit costs a job if you miss it.
+    #   GPU partitions (gh200)          : Grace CPU, ARM64  (aarch64)
+    #   CPU partitions (small/medium/…) : x86_64            (amd64)
+    # python-pytorch/2.10 is an aarch64 container and CANNOT run on the CPU
+    # partitions:
+    #   FATAL: the image's architecture (arm64) could not run on the host's (amd64)
+    # So GPU work and CPU work need DIFFERENT modules, and any venv with
+    # compiled wheels is architecture-specific too — one venv cannot serve both.
     export SITE_MODULE_CMD="${SITE_MODULE_CMD:-module load python-pytorch/2.10}"
+    # CPU-only jobs (downloads, regridding, figures) — no torch needed.
+    export SITE_MODULE_CMD_CPU="${SITE_MODULE_CMD_CPU:-module load python-data/3.12}"
     export SITE_CONTAINER=""
+    # Venvs are per-architecture; keep them apart or pip will overwrite one
+    # with wheels the other cannot load.
+    export LUMI_VENV_CPU="${LUMI_VENV_CPU:-${LUMI_PROJAPPL}/venvs/diffesm-x86}"
     # GH200, 4 per node. Partitions available to project_2019839:
     #   gputest        15 min   (smoke tests)
     #   gpuinteractive 12 h
