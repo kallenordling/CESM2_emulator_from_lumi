@@ -70,6 +70,9 @@ lumi_env_banner
 # Examples:
 #   bash submit_eval_ens25.sh runs/run_mseyb_BCprect_490.pt "" ep0490_ens25
 #   MEMBERS=50 bash submit_eval_ens25.sh runs/run_mseyb_BCprect_490.pt
+#   # sampler test — more denoising steps, few members, hist only:
+#   SAMPLE_STEPS=200 MEMBERS=10 bash submit_eval_ens25.sh \
+#       runs/run_mseyb_BCprect_490.pt "hist" spec_steps200
 #   bash submit_eval_ens25.sh runs/run_mseyb_BCprect_490.pt "hist ssp370" ep0490_ens25_ts
 set -euo pipefail
 
@@ -93,6 +96,13 @@ OUTPUT_DIR="${LUMI_EVAL_OUT}/manual/${SUBDIR}"
 
 EXPORTS="ALL,CHECKPOINT=${CKPT},OUTPUT_DIR=${OUTPUT_DIR},MEMBERS=${MEMBERS}"
 [ -n "${EXPERIMENTS}" ] && EXPORTS="${EXPORTS},EXPERIMENTS=${EXPERIMENTS}"
+# Passed explicitly rather than relying on --export=ALL, so the value that
+# reaches the job is visible in the submit line and in the log banner. The
+# sampler test needs this: the grid-scale variance errors (TREFHT 4.6x too
+# much, PRECT 0.41x too little) look like a mis-set denoising schedule, and
+# raising the step count is the way to find out — with no retraining.
+[ -n "${SAMPLE_STEPS:-}" ] && EXPORTS="${EXPORTS},SAMPLE_STEPS=${SAMPLE_STEPS}"
+[ -n "${BATCH_SIZE:-}" ]   && EXPORTS="${EXPORTS},BATCH_SIZE=${BATCH_SIZE}"
 
 echo "[ens25] checkpoint  = ${CKPT}"
 echo "[ens25] output_dir  = ${OUTPUT_DIR}"
