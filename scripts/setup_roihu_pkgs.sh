@@ -75,12 +75,28 @@ PKGS=(
     hydra-core
     omegaconf
     huggingface_hub
+    # NOT provided by the pytorch module, despite being "scientific python
+    # standard" — data/climate_dataset.py imports xarray at module scope, so
+    # training cannot start without it. netCDF4 is the backend xarray needs to
+    # open the chunk_*.nc files; dask backs open_mfdataset's lazy loading.
+    xarray
+    netCDF4
+    dask
 )
 
-# Never let these into the target: the module owns them, and a shadowing
-# copy is worse than useless. torch especially — the module's build is the
-# CUDA/GH200 one and a pip wheel silently replaces it.
-BLOCK="torch torchvision torchaudio numpy scipy pandas matplotlib xarray dask netCDF4 nvidia-* triton cuda-* sympy"
+# Never let these into the target. Keep this list MINIMAL: it must cover what
+# the module genuinely provides and nothing else, because a blocked package
+# that is actually absent can never be installed — which is what happened to
+# xarray on the first run. python-pytorch/2.10 is a PyTorch module, not a
+# scientific-python one: it ships torch, numpy and the CUDA stack, but NOT
+# xarray. Verified on roihu-gpu-login2: numpy 2.4.3 and torch 2.10.0+cu130
+# import from /usr/local/lib64/python3.12/site-packages, xarray does not exist.
+#
+# torch is the one that really matters — the module's build is the CUDA/GH200
+# one and any pip wheel silently replaces it. numpy is blocked because torch is
+# compiled against that exact ABI. Everything else is allowed into the target,
+# where a duplicate is merely wasteful rather than wrong.
+BLOCK="torch torchvision torchaudio numpy nvidia-* triton cuda-* sympy"
 
 pip_add() {   # install ONE package, never a blocked one, never its deps
     local p="$1"
@@ -107,9 +123,11 @@ declare -A PKG_OF=(
     [huggingface_hub]=huggingface_hub  [safetensors]=safetensors
     [regex]=regex  [filelock]=filelock  [packaging]=packaging
     [psutil]=psutil  [tqdm]=tqdm  [requests]=requests  [fsspec]=fsspec
-    [typing_extensions]=typing_extensions
+    [typing_extensions]=typing_extensions  [cftime]=cftime  [dateutil]=python-dateutil
+    [pytz]=pytz  [toolz]=toolz  [cloudpickle]=cloudpickle  [partd]=partd
+    [pandas]=pandas  [matplotlib]=matplotlib  [scipy]=scipy
 )
-CHECK="einops einops_exts ema_pytorch beartype diffusers accelerate hydra omegaconf xarray numpy torch"
+CHECK="einops einops_exts ema_pytorch beartype diffusers accelerate hydra omegaconf xarray netCDF4 pandas matplotlib numpy torch"
 
 echo
 echo "[setup] verifying imports …"
@@ -123,6 +141,13 @@ for round in 1 2 3 4; do
     done
     missing_mod="$(printf '%s\n' ${missing_mod} | sort -u | tr '\n' ' ')"
     [ -z "${missing_mod// /}" ] && break
+    if [ "${missing_mod}" = "${prev_missing:-}" ]; then
+        echo "[setup] round ${round}: no progress on${missing_mod} — giving up on it"
+        echo "[setup]   (a package in BLOCK that the module does not actually"
+        echo "[setup]    provide looks exactly like this; check BLOCK first)"
+        break
+    fi
+    prev_missing="${missing_mod}"
     echo "[setup] round ${round}: resolving${missing_mod}"
     for m in ${missing_mod}; do pip_add "${PKG_OF[${m}]:-${m}}" || true; done
 done
