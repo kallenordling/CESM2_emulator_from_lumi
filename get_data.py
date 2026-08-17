@@ -55,7 +55,11 @@ def save_dataset(dataset: xr.Dataset, realization: str, save_dir: str, num_chunk
         os.remove(os.path.join(full_save_dir, file))
 
     dataset = dataset.sel(member_id=realization)
-    total_time_points = len(dataset["year"])
+    # The time dimension is "year" for annual output (groupby('time.year')) and
+    # "time" for --monthly, which keeps the native axis. Hardcoding "year" made
+    # every monthly save raise KeyError: 'year'.
+    tdim = "year" if "year" in dataset.dims else "time"
+    total_time_points = len(dataset[tdim])
     chunk_size = total_time_points // num_chunks
 
     split_datasets = []
@@ -63,7 +67,7 @@ def save_dataset(dataset: xr.Dataset, realization: str, save_dir: str, num_chunk
     for idx in range(num_chunks):
         start_idx = idx * chunk_size
         end_idx = start_idx + chunk_size if idx < num_chunks - 1 else None
-        split_datasets.append(dataset.isel(year=slice(start_idx, end_idx)))
+        split_datasets.append(dataset.isel({tdim: slice(start_idx, end_idx)}))
         paths.append(os.path.join(full_save_dir, f"chunk_{idx}.nc"))
 
     xr.save_mfdataset(split_datasets, paths, compute=True)
