@@ -74,6 +74,40 @@ shift || true
 module purge
 eval "${SITE_MODULE_CMD}"
 
+# The module provides torch, numpy, xarray and friends but NOT this repo's
+# extras — einops-exts, ema-pytorch, beartype, diffusers, accelerate, hydra.
+# Job 695994 died on `ModuleNotFoundError: einops_exts` after successfully
+# reporting all four GH200s, i.e. the environment was fine and only the
+# packages were missing.
+#
+# Install them to LUMI_PKGS with `pip install --target` and inject via
+# PYTHONPATH rather than building a venv. This mirrors what the LUMI launchers
+# already do (SINGULARITYENV_PYTHONPATH) and, more importantly, it does not
+# depend on `python3 -m venv` behaving sensibly inside a containerised module —
+# python-pytorch/2.10 is a singularity image, and a venv created against a
+# container python breaks as soon as the module version changes underneath it.
+# A --target directory is just files on a path: no interpreter symlink to go
+# stale. See scripts/setup_roihu_pkgs.sh.
+if [ -d "${LUMI_PKGS}" ]; then
+    export PYTHONPATH="${LUMI_PKGS}${PYTHONPATH:+:${PYTHONPATH}}"
+    echo "[roihu] PYTHONPATH += ${LUMI_PKGS}"
+fi
+
+# Fail HERE, on the login-visible banner, rather than four ranks deep inside
+# srun where the traceback is printed once per task and the real message is
+# buried in "CANCELLED AT ... DUE TO TASK FAILURE".
+missing=""
+for m in einops einops_exts ema_pytorch beartype diffusers accelerate hydra omegaconf xarray; do
+    python3 -c "import ${m}" 2>/dev/null || missing="${missing} ${m}"
+done
+if [ -n "${missing}" ]; then
+    echo "[roihu] ERROR: missing python packages:${missing}" >&2
+    echo "[roihu]        Install them once, ON THE GPU LOGIN NODE (aarch64 —" >&2
+    echo "[roihu]        wheels built on an x86 login node will not load here):" >&2
+    echo "[roihu]          bash scripts/setup_roihu_pkgs.sh" >&2
+    exit 1
+fi
+
 echo "[roihu] python  $(command -v python3)"
 python3 -c "import torch; print(f'[roihu] torch {torch.__version__} cuda={torch.cuda.is_available()} n_gpu={torch.cuda.device_count()}')"
 python3 -c "import torch; [print(f'[roihu]   gpu{i}: {torch.cuda.get_device_name(i)} '
