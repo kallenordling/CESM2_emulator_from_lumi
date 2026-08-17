@@ -22,6 +22,8 @@
 #        python get_data.py --monthly --skip-existing
 #     and point data_dir at the monthly trees. With annual data this config
 #     trains on 12-year windows, which is not the intent.
+#     Size: 2.65 MB per member-year per variable, so hist+ssp370 (251 yr) is
+#     ~1.33 GB per member for TREFHT+PRECT, ~66 GB for all 50 members.
 #
 # SCENARIO COVERAGE — get_data.py only fetches hist and ssp370 (AWS
 # 'atm.historical.monthly.cmip6' / 'atm.ssp370.monthly.cmip6'). AAER and GHG

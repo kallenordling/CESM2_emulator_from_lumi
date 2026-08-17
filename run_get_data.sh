@@ -36,10 +36,13 @@
 # is not a disaster — resubmit and it continues. An empty directory from a
 # killed member is retried rather than skipped.
 #
-# SIZE: monthly is ~12x annual — ~80 MB per member-year per variable against
-# ~200 kB. On Roihu, /scratch is 250 G with a 180-day cleanup, so check
-# headroom before pulling the full member set, and consider --members-style
-# subsetting by editing get_data.py's common_members if you only need a few.
+# SIZE: monthly is 12x annual — 2.65 MB per member-year per variable
+# (192x288 x 12 months x 4 B) against 0.22 MB annual. hist+ssp370 is 251
+# years, so ONE member costs ~1.33 GB for TREFHT+PRECT and the catalog's 50
+# members come to ~66 GB. Use get_data.py --max-members N to subset; the job
+# prints a [SIZE] estimate before downloading anything.
+# (An earlier version of this comment said ~80 MB per member-year — that is
+# the DAILY figure, 365 days rather than 12 months.)
 set -euo pipefail
 
 export SITE="${SITE:-roihu}"

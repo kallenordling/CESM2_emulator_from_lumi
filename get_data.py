@@ -29,6 +29,13 @@ parser.add_argument("--monthly", action="store_true",
                          "BC-on-snow are all seasonal). ~12x the data: budget "
                          "~80 MB per member-year per variable against ~200 kB "
                          "annual.")
+parser.add_argument("--max-members", type=int, default=0, metavar="N",
+                    help="use only the first N common members (0 = all). "
+                         "SIZE: monthly is 2.65 MB per member-year per variable "
+                         "(192x288 x 12 x 4 B); hist+ssp370 is 251 years, so "
+                         "each member costs ~1.33 GB for TREFHT+PRECT. The "
+                         "catalog has 50 members = ~66 GB. Selection is the "
+                         "first N sorted member ids, deterministic.")
 parser.add_argument("--skip-existing", action="store_true",
                     help="Skip any realization whose output directory already "
                          "holds chunk files, so an interrupted download resumes "
@@ -95,7 +102,15 @@ for variable, ds in merged_by_var.items():
     common_members = members if common_members is None else common_members & members
 
 common_members = sorted(common_members)
-print(f"\n[MEMBERS] {len(common_members)} common members across {args.variable}")
+_n_all = len(common_members)
+if args.max_members and args.max_members < _n_all:
+    common_members = common_members[:args.max_members]
+print(f"\n[MEMBERS] {_n_all} common members across {args.variable}"
+      + (f" — using the first {len(common_members)}" if len(common_members) != _n_all else ""))
+_yrs = 251   # hist 1850-2014 + ssp370 2015-2100
+_gb = len(common_members) * _yrs * len(args.variable) * (192*288*4*(12 if args.monthly else 1)) / 1e9
+print(f"[SIZE]    ~{_gb:.1f} GB uncompressed "
+      f"({'monthly' if args.monthly else 'annual'}, {len(args.variable)} variables)")
 for v, ds in merged_by_var.items():
     n = len(ds["member_id"].values)
     print(f"  {v}: {n} available → {len(common_members)} used")
