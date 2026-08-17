@@ -76,9 +76,14 @@ case "${SITE}" in
     # CPU-only jobs (downloads, regridding, figures) — no torch needed.
     export SITE_MODULE_CMD_CPU="${SITE_MODULE_CMD_CPU:-module load python-data/3.12}"
     export SITE_CONTAINER=""
-    # Venvs are per-architecture; keep them apart or pip will overwrite one
-    # with wheels the other cannot load.
-    export LUMI_VENV_CPU="${LUMI_VENV_CPU:-${LUMI_PROJAPPL}/venvs/diffesm-x86}"
+    # Venvs are per-architecture, and the name is DERIVED FROM uname -m rather
+    # than hardcoded. Building on roihu-gpu-login2 (ARM) produces aarch64
+    # wheels; a venv called "-x86" full of aarch64 binaries then fails on the
+    # x86_64 CPU partitions with an ELF error. Deriving the name means a job
+    # only ever finds the venv built for the node it is running on, and a
+    # wrong-arch build simply lands somewhere else instead of poisoning the
+    # right path. Build the CPU venv on an x86_64 host (roihu-cpu.csc.fi).
+    export LUMI_VENV_CPU="${LUMI_VENV_CPU:-${LUMI_PROJAPPL}/venvs/diffesm-$(uname -m)}"
     # GH200, 4 per node. Partitions available to project_2019839:
     #   gputest        15 min   (smoke tests)
     #   gpuinteractive 12 h

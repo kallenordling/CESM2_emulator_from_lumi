@@ -76,8 +76,18 @@ mkdir -p logs
 # (amd64)". This job is a download: it needs xarray/intake/s3fs, not torch.
 module purge
 eval "${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}"
-[ -n "${LUMI_VENV_CPU:-}" ] && [ -f "${LUMI_VENV_CPU}/bin/activate" ] \
-    && { echo "[get_data] activating ${LUMI_VENV_CPU}"; source "${LUMI_VENV_CPU}/bin/activate"; }
+if [ -n "${LUMI_VENV_CPU:-}" ] && [ -f "${LUMI_VENV_CPU}/bin/activate" ]; then
+    echo "[get_data] activating ${LUMI_VENV_CPU}"
+    source "${LUMI_VENV_CPU}/bin/activate"
+elif [ -n "${LUMI_VENV_CPU:-}" ]; then
+    echo "[get_data] no venv at ${LUMI_VENV_CPU} (arch $(uname -m)) — using the module alone"
+    # A venv built on a DIFFERENT architecture is not usable here. The path is
+    # arch-derived precisely so the wrong one is never picked up silently.
+    for other in "${LUMI_PROJAPPL}"/venvs/diffesm-*; do
+        [ -d "${other}" ] && [ "${other}" != "${LUMI_VENV_CPU}" ] \
+            && echo "[get_data]   note: ${other} exists but is for another architecture"
+    done
+fi
 echo "[get_data] arch   $(uname -m)"
 echo "[get_data] python $(command -v python3) — $(python3 -V 2>&1)"
 
