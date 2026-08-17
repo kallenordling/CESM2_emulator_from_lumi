@@ -74,8 +74,28 @@ mkdir -p logs
 # python-pytorch/2.10 is an aarch64 container, which dies on the x86_64 CPU
 # partitions with "the image's architecture (arm64) could not run on the host's
 # (amd64)". This job is a download: it needs xarray/intake/s3fs, not torch.
+# Roihu's AIDA stack (python-data, python-pytorch) is built ONLY for aarch64:
+#   /appl/soft/manual/aida/aarch64/python-data/.../container.sif
+# so on the x86_64 CPU partitions there is no python module to load at all and
+# `module load python-data` dies with an architecture error. Set
+# SITE_MODULE_CMD_CPU="" (explicitly empty) to skip the module entirely and rely
+# on a self-contained venv built from /usr/bin/python3. Note ${VAR-default},
+# not ${VAR:-default}: an empty value must mean "no module", not "use the
+# default".
 module purge
-eval "${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}"
+_MODCMD="${SITE_MODULE_CMD_CPU-${SITE_MODULE_CMD}}"
+if [ -n "${_MODCMD}" ]; then
+    eval "${_MODCMD}" || {
+        echo "[get_data] module load failed on $(uname -m). Roihu's python" >&2
+        echo "[get_data] modules are aarch64-only, so on an x86_64 partition" >&2
+        echo "[get_data] use a self-contained venv instead:" >&2
+        echo "[get_data]   SITE_MODULE_CMD_CPU='' sbatch ... run_get_data.sh" >&2
+        echo "[get_data] having built it with /usr/bin/python3 on an x86_64 host." >&2
+        exit 1
+    }
+else
+    echo "[get_data] no module (SITE_MODULE_CMD_CPU empty) — using the venv alone"
+fi
 if [ -n "${LUMI_VENV_CPU:-}" ] && [ -f "${LUMI_VENV_CPU}/bin/activate" ]; then
     echo "[get_data] activating ${LUMI_VENV_CPU}"
     source "${LUMI_VENV_CPU}/bin/activate"
