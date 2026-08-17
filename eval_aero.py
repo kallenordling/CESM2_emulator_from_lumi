@@ -2330,7 +2330,40 @@ def main():
     # own work first and only has to wait briefly on the others before plotting.
     # All shards still compute the hist CESM2 baseline independently above
     # (cheap, keeps shards IPC-free).
-    if args.n_shards > 1:
+    # WHEN THERE ARE FEWER EXPERIMENTS THAN RANKS, SHARD BY MEMBER INSTEAD.
+    # Experiment-sharding cannot use more ranks than there are experiments, so a
+    # single-experiment eval leaves n-1 ranks with empty bins while one rank does
+    # everything. Observed on job 21263403 (hist only, 6 ranks, 200 steps): five
+    # ranks wrote 0-experiment pickles within seconds and rank 5 ran alone for
+    # 9.5 h at 57 min/member, while rank 0's 3 h aggregation deadline expired
+    # long before it finished — so the run cost 6x the wall time it needed AND
+    # lost the merged CSV/plots. The narrower the --experiments filter, the worse
+    # it gets, which is precisely backwards.
+    #
+    # Member sharding is exact, not approximate: members are i.i.d. draws
+    # differing only in `seed=m`, so splitting them across ranks and
+    # concatenating in member order reproduces the single-rank result bit for
+    # bit. Each rank writes its members to _shards/parts and rank 0 reassembles
+    # before any statistics are computed, so everything downstream is untouched.
+    member_shard = (args.n_shards > 1
+                    and len(experiments_to_run) < args.n_shards
+                    and args.members >= args.n_shards
+                    and os.environ.get("SHARD_MEMBERS", "1") != "0")
+    my_members = list(range(args.members))
+    if member_shard:
+        my_members = list(range(args.shard_rank, args.members, args.n_shards))
+        print(f"[SHARD] member-sharding ON: {len(experiments_to_run)} experiment(s) "
+              f"< {args.n_shards} ranks")
+        print(f"[SHARD] rank={args.shard_rank} generating members "
+              f"{[m + 1 for m in my_members]} of {args.members}")
+    elif args.n_shards > 1 and len(experiments_to_run) < args.n_shards:
+        print(f"[SHARD] NOTE: {len(experiments_to_run)} experiment(s) across "
+              f"{args.n_shards} ranks — {args.n_shards - len(experiments_to_run)} "
+              f"rank(s) will idle. Member sharding was not applied "
+              f"(members={args.members}, SHARD_MEMBERS="
+              f"{os.environ.get('SHARD_MEMBERS', '1')}).")
+
+    if args.n_shards > 1 and not member_shard:
         all_names = [e["name"] for e in experiments_to_run]
         bins = [[] for _ in range(args.n_shards)]
         loads = [0] * args.n_shards
@@ -2410,7 +2443,7 @@ def main():
               f"batch={args.batch_size}, steps={args.sample_steps}) …")
         members = []
         members_pr = []
-        for m in range(args.members):
+        for m in my_members:
             print(f"    member {m + 1}/{args.members} …")
             gen_norm = generate_timeseries(
                 model, scheduler, cond_tensor,
@@ -2430,6 +2463,71 @@ def main():
                 members_pr.append(DENORM_FN["PRECT"](gen_norm[:, PRECT_CHANNEL]))
             else:
                 members.append(denorm_fn(gen_norm))
+
+        # -- member-shard reassembly ----------------------------------------
+        # Each rank saves the members it generated; rank 0 waits for the rest
+        # and concatenates IN MEMBER ORDER so the result is identical to a
+        # single-rank run. Non-zero ranks are finished with this experiment
+        # once their part is on disk.
+        if member_shard:
+            part_dir = os.path.join(args.output_dir, "_shards", "parts")
+            os.makedirs(part_dir, exist_ok=True)
+            part = os.path.join(part_dir, f"{name}_rank{args.shard_rank}.npz")
+            # Write-then-rename: rank 0 polls for these files, and must never
+            # see a half-written one and treat it as complete. The .npz suffix
+            # on the temp name is required — np.savez appends .npz otherwise,
+            # and the rename would then chase the wrong path.
+            tmp = part + ".tmp.npz"
+            np.savez(tmp,
+                     ids=np.array(my_members, dtype=np.int32),
+                     members=np.stack(members, axis=0),
+                     members_pr=(np.stack(members_pr, axis=0) if members_pr
+                                 else np.zeros(0, dtype=np.float32)))
+            os.replace(tmp, part)
+            print(f"  [SHARD] rank={args.shard_rank} wrote {len(members)} member(s) "
+                  f"→ {os.path.basename(part)}")
+
+            if args.shard_rank != 0:
+                print(f"  [SHARD] rank={args.shard_rank} done with {name}; "
+                      f"rank 0 reassembles")
+                continue
+
+            import time      # module-level `time` is not imported in this file;
+                             # the only other use imports it locally too (the
+                             # rank-0 pickle aggregation), and that import runs
+                             # LATER than this code. Without this line rank 0
+                             # NameErrors here — after hours of generation.
+            expect = [os.path.join(part_dir, f"{name}_rank{r}.npz")
+                      for r in range(args.n_shards)]
+            # Generation dominates the runtime, so the deadline must cover a
+            # full member-block, not a fixed guess. 57 min/member at 200 steps
+            # was what broke the old 3 h experiment-level deadline.
+            deadline = time.time() + 6 * 3600
+            while True:
+                missing = [p for p in expect if not os.path.exists(p)]
+                if not missing or time.time() > deadline:
+                    break
+                time.sleep(20)
+            if missing:
+                print(f"  [SHARD] WARNING: timed out waiting for "
+                      f"{[os.path.basename(p) for p in missing]} — "
+                      f"reassembling {name} from the parts that arrived. "
+                      f"THE ENSEMBLE WILL BE SMALLER THAN --members REQUESTED.")
+
+            got = {}
+            got_pr = {}
+            for p in expect:
+                if not os.path.exists(p):
+                    continue
+                with np.load(p) as z:
+                    for k, i in enumerate(z["ids"]):
+                        got[int(i)] = z["members"][k]
+                        if z["members_pr"].size:
+                            got_pr[int(i)] = z["members_pr"][k]
+            members = [got[i] for i in sorted(got)]
+            members_pr = [got_pr[i] for i in sorted(got_pr)]
+            print(f"  [SHARD] reassembled {len(members)} member(s) for {name} "
+                  f"from {args.n_shards} rank(s)")
 
         gen_ensemble = np.stack(members, axis=0)     # (N_ENS, T, H, W)
         gen_celsius  = gen_ensemble.mean(axis=0)     # (T, H, W) ensemble mean
