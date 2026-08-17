@@ -126,8 +126,11 @@ for m in xarray intake intake_esm s3fs joblib; do
 done
 if [ -n "${missing}" ]; then
     echo "[get_data] ERROR: missing python packages:${missing}" >&2
-    echo "[get_data]        Build an x86_64 venv (arch-specific — the GPU nodes" >&2
-    echo "[get_data]        are ARM64 and cannot share it):" >&2
+    echo "[get_data]        This host is $(uname -m). Build the venv ON A HOST OF" >&2
+    echo "[get_data]        THIS ARCHITECTURE — roihu-gpu-login2 is ARM64 and will" >&2
+    echo "[get_data]        silently produce aarch64 wheels no matter what the" >&2
+    echo "[get_data]        directory is called:" >&2
+    echo "[get_data]          ssh roihu-cpu.csc.fi        # x86_64 login node" >&2
     echo "[get_data]          ${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}" >&2
     echo "[get_data]          python3 -m venv --system-site-packages ${LUMI_VENV_CPU:-${LUMI_VENV}}" >&2
     echo "[get_data]          source ${LUMI_VENV_CPU:-${LUMI_VENV}}/bin/activate" >&2
