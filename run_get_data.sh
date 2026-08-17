@@ -79,6 +79,34 @@ eval "${SITE_MODULE_CMD_CPU:-${SITE_MODULE_CMD}}"
 if [ -n "${LUMI_VENV_CPU:-}" ] && [ -f "${LUMI_VENV_CPU}/bin/activate" ]; then
     echo "[get_data] activating ${LUMI_VENV_CPU}"
     source "${LUMI_VENV_CPU}/bin/activate"
+    # VERIFY, don't trust the directory name. The venv path is derived from
+    # uname -m, but nothing stops a venv being BUILT on one architecture and
+    # written to the other's path — which is exactly what happens if you pip
+    # install on roihu-gpu-login2 (ARM) for a job that runs on `small` (x86).
+    # Read the ELF header of a compiled extension: e_machine at offset 18 is
+    # 0x3E for x86-64 and 0xB7 for aarch64.
+    python3 - "${LUMI_VENV_CPU}" <<'ARCHCHK' || exit 1
+import glob, os, platform, struct, sys
+venv = sys.argv[1]
+sos = glob.glob(os.path.join(venv, "lib", "python*", "site-packages", "**", "*.so"),
+                recursive=True)
+if not sos:
+    print("[get_data] venv has no compiled extensions — nothing to verify")
+    sys.exit(0)
+E_MACHINE = {0x3E: "x86_64", 0xB7: "aarch64", 0x28: "arm", 0x14: "ppc64"}
+with open(sos[0], "rb") as fh:
+    hdr = fh.read(20)
+mach = E_MACHINE.get(struct.unpack_from("<H", hdr, 18)[0], "unknown")
+host = platform.machine()
+print(f"[get_data] venv built for {mach}, host is {host}  ({os.path.basename(sos[0])})")
+if mach != "unknown" and mach != host:
+    print(f"[get_data] ERROR: venv architecture {mach} != host {host}.", file=sys.stderr)
+    print(f"[get_data]        Rebuild it ON an {host} host — for Roihu that is",
+          file=sys.stderr)
+    print(f"[get_data]        roihu-cpu.csc.fi, not roihu-gpu-login2 (ARM).",
+          file=sys.stderr)
+    sys.exit(1)
+ARCHCHK
 elif [ -n "${LUMI_VENV_CPU:-}" ]; then
     echo "[get_data] no venv at ${LUMI_VENV_CPU} (arch $(uname -m)) — using the module alone"
     # A venv built on a DIFFERENT architecture is not usable here. The path is
