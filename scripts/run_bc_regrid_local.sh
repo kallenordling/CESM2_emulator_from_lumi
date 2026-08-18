@@ -34,6 +34,23 @@ SC112="/home/nordling/mnt/lumi_sc/emulator_data"     # project 462001112
 SC328="/home/nordling/mnt/lumi_sc2/emulator_data"    # project 462001328
 PY="${XESMF_PYTHON:-/home/nordling/miniconda3/envs/xesmf_env/bin/python}"
 
+# PIN ESMFMKFILE TO THE INTERPRETER'S OWN ENV. This is not optional.
+# esmpy locates the ESMF C library through $ESMFMKFILE, and conda's esmf
+# activate.d hook exports ESMFMKFILE=$CONDA_PREFIX/lib/esmf.mk for whichever env
+# is ACTIVE. So with `plotting` active (esmf 8.4.1) while invoking xesmf_env's
+# python (esmpy 8.9.0), esmpy reads the 8.4.1 esmf.mk and dies with
+#     VersionMismatch: ESMF installation version 8.4.1 differs from ESMPy version 8.9.0
+# even though xesmf_env is internally consistent (esmf 8.9.0 + esmpy 8.9.0).
+# The variable is inherited, so simply calling the other env's binary is not
+# enough — it has to be overridden. Derived from PY so it stays correct if
+# XESMF_PYTHON points somewhere else.
+_ENV_PREFIX="$(dirname "$(dirname "${PY}")")"
+if [ -f "${_ENV_PREFIX}/lib/esmf.mk" ]; then
+    export ESMFMKFILE="${_ENV_PREFIX}/lib/esmf.mk"
+else
+    unset ESMFMKFILE || true      # let esmpy fall back to its own install
+fi
+
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
@@ -56,7 +73,13 @@ FROM_328=(
 )
 
 echo "[bc-local] python  ${PY}"
-"${PY}" -c "import xesmf,esmpy;print(f'[bc-local] xesmf {xesmf.__version__} esmpy {esmpy.__version__}')"
+echo "[bc-local] ESMFMKFILE ${ESMFMKFILE:-<unset, using esmpy default>}"
+"${PY}" -c "import xesmf,esmpy;print(f'[bc-local] xesmf {xesmf.__version__} esmpy {esmpy.__version__}')" || {
+    echo "[bc-local] xesmf failed to import. If this is a VersionMismatch, an" >&2
+    echo "[bc-local] active conda env is leaking ESMFMKFILE — 'conda deactivate'" >&2
+    echo "[bc-local] and rerun, or set XESMF_PYTHON to a consistent env." >&2
+    exit 1
+}
 echo "[bc-local] stage   ${STAGE}"
 
 miss=0
