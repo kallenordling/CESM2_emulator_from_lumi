@@ -69,6 +69,12 @@ COLORS = {"ssp370": "#c0392b", "ssp126": "#2471a3", "ssp245": "#e08e0b",
           "cmip7_h": "#7d3c98", "cmip7_vl": "#148f77"}
 NICE = {"ssp370": "SSP3-7.0", "ssp126": "SSP1-2.6", "ssp245": "SSP2-4.5",
         "cmip7_h": "CMIP7 high", "cmip7_vl": "CMIP7 very low"}
+# Dashed for CMIP7. The two families are DIFFERENT DATA, not variants of one
+# series: CMIP7 uses CEDS-CMIP-2025 historical and branches in 2024, the CMIP6
+# SSPs use CEDS-2017 and branch in 2015. Their historical halves genuinely
+# disagree — BC most visibly — so the linestyle keeps a reader from reading the
+# gap as an error in one of them.
+STYLE = {s: ("--" if s.startswith("cmip7") else "-") for s in NICE}
 
 # How each channel is STORED, i.e. what the model is conditioned on.
 SPECIES = {
@@ -254,9 +260,10 @@ def main():
             y, v = data[(var, s)]
             if pan == "CO2_annual":
                 ax.plot(y[1:], np.diff(v), color=COLORS.get(s), lw=1.5,
-                        label=NICE.get(s, s))
+                        ls=STYLE.get(s, "-"), label=NICE.get(s, s))
             else:
-                ax.plot(y, v, color=COLORS.get(s), lw=2, label=NICE.get(s, s))
+                ax.plot(y, v, color=COLORS.get(s), lw=2,
+                        ls=STYLE.get(s, "-"), label=NICE.get(s, s))
         if pan == "CO2_annual":
             ax.set_ylabel(f"implied annual CO$_2$\n{meta['unit']} yr$^{{-1}}$")
             ax.axhline(0, color="k", lw=.8)
@@ -264,10 +271,16 @@ def main():
             ax.set_ylabel(f"{meta['label']}\n{meta['unit']}")
         ax.grid(alpha=.3)
         ax.axvline(2015, color="k", lw=.8, ls=":", alpha=.5)
+        if any(k.startswith("cmip7") for k in args.scenarios):
+            ax.axvline(2024, color="k", lw=.8, ls=":", alpha=.25)
         if i == 0:
             ax.legend(frameon=False, fontsize=9)
             ax.set_title(f"Conditioning fields as the emulator receives them "
                          f"({space})")
+            ax.text(0.985, 0.05, "solid: CMIP6 SSPs (branch 2015)\n"
+                                 "dashed: CMIP7 (branch 2024)",
+                    transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=7.5, alpha=.7)
     axes[-1][0].set_xlabel("year")
 
     if not args.scale_to_published:
