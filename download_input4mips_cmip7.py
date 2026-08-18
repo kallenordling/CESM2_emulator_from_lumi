@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-f"""
+"""
 Download CMIP7 gridded emissions (BC, SO2, CO2) from ESGF input4MIPs.
 
 CMIP7 forcing data lives under project=input4MIPs (NOT project=CMIP7); the
@@ -27,7 +27,7 @@ Output layout is chosen with --layout:
 
 Use `flat` to feed the existing cond-building pipeline: data/make_aerosol_files.py
 and data/make_co2_files.py glob a single flat INPUT_DIR by filename
-(default {L.DATA}/emission_data/inputs4mips/),
+(default <LUMI_DATA>/emission_data/inputs4mips/, see lumi_paths.DATA),
 so nested subdirectories are invisible to them. Filenames are globally unique
 (they encode source_id and date range), so flat has no collisions.
 
@@ -37,7 +37,7 @@ Examples
 python download_input4mips_cmip7.py --list-sources
 
 # default set: BC+SO2+CO2 anthro, CEDS historical + IIASA h/vl scenarios (~12 GB)
-python download_input4mips_cmip7.py --outdir {L.DATA}/input4mips
+python download_input4mips_cmip7.py --outdir <LUMI_DATA>/input4mips
 
 # dry run first
 python download_input4mips_cmip7.py --discover-only
