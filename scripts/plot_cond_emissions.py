@@ -201,6 +201,11 @@ def main():
                          "but the rate makes scenario shapes legible")
     ap.add_argument("--scale-to-published", action="store_true",
                     help=f"multiply by {DEFLATION} to approximate real-world totals")
+    ap.add_argument("--data-dir", metavar="DIR",
+                    help="override the CMIP6-era cond directory (the ssp*/hist "
+                         "files). Use it to plot a locally rebuilt set before it "
+                         "is copied back to LUMI. The CMIP7 files are unaffected "
+                         "and still read from their own project.")
     ap.add_argument("--out", default="plots/cond_emissions")
     ap.add_argument("--dump-data", metavar="CSV")
     args = ap.parse_args()
@@ -218,6 +223,12 @@ def main():
     scale = DEFLATION if args.scale_to_published else 1.0
     space = ("approx. published scale" if args.scale_to_published
              else "emulator input space")
+
+    if args.data_dir:
+        d = args.data_dir.rstrip("/")
+        for k, paths in SCENARIOS.items():
+            SCENARIOS[k] = [p.replace(SC2, d) for p in paths]
+        print(f"[cond] CMIP6-era files from {d}")
 
     print("[cond] reading conditioning files (detecting cumulative vs per-year):")
     data = {}
