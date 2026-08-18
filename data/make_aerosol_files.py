@@ -36,14 +36,27 @@ OUTPUT_DIR = os.environ.get(
 
 # Per-(species, exp) surface-anthro input glob. AIR-anthro stays omitted for both
 # species (matches the existing SO2/SUL channel, which uses surface anthro only).
-# BC hist uses CEDS-2025 (runs to 2023) — clipped to ≤2014 below so the hist→ssp
-# junction matches the SO2 channel; ssp370 BC uses the IAMC-AIM scenario file.
+#
+# BOTH SPECIES USE CEDS-2017 FOR hist, AND THAT MATTERS.
+# The IAMC ScenarioMIP files (all SSPs, both species) are harmonised to CEDS-2017,
+# so the historical source must be CEDS-2017 or the hist→ssp junction steps.
+# BC previously used CEDS-CMIP-2025-04-18 — eight years newer, with anthropogenic
+# BC revised substantially downward — which put a +35% discontinuity at 2015 into
+# the BC conditioning channel, at exactly the year every scenario branches.
+# Measured global anthro BC at the junction (Tg/yr):
+#     CEDS-2017 2014 = 8.012  vs IAMC 2015 = 7.986  -> ratio 0.997
+#     CEDS-2025 2014 = 5.917  vs IAMC 2015 = 7.986  -> ratio 1.350
+# 0.997 is identical for ssp370/ssp126/ssp245, confirming the harmonisation.
+# Sector structure is unchanged between the two BC releases (8 sectors, same ids,
+# 720x360, kg m-2 s-1), so the sector sum below is unaffected by the swap.
+# CEDS-2017 has two extra files (1750-1849); concat_and_regrid.py:217 clips BC to
+# slice(1850, 2014), so they are harmless.
 _ANTHRO_PATTERNS = {
     ("SO2", "hist"):   "SO2-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc",
     ("SO2", "ssp370"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc",
     ("SO2", "ssp126"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc",
     ("SO2", "ssp245"): "SO2-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc",
-    ("BC",  "hist"):   "BC-em-anthro_input4MIPs_emissions_CMIP_CEDS-CMIP-2025-04-18_gn_*.nc",
+    ("BC",  "hist"):   "BC-em-anthro_input4MIPs_emissions_CMIP_CEDS-2017-05-18_gn_*.nc",
     ("BC",  "ssp370"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-AIM-ssp370-1-1_gn_201501-210012.nc",
     ("BC",  "ssp126"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-IMAGE-ssp126-1-1_gn_201501-210012.nc",
     ("BC",  "ssp245"): "BC-em-anthro_input4MIPs_emissions_ScenarioMIP_IAMC-MESSAGE-GLOBIOM-ssp245-1-1_gn_201501-210012.nc",
