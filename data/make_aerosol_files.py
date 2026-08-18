@@ -8,6 +8,16 @@ Process CO2 emission input files from CEDS/input4MIPs:
 6. Compute cumulative sum over time
 """
 
+import os as _os
+import sys as _sys
+# lumi_paths lives at the repo ROOT, but `python data/<this>.py` puts data/ on
+# sys.path, not the root — and the LAIF wrappers set PYTHONPATH to the container
+# venv only, so the root is never visible. Without this the script dies with
+# "ModuleNotFoundError: No module named 'lumi_paths'" the moment it is run the
+# documented way. Fixing it here rather than in the wrappers keeps every
+# launcher working (sbatch, srun, singularity, plain python, local).
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import lumi_paths as L
 import xarray as xr
 import numpy as np
