@@ -54,12 +54,19 @@ fi
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
-# from-462001112 (stage 1 output)
+# from-462001112 (stage 1 output, plus two files opened unconditionally)
 FROM_112=(
     BC_per_gridpoint_hist.nc
     BC_per_gridpoint_ssp370.nc
     BC_per_gridpoint_ssp126.nc
     BC_per_gridpoint_ssp245.nc
+    # --build-bc never READS these, but concat_and_regrid.py opens them at
+    # MODULE level (lines 46-47), before it looks at any argument, so the script
+    # dies with FileNotFoundError on CO2_cumulative_Gt_per_gridpoint_hist.nc
+    # before reaching the BC path. 700 MB staged purely to satisfy an import-time
+    # side effect. Identical in both projects, so either source works.
+    CO2_cumulative_Gt_per_gridpoint_hist.nc
+    SO2_cumulative_Gt_per_gridpoint_hist.nc
 )
 # from-462001328 (the originals BC is injected into, plus the grid target)
 FROM_328=(
@@ -90,7 +97,7 @@ echo "[bc-local] all ${#FROM_112[@]} + ${#FROM_328[@]} inputs present"
 [ "${CHECK_ONLY}" -eq 1 ] && { echo "[bc-local] --check: stopping."; exit 0; }
 
 mkdir -p "${STAGE}"
-echo "[bc-local] staging ~1.4 GB (skips files already staged at the same size) …"
+echo "[bc-local] staging ~2.1 GB (skips files already staged at the same size) …"
 # -rltDv, NOT -a: sshfs cannot set the LUMI project group, so -a always fails
 # with chgrp "Permission denied" and exits 23 on an otherwise perfect transfer.
 for f in "${FROM_112[@]}"; do rsync -rltD --info=name "${SC112}/$f" "${STAGE}/"; done
