@@ -83,7 +83,7 @@ experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
       - /scratch/project_462001328/emulator_data/training_data/PRECT/hist
-    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -112,7 +112,7 @@ experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
       - /scratch/project_462001328/emulator_data/training_data/PRECT/ssp370
-    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -141,7 +141,7 @@ experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
       - /scratch/project_462001328/emulator_data/training_data/PRECT/AAER
-    cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed_bc_co2fix.nc
     realizations:
       - "001"
       - "002"
@@ -159,7 +159,7 @@ experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
       - /scratch/project_462001328/emulator_data/training_data/PRECT/GHG
-    cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed_bc_co2fix.nc
     realizations:
       - "001"
       - "002"
@@ -180,7 +180,7 @@ val_experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/hist
       - /scratch/project_462001328/emulator_data/training_data/PRECT/hist
-    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_hist_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1231.001
 
@@ -189,7 +189,7 @@ val_experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/ssp370
       - /scratch/project_462001328/emulator_data/training_data/PRECT/ssp370
-    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ssp370_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1231.001
 
@@ -198,7 +198,7 @@ val_experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/AAER
       - /scratch/project_462001328/emulator_data/training_data/PRECT/AAER
-    cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_aaer_only_timefixed_bc_co2fix.nc
     realizations:
       - "010"
 
@@ -207,6 +207,6 @@ val_experiment_configs:
     data_dir:
       - /scratch/project_462001328/emulator_data/training_data/TREFHT/GHG
       - /scratch/project_462001328/emulator_data/training_data/PRECT/GHG
-    cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed_bc.nc
+    cond_file: /scratch/project_462001328/emulator_data/emissions_ghg_only_timefixed_bc_co2fix.nc
     realizations:
       - "010"
