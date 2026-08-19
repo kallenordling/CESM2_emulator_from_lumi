@@ -124,6 +124,44 @@ EXPERIMENTS = [
         gen_cost     = 86,                   # ~year span; for shard load-balancing
         color        = "#17becf",
     ),
+    # ── CMIP7 ScenarioMIP ─────────────────────────────────────────────────
+    # MODEL-ONLY, and not by omission: CESM2 has no CMIP7 ScenarioMIP runs, so
+    # there is no reference ensemble to score against and never will be from
+    # this archive. These entries exist to push the emulator onto forcing paths
+    # built by a different pipeline (CEDS-CMIP-2025 historical, IIASA scenarios,
+    # branch year 2024 instead of 2015) and see what it produces.
+    #
+    # Their historical half is NOT the one the model trained on. CMIP6-era hist
+    # BC is CEDS-2017 and CMIP7's is CEDS-2025 — the two disagree by ~37% across
+    # the whole post-1950 record (both correct for their own family; see
+    # bc_ceds_vintage_mismatch). The cond file here starts at 2024 and carries
+    # cumulative CO2 integrated from 1850 through CMIP7's own historical, so the
+    # emulator is handed a CO2 axis consistent with CMIP7 and an aerosol history
+    # it never saw. Read these runs as an OOD probe, not as a validated forecast.
+    dict(
+        name         = "h_cmip7",
+        data_dir     = None,                 # no CESM2 reference exists
+        model_only   = True,
+        cond_file    = os.path.join(EMIS_DIR, "emissions_h_cmip7_only_timefixed_bc.nc"),
+        realizations = [],
+        time_dim     = "time",
+        target_var   = "tas",
+        map_years    = [2024, 2050, 2100],
+        gen_cost     = 77,                   # 2024-2100
+        color        = "#7d3c98",
+    ),
+    dict(
+        name         = "vl_cmip7",
+        data_dir     = None,                 # no CESM2 reference exists
+        model_only   = True,
+        cond_file    = os.path.join(EMIS_DIR, "emissions_vl_cmip7_only_timefixed_bc.nc"),
+        realizations = [],
+        time_dim     = "time",
+        target_var   = "tas",
+        map_years    = [2024, 2050, 2100],
+        gen_cost     = 77,                   # 2024-2100
+        color        = "#148f77",
+    ),
     dict(
         name         = "ssp370-126aer",
         # RAMIP-design experiment: ssp370's CO2 with ssp126's aerosols, i.e.
@@ -702,7 +740,8 @@ def plot_tcre(results: dict, out_path: str):
     Dashed lines = CESM2 ensemble mean  (shaded spread when N > 1).
     Linear regression slopes annotated for model and CESM2 per projection.
     """
-    PROJECTIONS = [p for p in ("ssp370", "ssp126", "ssp245")
+    PROJECTIONS = [p for p in ("ssp370", "ssp126", "ssp245",
+                               "h_cmip7", "vl_cmip7")
                    if p in results and results[p].get("co2_annual") is not None]
 
     if "hist" not in results or not PROJECTIONS:
@@ -2568,7 +2607,10 @@ def main():
             traceback.print_exc()
             # If user asked for this experiment explicitly, fail loudly instead
             # of silently producing a TREFHT_<name>.nc with no CESM2 reference.
-            if args.experiments and name in args.experiments:
+            # model_only scenarios are exempt: having no reference is their
+            # defining property, not a load failure to shout about.
+            if args.experiments and name in args.experiments \
+                    and not exp.get("model_only"):
                 raise RuntimeError(
                     f"CESM2 load failed for explicit experiment {name!r}; "
                     f"refusing to write NetCDF without reference data"
