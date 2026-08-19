@@ -71,7 +71,7 @@ cond_smooth_sigma: [0, 2, 2]   # [CO2, SUL, BC] — matches config_data.yaml
 cond_smooth_method: gaussian
 
 # ── Loader settings ──────────────────────────────────────────
-batch_size: 8           # 16→8: per_exp=2 (vs 4) so n_batches doubles → ≥16/realization for 16-rank DDP sharding
+batch_size: 1           # must match config_aero_monthly.yaml; 12 frames do not fit at 8 (see the MEMORY note above)
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
 steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
@@ -99,9 +99,9 @@ experiment_configs:
   - scenario_name: hist
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/hist
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/hist
-    cond_file: /scratch/project_462001112/emulator_data/emissions_hist_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/hist
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/hist
+    cond_file: /scratch/project_2019839/emulator_data/emissions_hist_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -128,9 +128,9 @@ experiment_configs:
   - scenario_name: ssp370
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/ssp370
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/ssp370
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/ssp370
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/ssp370
+    cond_file: /scratch/project_2019839/emulator_data/emissions_ssp370_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1001.001
       - LE2-1011.001
@@ -157,9 +157,9 @@ experiment_configs:
   - scenario_name: aaer
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/AAER
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/AAER
-    cond_file: /scratch/project_462001112/emulator_data/emissions_aaer_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/AAER
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/AAER
+    cond_file: /scratch/project_2019839/emulator_data/emissions_aaer_only_timefixed_bc_co2fix.nc
     realizations:
       - "001"
       - "002"
@@ -175,9 +175,9 @@ experiment_configs:
   - scenario_name: ghg
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/GHG
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/GHG
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/GHG
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/GHG
+    cond_file: /scratch/project_2019839/emulator_data/emissions_ghg_only_timefixed_bc_co2fix.nc
     realizations:
       - "001"
       - "002"
@@ -196,35 +196,35 @@ val_experiment_configs:
   - scenario_name: hist
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/hist
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/hist
-    cond_file: /scratch/project_462001112/emulator_data/emissions_hist_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/hist
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/hist
+    cond_file: /scratch/project_2019839/emulator_data/emissions_hist_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: ssp370
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/ssp370
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/ssp370
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ssp370_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/ssp370
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/ssp370
+    cond_file: /scratch/project_2019839/emulator_data/emissions_ssp370_only_timefixed_bc_co2fix.nc
     realizations:
       - LE2-1231.001
 
   - scenario_name: aaer
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/AAER
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/AAER
-    cond_file: /scratch/project_462001112/emulator_data/emissions_aaer_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/AAER
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/AAER
+    cond_file: /scratch/project_2019839/emulator_data/emissions_aaer_only_timefixed_bc_co2fix.nc
     realizations:
       - "010"
 
   - scenario_name: ghg
     time_dim: time
     data_dir:
-      - /scratch/project_462001112/emulator_data/training_data_monthly/TREFHT/GHG
-      - /scratch/project_462001112/emulator_data/training_data_monthly/PRECT/GHG
-    cond_file: /scratch/project_462001112/emulator_data/emissions_ghg_only_timefixed_bc.nc
+      - /scratch/project_2019839/emulator_data/training_data_monthly/TREFHT/GHG
+      - /scratch/project_2019839/emulator_data/training_data_monthly/PRECT/GHG
+    cond_file: /scratch/project_2019839/emulator_data/emissions_ghg_only_timefixed_bc_co2fix.nc
     realizations:
       - "010"

@@ -13,7 +13,9 @@ data_config: config_data.yaml
 accelerator:
     mixed_precision: bf16
     split_batches: False
-    gradient_accumulation_steps: 2
+    # 2 -> 16: batch_size drops 8 -> 1 for seq_len 12, so accumulation makes up
+    # the effective batch (see the MEMORY note in config_data_monthly.yaml).
+    gradient_accumulation_steps: 16
     device_placement: True
     sync_batchnorm: False
 
@@ -30,6 +32,14 @@ model:
     attn_heads: 8
     init_kernel_size: 7
     model_dim: 96
+    # Gradient checkpointing: recompute block activations in the backward pass
+    # instead of holding them. Threads through 20 sites in video_net.py and
+    # appears in no other config. LEFT OFF: the sweep that appeared to demand it
+    # (job 696628) was invalid — all 4 ranks shared cuda:0, so its OOMs measured
+    # contention, not capacity. At batch 1 seq_len 12 peaks at ~41 GiB on a
+    # 95 GiB GH200, which fits, and checkpointing would cost ~a third more
+    # compute per step for nothing. Turn on only if a rank-bound sweep says so.
+    use_checkpoint: false
 
 scheduler:
     _target_: custom_diffusers.continuous_ddpm.ContinuousDDPM
@@ -56,7 +66,14 @@ trainer:
     # (cond/TCRE/low-t/EBM/interaction) + the null pass are skipped → pure
     # denoising MSE. Used by the run_mseyb A/B arm (run2_mseyb.sh). Default off.
     mse_only: false
-    batch_size: 8        # must match batch_size in config_data.yaml
+    batch_size: 1        # must match batch_size in config_data_monthly.yaml.
+                         # 8 -> 1 from the measured per-sample peak, not from
+                         # that job's OOMs (which were rank-contention — see
+                         # use_checkpoint below): one sample at seq_len 12 peaks
+                         # at 40.7 GiB, so batch 8 would need ~326 GiB against
+                         # 95 GiB of GH200. Batch 2 (~81 GiB) is arithmetically
+                         # close but untested; raise it only after a rank-bound
+                         # sweep.
     save_dir: runs/
     save_name: run_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
     load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
