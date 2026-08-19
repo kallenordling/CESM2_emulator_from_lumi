@@ -65,7 +65,7 @@ EXPERIMENTS = [
         # cmip6/; load_cesm2_ensemble reads all members at once (realizations
         # ignored). historical.nc = 11 members, 1850-2014.
         data_dir     = os.path.join(SCRATCH, "cmip6", "historical.nc"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc_co2fix.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -76,7 +76,7 @@ EXPERIMENTS = [
     dict(
         name         = "ssp370",
         data_dir     = os.path.join(SCRATCH, "cmip6", "ssp370.nc"),  # 3-member annual ref
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc_co2fix.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -98,7 +98,7 @@ EXPERIMENTS = [
         # "+ hist_endpoint" ramp so cumulative CO2 plateaus ~2070 (late slope
         # +6.7→−0.5 /yr) instead of climbing to 2100. See
         # ssp126_co2_cond_construction_bug. Old file: emissions_ssp126_only_timefixed.nc
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_co2fix_bc.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_bc_co2fix.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -116,7 +116,7 @@ EXPERIMENTS = [
         # ssp245-only cond file (2015–2100), CO2-FIXED build (no spurious ramp;
         # concat_and_regrid_ssp126.py --scenarios ssp245). Cumulative CO2 still
         # integrated from 1850 so magnitudes match the training distribution.
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc_co2fix.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1", "r11i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -148,8 +148,15 @@ EXPERIMENTS = [
         # is what keeps the emulator inside the RAMIP window instead of
         # generating 21 years the reference cannot cover.
         # Full-length 2015-2100 build: emissions_ssp370co2_ssp126aer_bc.nc
+        # CO2-FIXED rebuild (2026-08-19). This file MUST share ssp370's CO2 axis:
+        # the result is 126aer MINUS ssp370, so any difference in the CO2 channel
+        # leaks straight into what is reported as an aerosol-removal signal. The
+        # pre-fix hybrid carried the doubled ssp370 CO2 (965.3 vs 704.3 at 2050),
+        # so pairing it with a fixed ssp370 would have contaminated the RAMIP
+        # comparison with a 261 Gt CO2 offset growing to 471 Gt by 2079.
+        # Old file: emissions_ssp370co2_ssp126aer_bc_2015-2079.nc
         cond_file    = os.path.join(
-            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079.nc"),
+            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079_co2fix.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",
@@ -160,7 +167,7 @@ EXPERIMENTS = [
     dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc_co2fix.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
@@ -171,7 +178,7 @@ EXPERIMENTS = [
     dict(
         name         = "ghg",
         data_dir     = os.path.join(DATA_ROOT, "GHG"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc_co2fix.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
