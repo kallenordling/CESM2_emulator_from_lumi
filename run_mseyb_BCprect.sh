@@ -28,7 +28,13 @@
 #
 # FRESH RUN — save_name=run_mseyb_BCprect.pt, no fork (run_mseyb's checkpoints
 # are 1/1/2-channel, incompatible conv shapes).
-# Fire:  CHAIN_REMAINING=6 sbatch run_mseyb_BCprect.sh
+#
+# 2026-08-19: runs on project 462001328 (lumi_env.sh's default). The cond files
+# come from configs/config_data_ybias_BCprect.yaml, now repointed at the
+# CO2/BC-corrected `*_bc_co2fix.nc` set. See the "Fresh vs resume" block below
+# before launching — the existing checkpoints predate that correction.
+# Fire:  FRESH=1 CHAIN_REMAINING=6 sbatch run_mseyb_BCprect.sh   (clean start)
+#        CHAIN_REMAINING=6 sbatch run_mseyb_BCprect.sh           (resume)
 # Isolated arm — own watcher/PROD_RUN name, doesn't touch run_mseyb or
 # run_gainfix's production chains/checkpoints.
 #SBATCH --partition=small-g
@@ -41,7 +47,26 @@
 #SBATCH --output=logs/%x_%j.out
 
 # Single source of truth for the LUMI project id and its paths.
-source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
+# Under sbatch, BASH_SOURCE points at /var/spool/slurmd/job<N>/slurm_script —
+# SLURM copies the script there — so the plain dirname form cannot find
+# lumi_env.sh. It then failed OPEN: assert_account and lumi_env_banner were
+# "command not found", every LUMI_* var stayed unset, and job 21369490 ran with
+# the account guard silently absent and a PYTHONPATH pointing at the wrong
+# project's venv. Same fix as commit 4121985 on monthly-temporal.
+_find_repo() {
+    local d
+    for d in "${SLURM_SUBMIT_DIR:-}" \
+             "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" \
+             "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" \
+             "${LUMI_REPO:-}"; do
+        [ -n "$d" ] && [ -f "$d/lumi_env.sh" ] && { echo "$d"; return 0; }
+    done
+    echo "ERROR: cannot locate lumi_env.sh. Submit from the repo directory, or" >&2
+    echo "       export LUMI_REPO=/path/to/CESM2_emulator_from_lumi first." >&2
+    return 1
+}
+_REPO_DIR="$(_find_repo)" || exit 1
+source "${_REPO_DIR}/lumi_env.sh"
 assert_account
 lumi_env_banner
 
@@ -128,8 +153,12 @@ if [[ -n "${EXISTING_WATCHER}" ]]; then
     WATCHER_JOB=""
     echo "[watcher] eval watcher ${EXISTING_WATCHER} already active — not resubmitting"
 else
+    # ${LUMI_ACCOUNT} rather than a literal: this is a runtime sbatch, so the
+    # variable DOES expand here (unlike an #SBATCH directive, which SLURM never
+    # expands — see lumi_env.sh). Hardcoding 462001112 sent the watcher to a
+    # different project from the training job.
     WATCHER_JOB=$(sbatch --job-name=eval_watcher_mseyb_BCprect \
-           --account=project_462001112 \
+           --account="${LUMI_ACCOUNT}" \
            --partition=small \
            --time="${WATCHER_TIME}" \
            --ntasks=1 --cpus-per-task=1 --mem=256M \
@@ -140,12 +169,53 @@ else
     echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED} (time=${WATCHER_TIME})"
 fi
 
+# ── Fresh vs resume ───────────────────────────────────────────────────────────
+# config_aero.yaml sets load_path:"newest", so a bare launch RESUMES the newest
+# run_mseyb_BCprect_*.pt. As of 2026-08-19 those checkpoints (…_490 … _509) were
+# trained on the PRE-FIX conditioning: ssp370/ghg cumulative CO2 doubled and
+# historical BC on CEDS-2025. The cond files this script now reads are the
+# corrected ones.
+#
+# Resuming across that change is NOT a neutral continuation. The checkpoint
+# carries baked COND_NORM constants and per-scenario PCA bases fitted on the OLD
+# cond distribution, and config_aero.yaml:152 re-injects them on resume — so the
+# run would normalise corrected data with stale statistics and project it onto a
+# basis fitted to a CO2 axis that was stretched ~1.4x. Weights also encode the
+# old CO2 sensitivity.
+#
+#   FRESH=1 sbatch run_mseyb_BCprect.sh   → from scratch, own checkpoint name
+#   sbatch run_mseyb_BCprect.sh           → resume (only sensible for a chain
+#                                            ALREADY started on the fixed data)
+# TWO flags, because the chain re-submits with --export=ALL and a single flag
+# would propagate: FRESH=1 on every link would restart from scratch every 6h.
+#   FRESH=1  → this link only: load_path=0. The chain clears it.
+#   CO2FIX=1 → sticky: use the corrected-data checkpoint NAME. Set implicitly by
+#              FRESH=1 and passed down the chain so later links resume the run
+#              the first link started rather than the pre-fix one.
+FRESH="${FRESH:-0}"
+CO2FIX="${CO2FIX:-0}"
+[[ "${FRESH}" == "1" ]] && CO2FIX=1
+export CO2FIX
+
+if [[ "${CO2FIX}" == "1" ]]; then
+    SAVE_NAME="run_mseyb_BCprect_co2fix.pt"
+else
+    SAVE_NAME="run_mseyb_BCprect.pt"
+fi
+if [[ "${FRESH}" == "1" ]]; then
+    LOAD_OVERRIDE="trainer.hyperparameters.load_path=0"
+    echo "[fresh] FRESH=1 — training from scratch into ${SAVE_NAME}"
+else
+    LOAD_OVERRIDE=""
+    echo "[fresh] resuming newest ${SAVE_NAME%.pt}_*.pt (FRESH=1 for a clean start)"
+fi
+
 # ── Self-chaining ──────────────────────────────────────────────────────────────
 CHAIN_REMAINING="${CHAIN_REMAINING:-6}"
 if [[ "${CHAIN_REMAINING}" -gt 1 ]]; then
     NEXT_JOB=$(sbatch --parsable \
            --dependency="afterany:${SLURM_JOB_ID}" \
-           --export="ALL,CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 ))" \
+           --export="ALL,CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )),FRESH=0,CO2FIX=${CO2FIX:-0}" \
            --chdir="${SLURM_SUBMIT_DIR}" \
            "${SLURM_SUBMIT_DIR}/run_mseyb_BCprect.sh" 2>/dev/null) || NEXT_JOB=""
     echo "[chain] queued next link ${NEXT_JOB:-FAILED} (afterany:${SLURM_JOB_ID}, CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )))"
@@ -169,7 +239,8 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         model.in_channels=2 \
         model.out_channels=2 \
         model.cond_channels=3 \
-        trainer.hyperparameters.save_name=run_mseyb_BCprect.pt \
+        trainer.hyperparameters.save_name=${SAVE_NAME} \
+        ${LOAD_OVERRIDE} \
         trainer.hyperparameters.mse_only=true \
         trainer.hyperparameters.eval_data_config=configs/config_data_ybias_BCprect.yaml
 '"
