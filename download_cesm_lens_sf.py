@@ -207,10 +207,20 @@ def head_check(url):
         return False, 0
 
 
-def download_file(url, dest, overwrite=False, dry_run=False):
+def download_file(url, dest, overwrite=False, dry_run=False, verify=False):
     """Download url -> dest. Returns (ok: bool, message: str)."""
     if dest.exists() and not overwrite:
-        return True, f"SKIP (exists)  {dest.name}"
+        if not verify:
+            return True, f"SKIP (exists)  {dest.name}"
+        # --verify: size is the only cheap integrity signal the archive offers
+        # (no checksums published), and it catches exactly the truncation this
+        # script used to create.
+        _, remote = head_check(url)
+        local = dest.stat().st_size
+        if remote and local != remote:
+            print(f"  [verify] {dest.name}: {local} != {remote} — refetching")
+        else:
+            return True, f"SKIP (verified) {dest.name}"
     if dry_run:
         return True, f"DRY-RUN        {url}"
 
@@ -241,6 +251,15 @@ def download_file(url, dest, overwrite=False, dry_run=False):
                 bar.close()
             elif total:
                 print()
+
+            # A stream can end early without raising — the server closes the
+            # connection and iter_content simply stops. Without this check the
+            # short file is renamed into place and reported "OK (4 MB)", which
+            # is how 112 of 525 files ended up truncated on 2026-08-19: valid
+            # HDF5 header, so they open, then fail deep in a read with
+            # "NetCDF: HDF error". Compare against Content-Length and refuse.
+            if total and downloaded != total:
+                raise IOError(f"truncated: got {downloaded} of {total} bytes")
 
         tmp.rename(dest)
         return True, f"OK ({dest.stat().st_size/1e6:.0f} MB)  {dest.name}"
@@ -285,6 +304,12 @@ def parse_args():
                    help="HEAD-check each URL and print size (no download)")
     p.add_argument("--list-only",  action="store_true",
                    help="Print file list and exit")
+    p.add_argument("--verify", action="store_true",
+                   help="check existing files against the server's "
+                        "Content-Length and refetch any whose size differs. "
+                        "Use after an interrupted run: a truncated file still "
+                        "has a valid HDF5 header, so it is only caught when "
+                        "something reads deep into it.")
     p.add_argument("--overwrite",  action="store_true",
                    help="Re-download already-existing files")
     return p.parse_args()
@@ -350,7 +375,8 @@ def main():
     def _task(item):
         url, fname, ens, var = item
         ok, msg = download_file(url, dest_path(fname, ens, var),
-                                overwrite=args.overwrite, dry_run=args.dry_run)
+                                overwrite=args.overwrite, dry_run=args.dry_run,
+                                verify=args.verify)
         return ok, msg
 
     success = fail = 0
