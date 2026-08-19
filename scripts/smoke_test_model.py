@@ -106,7 +106,23 @@ def main() -> int:
         print("   NO GPU — this will run on CPU and prove only that it builds")
     print("=" * 62)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # BIND ONE GPU PER RANK. run_roihu.sh launches --ntasks-per-node=4 against
+    # --gres=gpu:gh200:4, but a bare torch.device("cuda") is cuda:0 for EVERY
+    # rank, so all four processes allocate on the same card and OOM at a
+    # fraction of the real limit. Job 696628 measured exactly that: four ranks
+    # on identical 95 GiB GH200s reported largest-fitting seq_len of 3, 3, 6 and
+    # 12, with the failures landing where the CONCURRENT sum crossed 95 GiB —
+    # a contention artifact read as a per-GPU limit.
+    if torch.cuda.is_available():
+        local_rank = int(os.environ.get("SLURM_LOCALID",
+                         os.environ.get("LOCAL_RANK", 0)))
+        local_rank %= torch.cuda.device_count()
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        print(f" rank binding: SLURM_LOCALID={os.environ.get('SLURM_LOCALID','-')} "
+              f"-> {device} ({torch.cuda.get_device_name(local_rank)})")
+    else:
+        device = torch.device("cpu")
     dtype = (torch.bfloat16 if args.precision == "bf16" and device.type == "cuda"
              else None)
 
