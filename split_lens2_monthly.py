@@ -23,10 +23,16 @@ Three things are reconciled here.
    has to happen or the realization lists never match.
 
 3. THE HELD-OUT MEMBER. LE2-1231.001 is the validation member
-   (config_data.yaml marks it so). It is PRESENT in the monthly download, and
-   staging it into a training tree would leak validation data into training.
-   --val-members keeps it out of the training tree by default; pass
-   --allow-val-in-train only if you genuinely mean to.
+   (config_data.yaml and config_data_monthly.yaml both mark it so). It IS
+   staged, into the same hist/ssp370 trees as everything else, because that is
+   how this codebase separates train from val: ONE tree per scenario holding
+   every member, and the split lives in the realization LISTS of
+   experiment_configs vs val_experiment_configs. The AAER/GHG trees already
+   work that way (all 20/15 members on disk, 001-009 train, 010 val).
+   Withholding it from disk does not prevent a leak — it makes
+   val_experiment_configs crash on an empty glob in
+   ClimateDataset.load_data. --omit-members exists for the rare case where a
+   member must genuinely not exist on disk; it is NOT the leak guard.
 
 Chunking matches get_data.py:save_dataset and stage_sf_monthly.py.
 
@@ -45,9 +51,11 @@ import xarray as xr
 
 MEMBER_RE = re.compile(r"^r(\d+)i(\d+)p\d+f\d+$")
 HIST_END = 2014                       # CMIP6 historical / ScenarioMIP boundary
-# LE2-1231.001 is the validation member in config_data.yaml. Keeping the default
-# here rather than in the caller means the leak has to be opted INTO.
-DEFAULT_VAL = ["LE2-1231.001"]
+# LE2-1231.001 is the validation member in config_data.yaml. It is still STAGED
+# (see the header): the train/val separation is the realization lists in the
+# config, not the presence of files on disk. Named here only so the run prints a
+# reminder that it must appear in val_experiment_configs and nowhere else.
+VAL_MEMBERS = ["LE2-1231.001"]
 
 
 def le2_name(member):
@@ -85,13 +93,11 @@ def main():
                     help="training_data_monthly directory")
     ap.add_argument("--variable", nargs="+", default=["TREFHT", "PRECT"])
     ap.add_argument("--num-chunks", type=int, default=40)
-    ap.add_argument("--val-members", nargs="+", default=DEFAULT_VAL,
-                    help=f"members to keep OUT of the training trees "
-                         f"(default: {' '.join(DEFAULT_VAL)})")
-    ap.add_argument("--allow-val-in-train", action="store_true",
-                    help="stage the validation member into the training trees "
-                         "anyway — this leaks validation data, so it must be "
-                         "asked for explicitly")
+    ap.add_argument("--omit-members", nargs="+", default=[],
+                    help="LE2-style member ids to leave off disk entirely. "
+                         "Not the leak guard — validation members ARE staged "
+                         "by default and are excluded from training by the "
+                         "realization lists in the config. See the header.")
     ap.add_argument("--keep-source", action="store_true",
                     help="leave the original <VAR>/<member>/ dirs in place "
                          "(default: leave them; they are never deleted)")
@@ -117,7 +123,8 @@ def main():
             if not files:
                 print(f"  [skip] {member}: no chunks")
                 continue
-            held = le2 in args.val_members and not args.allow_val_in_train
+            held = le2 in args.omit_members
+            is_val = le2 in VAL_MEMBERS
             try:
                 ds = xr.open_mfdataset(files, combine="by_coords",
                                        chunks={"time": 120})
@@ -131,8 +138,13 @@ def main():
                          f"ssp370 {int(ssp['time.year'][0])}-"
                          f"{int(ssp['time.year'][-1])} ({ssp.sizes['time']} mo)")
                 if args.dry_run:
-                    print(f"  [dry-run] {member} -> {le2}: {spans}"
-                          + ("   [VAL — hist/ssp370 training trees SKIPPED]" if held else ""))
+                    note = ""
+                    if held:
+                        note = "   [OMITTED — not written]"
+                    elif is_val:
+                        note = "   [validation member — staged; keep it out of "\
+                               "experiment_configs]"
+                    print(f"  [dry-run] {member} -> {le2}: {spans}{note}")
                     ds.close()
                     continue
                 for scen, part in (("hist", hist), ("ssp370", ssp)):
@@ -142,8 +154,12 @@ def main():
                     n = write_chunks(part, out, args.num_chunks)
                     print(f"  [ok] {var}/{scen}/{le2}: {n} months")
                 if held:
-                    print(f"  [VAL] {member} -> {le2}: held out, not staged into "
-                          f"hist/ssp370 (pass --allow-val-in-train to override)")
+                    print(f"  [omit] {member} -> {le2}: --omit-members, nothing "
+                          f"written")
+                elif is_val:
+                    print(f"  [VAL] {le2} is the validation member: staged like "
+                          f"any other, and must appear ONLY in "
+                          f"val_experiment_configs")
                 ds.close()
             except Exception as e:
                 print(f"  [FAIL] {var}/{member}: {type(e).__name__}: {e}",

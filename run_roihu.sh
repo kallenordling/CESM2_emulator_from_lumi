@@ -71,6 +71,24 @@ lumi_env_banner
 SCRIPT="${1:?usage: sbatch --account=project_2019839 run_roihu.sh <script.py> [args...]}"
 shift || true
 
+# `module` is a SHELL FUNCTION, not a binary, and sbatch only inherits it when
+# the submitting shell happened to have it defined. Submitting over a
+# non-interactive ssh (`ssh host 'sbatch ...'`) does not, and the job then dies
+# on `module: command not found` two seconds in — job 743114. Define it here
+# instead of depending on the submitter's environment. zz-csc-env.sh also sets
+# the arch-correct MODULEPATH, which matters because the login node is x86_64
+# and the GH200 nodes are aarch64.
+if ! declare -F module >/dev/null 2>&1 && ! command -v module >/dev/null 2>&1; then
+    for _init in /etc/profile.d/zz-csc-env.sh /usr/share/lmod/lmod/init/bash; do
+        [ -r "${_init}" ] && source "${_init}" && break
+    done
+fi
+if ! declare -F module >/dev/null 2>&1 && ! command -v module >/dev/null 2>&1; then
+    echo "[roihu] ERROR: no 'module' command and none of the init scripts" >&2
+    echo "[roihu]        defined one. Cannot load ${SITE_MODULE_CMD}." >&2
+    exit 1
+fi
+
 module purge
 eval "${SITE_MODULE_CMD}"
 
