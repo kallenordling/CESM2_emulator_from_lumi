@@ -728,7 +728,21 @@ class UNetModel3D(nn.Module):
             (1, init_kernel_size, init_kernel_size),
             padding=(0, init_padding, init_padding),
         )
-        rotary_emb = RotaryEmbedding(min(32, attn_dim_head))
+        # cache_if_possible=False. cached_freqs is the model's only piece of
+        # mutable state carried BETWEEN iterations: forward writes it via
+        # tmp_store(register_buffer) and the next forward returns a view of it.
+        # Autograd then sees the tensor it saved for backward rewritten
+        # underneath it —
+        #   RuntimeError: one of the variables needed for gradient computation
+        #   has been modified by an inplace operation:
+        #   [torch.cuda.FloatTensor [12, 32]] is at version 2; expected 1
+        # [12, 32] is exactly (seq_len, 2*dim/2) for seq_len 12 and
+        # min(32, attn_dim_head). The same cache is what CUDA graphs choked on
+        # first (jobs 744251, 744460), so it is hostile to compilation in
+        # general. Recomputing it is an einsum plus a repeat over a (12, 16)
+        # tensor — nothing next to the attention it feeds.
+        rotary_emb = RotaryEmbedding(min(32, attn_dim_head),
+                                     cache_if_possible=False)
         # If we are using temporal attn over convolution
         if use_temp_attn:
             # Define positional encodings and a temporal attention constructor
