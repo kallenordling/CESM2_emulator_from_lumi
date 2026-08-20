@@ -619,6 +619,22 @@ class UNetTrainer:
                     self.accelerator.log({"Epoch": epoch}, step=self.global_step)
                     self.accelerator.print(log_dict, {"Epoch": epoch})
 
+                    # ── Periodic progress line, same shape as the end-of-epoch
+                    # one. An epoch here is 2250 optimizer steps (~18 min), so
+                    # without this the log carries no timing at all until the
+                    # epoch ends. 0 disables it; set progress_every in the
+                    # trainer hyperparameters (in STEPS, like save_every).
+                    _pe = int(getattr(self, "progress_every", 0) or 0)
+                    if (_pe and self.global_step % _pe == 0
+                            and self.accelerator.is_main_process):
+                        _el = time.time() - epoch_start
+                        _n = step + 1
+                        self.accelerator.print(
+                            f"[EPOCH {epoch}] duration: {_el/60:.1f} min  "
+                            f"({_el:.0f}s)  steps: {_n}  "
+                            f"({_el/max(_n, 1):.2f}s/step, global {self.global_step})"
+                        )
+
             if self.accelerator.is_main_process:
                 epoch_secs = time.time() - epoch_start
                 self.accelerator.print(
