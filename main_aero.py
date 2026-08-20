@@ -118,7 +118,14 @@ def main(cfg: DictConfig) -> None:
 
     # ── Build held-out validation dataset ───────────────────────────────────
     val_set = None
-    if data_cfg.get("val_experiment_configs") is not None:
+    # val_every: 0 turns held-out validation off, and then the val datasets are
+    # not merely unused — building them costs four dataset loads (cond
+    # broadcast, PCA, smoothing) per rank at startup, so skip them outright.
+    _val_every = OmegaConf.select(cfg, "trainer.hyperparameters.val_every")
+    if _val_every is not None and int(_val_every) == 0:
+        if accelerator.is_main_process:
+            logger.info("val_every=0 — held-out validation OFF, val datasets not built")
+    elif data_cfg.get("val_experiment_configs") is not None:
         val_set = build_multi_experiment_loader(
             experiment_configs=OmegaConf.to_container(data_cfg.val_experiment_configs, resolve=True),
             accelerator=accelerator,

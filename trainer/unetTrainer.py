@@ -259,7 +259,10 @@ class UNetTrainer:
         """
         # ── Held-out validation bookkeeping ──
         self.val_loader     = None        # set externally in main_aero.py
-        self.val_every      = 10          # eval every N epochs
+        # Held-out validation cadence, in EPOCHS. 0 = OFF — needed because
+        # `epoch % val_every == 0` is true at epoch 0 for ANY value, so a large
+        # number does not disable it, it just validates once and then stops.
+        self.val_every      = 10
         self.best_val_skill = -float("inf")
         # Periodic force-eval (bypasses the best-skill gate so evals keep firing
         # past the VAL/Skill plateau). 0 = off. Set via config force_eval_every.
@@ -644,7 +647,7 @@ class UNetTrainer:
                 )
 
             # ── Held-out validation every val_every epochs ───────────────
-            if epoch % self.val_every == 0:
+            if self.val_every and epoch % self.val_every == 0:
                 self.eval_held_out(epoch)
             torch.cuda.empty_cache()
 

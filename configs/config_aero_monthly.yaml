@@ -63,6 +63,10 @@ trainer:
     # unreliable gate — single-realization internal variability — so evals
     # otherwise stop once it plateaus). Keeps TCRE/bias tracked past the skill
     # peak. 0 = off (only best-skill evals).
+    # Held-out validation cadence in EPOCHS; 0 = OFF (evaluations are run
+    # manually on Roihu). Note a large number does NOT disable it —
+    # `epoch % val_every == 0` is true at epoch 0 whatever the value.
+    val_every: 0
     force_eval_every: 25
     # Diagnostic: when true, hold cond_loss_scaling=0 so ALL aux losses
     # (cond/TCRE/low-t/EBM/interaction) + the null pass are skipped → pure
