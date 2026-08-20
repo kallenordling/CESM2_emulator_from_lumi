@@ -68,6 +68,12 @@ trainer:
     # (cond/TCRE/low-t/EBM/interaction) + the null pass are skipped → pure
     # denoising MSE. Used by the run_mseyb A/B arm (run2_mseyb.sh). Default off.
     mse_only: false
+    # torch.compile mode. "default" is the safe one; "reduce-overhead"
+    # adds CUDA graphs and is worth it only where kernel-launch overhead
+    # dominates, which batch_size 1 makes plausible here. NVIDIA-only in
+    # practice — measure the [EPOCH n] duration against "default" before
+    # keeping it. TORCH_COMPILE=0 disables compilation entirely.
+    compile_mode: default
     batch_size: 1        # must match batch_size in config_data_monthly.yaml.
                          # 8 -> 1 from the measured per-sample peak, not from
                          # that job's OOMs (which were rank-contention — see

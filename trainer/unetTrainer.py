@@ -482,12 +482,38 @@ class UNetTrainer:
         ) = self.accelerator.prepare(self.model, self.optimizer)
 
         # torch.compile: 15-30% throughput gain on fixed-shape UNet inputs.
-        # Set env var TORCH_COMPILE=0 to disable if ROCm issues arise.
+        # ON BY DEFAULT; set env TORCH_COMPILE=0 to disable if ROCm issues arise.
+        #
+        # The mode comes from `compile_mode` in the trainer hyperparameters, or
+        # TORCH_COMPILE_MODE for a one-off run, and defaults to "default".
+        # "reduce-overhead" adds CUDA graphs: it is the mode that pays off at
+        # SMALL batch sizes, where kernel-launch overhead dominates — i.e.
+        # exactly the monthly config's batch_size 1. It needs static shapes and
+        # stable input addresses, so treat it as measured-or-not-used: compare
+        # the [EPOCH n] duration against "default" before keeping it, and note
+        # that CUDA graphs interact badly with ROCm, which is why this is not
+        # simply the default.
+        #
+        # (Until 2026-08-20 this printed "mode=reduce-overhead" while calling
+        # mode="default" — the log was not evidence of what ran.)
         import os
         if os.environ.get("TORCH_COMPILE", "1") != "0":
+            compile_mode = str(
+                os.environ.get("TORCH_COMPILE_MODE")
+                or getattr(self, "compile_mode", None)
+                or "default"
+            )
+            # dynamic=False pins the shapes. Left unset by default so torch
+            # keeps its automatic behaviour and existing runs are unchanged;
+            # "reduce-overhead" needs it, since CUDA graphs cannot take a
+            # dynamic dim and Inductor dies on the downsampling symbol
+            # ("For ((s80 + 1)//2), expected [s80] to have been codegen-ed").
+            dyn = getattr(self, "compile_dynamic", None)
+            kw = {} if dyn is None else {"dynamic": bool(dyn)}
             try:
-                self.model = torch.compile(self.model, mode="default")
-                print("[TRAINER] torch.compile enabled (mode=reduce-overhead)")
+                self.model = torch.compile(self.model, mode=compile_mode, **kw)
+                print(f"[TRAINER] torch.compile enabled (mode={compile_mode}"
+                      f"{'' if dyn is None else f', dynamic={bool(dyn)}'})")
             except Exception as e:
                 print(f"[TRAINER] torch.compile skipped: {e}")
 
