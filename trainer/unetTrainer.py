@@ -550,9 +550,11 @@ class UNetTrainer:
                     self._update_loss_emas()
                     self._update_cond_scaling(sens.detach().item(), epoch)
 
-                    if self.accelerator.is_main_process:
-                        if self.global_step % self.save_every == 0:
-                            self.save(epoch)
+                    # NOT under is_main_process: _build_save_dict issues a
+                    # collective (see save()), so every rank has to reach it or
+                    # the ranks desynchronise. save() itself writes on rank 0.
+                    if self.global_step % self.save_every == 0:
+                        self.save(epoch)
 
                     # Fused metric gather: stack the nine logging scalars into one
                     # (1, 9) tensor and issue a SINGLE gather_for_metrics collective
@@ -743,25 +745,28 @@ class UNetTrainer:
 
         # ── Auto-save best checkpoint & trigger evaluation ────────────────
         # Guard against degenerate epoch-0 skill=1.0 (avg_sig≈0 during warm-up)
-        if avg_sig > 1e-4 and val_skill > self.best_val_skill and self.accelerator.is_main_process:
+        # The condition is rank-UNIFORM: avg_sig and val_skill come from
+        # gather_for_metrics means, and best_val_skill is now updated on every
+        # rank. That matters because _build_save_dict is collective — deciding
+        # on rank 0 alone would leave the others out of the collective.
+        if avg_sig > 1e-4 and val_skill > self.best_val_skill:
             self.best_val_skill = val_skill
             if self.save_name is not None:
                 base = self.save_name.split(".pt")[0]
-                os.makedirs(self.save_dir, exist_ok=True)
                 best_path = os.path.abspath(
                     os.path.join(self.save_dir, f"{base}_best.pt")
                 )
-                torch.save(
-                    self._build_save_dict(
-                        extra={"best_val_skill": val_skill, "best_epoch": epoch}
-                    ),
-                    best_path,
-                    _use_new_zipfile_serialization=False,
+                best_state = self._build_save_dict(
+                    extra={"best_val_skill": val_skill, "best_epoch": epoch}
                 )
-                self.accelerator.print(
-                    f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
-                )
-                self._spawn_eval(best_path, epoch)
+                if self.accelerator.is_main_process:
+                    os.makedirs(self.save_dir, exist_ok=True)
+                    torch.save(best_state, best_path,
+                               _use_new_zipfile_serialization=False)
+                    self.accelerator.print(
+                        f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
+                    )
+                    self._spawn_eval(best_path, epoch)
                 self._last_eval_epoch = epoch
 
         # ── Periodic force-eval (bypasses the best-skill gate) ────────────────
@@ -772,20 +777,26 @@ class UNetTrainer:
         # {base}_{epoch}.pt checkpoint. Skipped if a best-eval already fired this
         # epoch (it shares the same trigger / output dir).
         fee = int(getattr(self, "force_eval_every", 0))
-        if (fee and epoch > 0 and self.accelerator.is_main_process
+        # is_main_process is deliberately NOT part of this condition — the
+        # counters it reads are updated on every rank, so the branch is taken
+        # by all of them and the collective inside _build_save_dict matches.
+        if (fee and epoch > 0
                 and self.save_name is not None
                 and epoch != getattr(self, "_last_eval_epoch", -1)
                 and epoch - getattr(self, "_last_force_eval_epoch", -10**9) >= fee):
             base = self.save_name.split(".pt")[0]
             ckpt = os.path.abspath(os.path.join(self.save_dir, f"{base}_{epoch}.pt"))
-            if not os.path.exists(ckpt):
-                os.makedirs(self.save_dir, exist_ok=True)
-                torch.save(self._build_save_dict(extra={"force_eval_epoch": epoch}),
-                           ckpt, _use_new_zipfile_serialization=False)
-            self.accelerator.print(
-                f"  [FORCE-EVAL] epoch {epoch} (best-skill gate bypassed) → {ckpt}"
-            )
-            self._spawn_eval(ckpt, epoch)
+            force_state = (None if os.path.exists(ckpt)
+                           else self._build_save_dict(extra={"force_eval_epoch": epoch}))
+            if self.accelerator.is_main_process:
+                if force_state is not None:
+                    os.makedirs(self.save_dir, exist_ok=True)
+                    torch.save(force_state, ckpt,
+                               _use_new_zipfile_serialization=False)
+                self.accelerator.print(
+                    f"  [FORCE-EVAL] epoch {epoch} (best-skill gate bypassed) → {ckpt}"
+                )
+                self._spawn_eval(ckpt, epoch)
             self._last_eval_epoch = epoch
             self._last_force_eval_epoch = epoch
 
@@ -1845,6 +1856,19 @@ class UNetTrainer:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_save_dict(self, extra: dict | None = None) -> dict:
+        # COLLECTIVE — every rank must call this, at the same point in the
+        # collective stream. accelerator.unwrap_model(...).state_dict() on a
+        # torch.compile'd DDP model issues a broadcast, so calling it under
+        # `if is_main_process` desynchronises the ranks and the job dies on the
+        # NCCL watchdog 600 s later. Diagnosed by job 747573 with
+        # TORCH_DISTRIBUTED_DEBUG=DETAIL:
+        #   Rank 0: SequenceNumber=64, BROADCAST,       TensorShape=[384]
+        #   Rank 1: SequenceNumber=64, _ALLGATHER_BASE, TensorShape=[1, 9]
+        # i.e. rank 0 inside the save while the others were already at the
+        # metric gather. TORCH_COMPILE=0 makes the broadcast go away (job
+        # 747574 saved every 5 steps quite happily), which is the other half of
+        # the evidence. Every caller now builds on all ranks and writes on
+        # rank 0.
         """Assemble the on-disk checkpoint payload.
 
         Always includes EMA / Unet / Optimizer / Global Step and every entry
@@ -1890,7 +1914,11 @@ class UNetTrainer:
         if self.save_name is None:
             return
 
+        # EVERY rank builds the state dict — see _build_save_dict — and only
+        # rank 0 goes on to write it.
         state_dict = self._build_save_dict()
+        if not self.accelerator.is_main_process:
+            return
         os.makedirs(self.save_dir, exist_ok=True)
 
         base = self.save_name.split(".pt")[0]
