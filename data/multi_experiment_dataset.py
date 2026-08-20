@@ -412,6 +412,14 @@ class MultiExperimentDataLoader:
             self.per_exp_list = counts.tolist()
             self.batch_size   = batch_size
             self.per_exp      = max(counts)
+            # A SINGLE fixed split cannot represent more scenarios than there are
+            # slots in a batch: at batch_size 1 the weights [2,2,4,1] floor to
+            # [0,0,0,0] and largest-remainder hands the only slot to aaer for the
+            # whole run — hist, ssp370 and ghg then never train at all, because
+            # _generate_mixed drops every experiment whose count is 0. Spread the
+            # weights over a CYCLE of batches instead; see _build_batch_plan.
+            self._batch_plan = self._build_batch_plan(weights, batch_size, counts)
+            self._per_cycle  = np.sum(self._batch_plan, axis=0).astype(int).tolist()
             print(
                 "[MULTI] scenario_weights → samples per batch: "
                 + ", ".join(
@@ -419,12 +427,27 @@ class MultiExperimentDataLoader:
                     for name, n in zip(dataset.scenario_names, self.per_exp_list)
                 )
             )
+            if len(self._batch_plan) > 1:
+                names = list(dataset.scenario_names)
+                cycle = ", ".join(
+                    "+".join(f"{names[i]}x{c}" if c > 1 else names[i]
+                             for i, c in enumerate(v) if c)
+                    for v in self._batch_plan
+                )
+                per_cycle = np.sum(self._batch_plan, axis=0)
+                print(f"[MULTI] batch_size {batch_size} < the weights need, so the "
+                      f"split CYCLES over {len(self._batch_plan)} batches: {cycle}")
+                print("[MULTI] per cycle: "
+                      + ", ".join(f"{n}={int(c)}"
+                                  for n, c in zip(names, per_cycle)))
         else:
             if mix_scenarios and batch_size % self.n_exp != 0:
                 batch_size = (batch_size // self.n_exp) * self.n_exp
             self.batch_size   = batch_size
             self.per_exp      = batch_size // self.n_exp if mix_scenarios else batch_size
             self.per_exp_list = [self.per_exp] * self.n_exp
+            self._batch_plan  = [list(self.per_exp_list)]
+            self._per_cycle   = list(self.per_exp_list)
 
         if stratified:
             print(
@@ -578,6 +601,67 @@ class MultiExperimentDataLoader:
 
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_batch_plan(weights, batch_size, counts):
+        """Per-batch scenario splits, cycling when one batch cannot hold them all.
+
+        Returns a list of count-vectors. Batch b uses plan[b % len(plan)], so a
+        single-entry plan is exactly the old fixed split — which is what every
+        configuration with enough slots per batch still gets, byte for byte.
+
+        WHEN IT CYCLES. If any experiment rounds to zero slots, the fixed split
+        silently drops that scenario from training entirely. Instead, lay the
+        weights out as a sequence of individual samples, spread so that a
+        scenario with weight 4 recurs about every other entry rather than
+        arriving as one block of four (Bresenham-style: repeatedly take the
+        scenario whose "debt" against its ideal rate is largest), then chunk the
+        sequence into batches of batch_size. The cycle is exact — over its
+        length, every scenario appears in proportion to its weight — and short,
+        so the gradient-accumulation window that makes up one optimizer step
+        spans several scenarios. That is where the cross-scenario contrast has
+        to come from once a batch holds a single sample.
+        """
+        counts = np.asarray(counts, dtype=int)
+        if counts.min() > 0:
+            return [counts.tolist()]
+
+        w = np.asarray(weights, dtype=float)
+        w = w / w.sum()
+        # Sequence length: one entry per unit of the smallest integer weights,
+        # times batch_size so the chunking always divides evenly.
+        approx = np.maximum(np.round(w / max(w[w > 0].min(), 1e-12)), 1).astype(int)
+        n_slots = int(approx.sum()) * int(batch_size)
+
+        # Bresenham / largest-remainder spread.
+        seq, taken = [], np.zeros(len(w))
+        for k in range(n_slots):
+            debt = w * (k + 1) - taken
+            i = int(np.argmax(debt))
+            seq.append(i)
+            taken[i] += 1
+
+        plan = []
+        for b in range(0, n_slots, batch_size):
+            v = np.zeros(len(w), dtype=int)
+            for i in seq[b:b + batch_size]:
+                v[i] += 1
+            plan.append(v.tolist())
+        return plan
+
+    def _plan_for_batch(self, b):
+        """The count-vector for batch b, phase-shifted per rank.
+
+        The phase means two ranks doing the same global step are usually on
+        different scenarios, so the DDP all-reduce averages across scenarios as
+        well as across samples. Every rank still runs the SAME NUMBER of
+        batches, which is what keeps the collectives aligned.
+        """
+        plan = self._batch_plan
+        if len(plan) == 1:
+            return plan[0]
+        rank = self.accelerator.process_index if self.accelerator is not None else 0
+        return plan[(b + rank) % len(plan)]
+
     def _generate_mixed(self):
         """Yield cross-scenario batches from the current window pool.
 
@@ -675,7 +759,7 @@ class MultiExperimentDataLoader:
         for exp_idx in range(self.n_exp):
             flat_idx = self.dataset._index.flat_indices_for_experiment(exp_idx)
             n_win = len(flat_idx)
-            target_pool = max(n_win, ws * self.per_exp_list[exp_idx])
+            target_pool = max(n_win, ws * max(self._per_cycle[exp_idx], 1))
             if self.year_bias != 0.0 and n_win > 0:
                 ds = self.dataset.datasets[exp_idx]
                 years = ds._time_values[:n_win].astype(np.float64)
@@ -696,23 +780,40 @@ class MultiExperimentDataLoader:
             else:
                 index_pools.append(flat_idx)
 
-        n_batches = min(
-            len(pool) // self.per_exp_list[i]
+        # How many FULL CYCLES the pools support, not how many batches: with a
+        # cycling plan an experiment contributes a different number of windows
+        # to each batch, so the per-batch divisor is not a constant.
+        cycle_len = len(self._batch_plan)
+        n_cycles = min(
+            len(pool) // self._per_cycle[i]
             for i, pool in enumerate(index_pools)
-            if self.per_exp_list[i] > 0
+            if self._per_cycle[i] > 0
         )
+        n_batches = n_cycles * cycle_len
         if self.steps_per_realization is not None:
             n_batches = min(n_batches, self.steps_per_realization)
         if n_batches == 0:
             return
 
         b_start, b_end = self._rank_batch_range(n_batches)
+        # Per-experiment read cursor: each experiment's pool is consumed at its
+        # own rate, so position cannot be derived from the batch index alone.
+        cursor = [0] * self.n_exp
+        for b in range(b_start):
+            for i, c in enumerate(self._plan_for_batch(b)):
+                cursor[i] += c
         for b in range(b_start, b_end):
-            window_indices_per_exp = [
-                pool[b * self.per_exp_list[i] : (b + 1) * self.per_exp_list[i]]
-                - offsets[i]
-                for i, pool in enumerate(index_pools)
-            ]
+            plan = self._plan_for_batch(b)
+            window_indices_per_exp = []
+            for i, pool in enumerate(index_pools):
+                take = plan[i]
+                lo = cursor[i] % max(len(pool), 1) if len(pool) else 0
+                # Wrap rather than run off the end: the cycle may outlast the
+                # pool for a rarely-drawn scenario, and a short read would
+                # silently shrink the batch.
+                idx = np.take(pool, range(lo, lo + take), mode="wrap") if take else pool[:0]
+                window_indices_per_exp.append(idx - offsets[i])
+                cursor[i] += take
             yield self._vectorized_fetch(window_indices_per_exp, device, to_device=to_device)
 
     def _generate_mixed_bsp(self, device, to_device: bool = True):
