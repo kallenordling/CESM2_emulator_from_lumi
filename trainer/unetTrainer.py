@@ -620,10 +620,11 @@ class UNetTrainer:
                     self.accelerator.print(log_dict, {"Epoch": epoch})
 
                     # ── Periodic progress line, same shape as the end-of-epoch
-                    # one. An epoch here is 2250 optimizer steps (~18 min), so
-                    # without this the log carries no timing at all until the
-                    # epoch ends. 0 disables it; set progress_every in the
-                    # trainer hyperparameters (in STEPS, like save_every).
+                    # one, which otherwise arrives only once every ~18 min.
+                    # COUNTS OPTIMIZER STEPS: global_step advances once per
+                    # gradient_accumulation_steps, so a monthly epoch is ~140 of
+                    # these against the 2250 micro-steps the end-of-epoch line
+                    # reports. save_every uses the same clock. 0 disables.
                     _pe = int(getattr(self, "progress_every", 0) or 0)
                     if (_pe and self.global_step % _pe == 0
                             and self.accelerator.is_main_process):

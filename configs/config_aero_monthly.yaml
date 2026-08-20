@@ -73,10 +73,12 @@ trainer:
     # dominates, which batch_size 1 makes plausible here. NVIDIA-only in
     # practice — measure the [EPOCH n] duration against "default" before
     # keeping it. TORCH_COMPILE=0 disables compilation entirely.
-    # Progress line every N optimizer STEPS, same format as the
-    # end-of-epoch one. An epoch is 2250 steps (~18 min) here, so
-    # without this the log shows no timing until the epoch ends.
-    progress_every: 100
+    # Progress line every N OPTIMIZER steps, same format as the end-of-epoch
+    # one. Note the two step counts: global_step advances once per
+    # gradient_accumulation_steps (16), so one epoch is ~140 optimizer steps
+    # even though the end-of-epoch line reports 2250 — that figure is
+    # micro-steps. At ~7.6 s per optimizer step, 20 is a line every ~2.5 min.
+    progress_every: 20
     compile_mode: default
     # null = torch's own dynamic-shape handling. reduce-overhead REQUIRES
     # false: CUDA graphs cannot take a dynamic dim, and Inductor dies in
