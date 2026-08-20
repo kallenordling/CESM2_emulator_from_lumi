@@ -832,11 +832,6 @@ class ClimateDataset(Dataset):
         raw_cond.close()
         del raw_cond
 
-        # Annual cond -> the target's (possibly monthly) axis. Must happen
-        # BEFORE the previous-state channel is appended: that is a torch.cat
-        # against the target tensor and needs the lengths to already agree.
-        self._broadcast_cond_to_target()
-
         # ── Spatial smoothing on conditioning (before PCA) ───────────────────
         # Applied per-channel via cond_smooth_sigma list. Removes line features
         # from gridded inventories (e.g. SO2 shipping lanes, flight paths) that
@@ -858,6 +853,15 @@ class ClimateDataset(Dataset):
                 var_names=self.cond_vars,
                 pca_objects=self._pca_cond,     # None on first call → fits
             )
+
+        # ── Annual cond -> the target's (possibly monthly) axis ──────────────
+        # AFTER smoothing and PCA, which are 12x cheaper on the annual axis and
+        # give the identical result: every month of a year holds the same map,
+        # so broadcasting first would only feed the PCA twelve copies of each
+        # sample — same EOFs, twelve times the work. BEFORE the previous-state
+        # channel, which is a torch.cat against the target tensor and needs the
+        # lengths to already agree.
+        self._broadcast_cond_to_target()
 
         # ── Previous-state channel, appended LAST ────────────────────────────
         # After smoothing and PCA, deliberately. It is a TARGET field, not an
