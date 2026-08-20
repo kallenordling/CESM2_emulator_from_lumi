@@ -30,7 +30,14 @@ export LUMI_REPO="${LUMI_PROJAPPL}/CESM2_emulator_from_lumi"
 export LUMI_VENV="${LUMI_PROJAPPL}/venvs/diffesm_laif"
 export LUMI_PKGS="${LUMI_SCRATCH}/python_packages"
 export LUMI_DATA="${LUMI_SCRATCH}/emulator_data"
-export LUMI_EVAL_OUT="${LUMI_SCRATCH}/eval_output"
+# Eval output does NOT have to live on LUMI_PROJECT's scratch. It is deliberately
+# a separate knob: the training data, cond files and venv are on LUMI_PROJECT
+# (462001328), while eval results are collected on LUMI_EVAL_PROJECT so they land
+# in one place across runs regardless of which allocation the job billed to.
+# Set LUMI_EVAL_PROJECT to LUMI_PROJECT to put them back on the same scratch.
+LUMI_EVAL_PROJECT="${LUMI_EVAL_PROJECT:-462001112}"
+export LUMI_EVAL_PROJECT
+export LUMI_EVAL_OUT="${LUMI_EVAL_OUT:-/scratch/project_${LUMI_EVAL_PROJECT}/eval_output}"
 
 # Container-internal view of projappl. Some launchers need this exact prefix
 # because the bind mount inside the singularity image resolves differently.

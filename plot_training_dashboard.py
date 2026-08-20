@@ -10,7 +10,7 @@ Pulls two sources:
 Usage:
     python plot_training_dashboard.py [--run run_sensfix]
         [--log-dir /mnt/lumi2/CESM2_emulator_from_lumi/logs]
-        [--eval-dir /mnt/lumi_sc2/eval_output] [--out <png>]
+        [--eval-dir /mnt/lumi_sc/eval_output] [--out <png>]
 """
 import argparse, csv, glob, json, os, re, subprocess
 from collections import defaultdict
@@ -115,7 +115,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="run_sensfix")
     ap.add_argument("--log-dir", default="/mnt/lumi2/CESM2_emulator_from_lumi/logs")
-    ap.add_argument("--eval-dir", default="/mnt/lumi_sc2/eval_output")
+    ap.add_argument("--eval-dir", default="/mnt/lumi_sc/eval_output")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 

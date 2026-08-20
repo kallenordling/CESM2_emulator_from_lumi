@@ -781,9 +781,11 @@ class UNetTrainer:
 
             # Write eval output to scratch (writable), not next to the checkpoint
             # which may be in projappl (read-only on compute nodes).
+            # L.EVAL_OUT, not SCRATCH: eval results are collected on
+            # LUMI_EVAL_PROJECT's scratch (see lumi_paths.py), which is
+            # deliberately independent of the project holding the training data.
             run_tag_for_dir = os.path.splitext(os.path.basename(self.save_name))[0]
-            scratch_root = os.environ.get("SCRATCH", f"{L.SCRATCH}")
-            output_dir = os.path.join(scratch_root, "eval_output", run_tag_for_dir, f"best_ep{epoch:04d}")
+            output_dir = os.path.join(L.EVAL_OUT, run_tag_for_dir, f"best_ep{epoch:04d}")
 
             run_tag = os.path.splitext(os.path.basename(self.save_name))[0]
             trigger_path = os.path.join(trigger_dir, f"eval_request_{run_tag}_ep{epoch:04d}.json")

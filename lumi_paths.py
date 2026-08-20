@@ -25,7 +25,15 @@ REPO: str = f"{PROJAPPL}/CESM2_emulator_from_lumi"
 VENV: str = f"{PROJAPPL}/venvs/diffesm_laif"
 PKGS: str = f"{SCRATCH}/python_packages"
 DATA: str = f"{SCRATCH}/emulator_data"
-EVAL_OUT: str = f"{SCRATCH}/eval_output"
+
+#: Eval output is a SEPARATE knob from LUMI_PROJECT — see lumi_env.sh. Results are
+#: collected on LUMI_EVAL_PROJECT's scratch so they land in one place across runs,
+#: while the data/venv stay on LUMI_PROJECT. ``expand()`` below leaves this path
+#: alone; rewriting it to LUMI_PROJECT is exactly what it must not do.
+EVAL_PROJECT: str = os.environ.get("LUMI_EVAL_PROJECT", "462001112")
+EVAL_OUT: str = os.environ.get(
+    "LUMI_EVAL_OUT", f"/scratch/project_{EVAL_PROJECT}/eval_output"
+)
 
 #: Container-internal view of projappl (singularity bind mount).
 REPO_PFS: str = f"/pfs/lustrep1/projappl/project_{LUMI_PROJECT}/CESM2_emulator_from_lumi"
@@ -34,6 +42,7 @@ REPO_PFS: str = f"/pfs/lustrep1/projappl/project_{LUMI_PROJECT}/CESM2_emulator_f
 # config loaded by a script that only imported this module still resolves.
 os.environ.setdefault("LUMI_PROJECT", LUMI_PROJECT)
 for _k, _v in (
+    ("LUMI_EVAL_PROJECT", EVAL_PROJECT),
     ("LUMI_ACCOUNT", ACCOUNT),
     ("LUMI_SCRATCH", SCRATCH),
     ("LUMI_PROJAPPL", PROJAPPL),
@@ -53,8 +62,15 @@ def expand(path: str) -> str:
     Also rewrites any surviving hardcoded project id, so a config or checkpoint
     written under a previous project still resolves against the current one
     instead of silently pointing at a directory this account cannot read.
+
+    EXCEPTION: paths under ``EVAL_OUT`` are returned untouched. Eval output lives
+    on LUMI_EVAL_PROJECT by design, and the blanket rewrite below would drag it
+    back onto LUMI_PROJECT — the one place the "one project id" rule must not
+    apply.
     """
     out = os.path.expandvars(path)
+    if out.startswith(EVAL_OUT):
+        return out
     for prefix in ("/scratch/project_", "/projappl/project_"):
         old = out.find(prefix)
         while old != -1:
