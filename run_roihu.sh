@@ -79,9 +79,19 @@ shift || true
 # the arch-correct MODULEPATH, which matters because the login node is x86_64
 # and the GH200 nodes are aarch64.
 if ! declare -F module >/dev/null 2>&1 && ! command -v module >/dev/null 2>&1; then
+    # `set -u` must come off while sourcing: zz-csc-env.sh reads $PS1, which is
+    # unset in a batch shell, and would abort the job on "PS1: unbound variable".
+    # It also RETURNS IMMEDIATELY in a non-interactive shell unless
+    # CSC_ENV_INIT_NON_INTERACTIVE=yes, which is why sourcing it alone left
+    # `module` undefined (job 743157). Source both, in order: the CSC script for
+    # the arch-correct MODULEPATH, then lmod's own init for the function itself.
+    set +u
+    export CSC_ENV_INIT_NON_INTERACTIVE=yes
     for _init in /etc/profile.d/zz-csc-env.sh /usr/share/lmod/lmod/init/bash; do
-        [ -r "${_init}" ] && source "${_init}" && break
+        [ -r "${_init}" ] && source "${_init}"
+        declare -F module >/dev/null 2>&1 && break
     done
+    set -u
 fi
 if ! declare -F module >/dev/null 2>&1 && ! command -v module >/dev/null 2>&1; then
     echo "[roihu] ERROR: no 'module' command and none of the init scripts" >&2

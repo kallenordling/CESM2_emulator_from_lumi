@@ -6,8 +6,10 @@ output_dir: runs/test_run
 seed: 1337
 
 # Path to the data config file (relative to configs/ directory)
-# Switch to conf_data_val.yaml for validation runs
-data_config: config_data.yaml
+# MUST be the monthly one: config_data.yaml is the ANNUAL fork and also points
+# at LUMI paths, so this config paired with it trains on the wrong data (or, on
+# Roihu, dies on a missing /scratch/project_462001328).
+data_config: config_data_monthly.yaml
 
 # Accelerate initialization kwargs
 accelerator:
@@ -75,7 +77,7 @@ trainer:
                          # close but untested; raise it only after a rank-bound
                          # sweep.
     save_dir: runs/
-    save_name: run_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
+    save_name: run_monthly_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
     load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
     # ── LR decay (pure function of global_step → resume-invariant; default off) ─
