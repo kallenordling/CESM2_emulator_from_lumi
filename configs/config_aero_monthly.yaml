@@ -74,6 +74,10 @@ trainer:
     # practice — measure the [EPOCH n] duration against "default" before
     # keeping it. TORCH_COMPILE=0 disables compilation entirely.
     compile_mode: default
+    # null = torch's own dynamic-shape handling. reduce-overhead REQUIRES
+    # false: CUDA graphs cannot take a dynamic dim, and Inductor dies in
+    # codegen on the downsampling symbol (job 744145).
+    compile_dynamic: null
     batch_size: 1        # must match batch_size in config_data_monthly.yaml.
                          # 8 -> 1 from the measured per-sample peak, not from
                          # that job's OOMs (which were rank-contention — see
