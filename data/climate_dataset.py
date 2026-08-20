@@ -590,6 +590,79 @@ class ClimateDataset(Dataset):
         """Estimates the number of batches in the dataset."""
         return len(self) * len(self.realizations) // batch_size
 
+    # ── Time-coordinate helpers ─────────────────────────────────────────
+    # Target trees may be ANNUAL (integer year coord) or MONTHLY (cftime /
+    # datetime64). Conditioning files are always annual, so the two axes have
+    # to be reconciled explicitly rather than by position — see
+    # _broadcast_cond_to_target.
+    @staticmethod
+    def _coord_years(coord_vals) -> np.ndarray:
+        """Integer calendar year per timestep, for int, datetime64 or cftime."""
+        if len(coord_vals) and hasattr(coord_vals[0], "year"):
+            return np.array([int(str(v)[:4]) for v in coord_vals], dtype=int)
+        return np.asarray(coord_vals).astype(int)
+
+    @staticmethod
+    def _coord_steps(coord_vals) -> np.ndarray:
+        """Monotone step counter: months since year 0 if monthly, else years.
+
+        _time_values must stay in YEARS (get_baseline_mean and the TCRE terms
+        in multi_experiment_dataset read it as such), but a monthly axis repeats
+        each year twelve times, so evenness has to be judged on a separate
+        counter.
+        """
+        if len(coord_vals) and hasattr(coord_vals[0], "month"):
+            return np.array([int(str(v)[:4]) * 12 + int(str(v)[5:7]) - 1
+                             for v in coord_vals], dtype=int)
+        return ClimateDataset._coord_years(coord_vals)
+
+    def _broadcast_cond_to_target(self):
+        """Put the annual conditioning tensor on the target's time axis.
+
+        __getitem__ slices target and cond with the SAME index, so the two
+        tensors must agree step for step. With monthly targets and annual cond
+        they do not: cond step i is year i while target step i is month i, and
+        everything past the first year is silently paired with the wrong
+        forcing.
+
+        The mapping is a STEP function — every month of year Y receives year Y's
+        map unchanged (user decision, 2026-08-20). That is exactly the forcing
+        the annual runs were trained on and invents no sub-annual structure; the
+        cost is a discontinuity each January. Linear interpolation between
+        mid-year values, or genuinely monthly CEDS inventories, are the two
+        alternatives if that artefact ever shows up in the output.
+
+        No-op when the axes already match, so the annual configs are unaffected.
+        """
+        if self.tensor_data is None or self.tensor_data_cond is None:
+            return
+        n_target = self.tensor_data.shape[1]
+        n_cond = self.tensor_data_cond.shape[1]
+        target_years = getattr(self, "_time_values", None)
+        cond_years = getattr(self, "_cond_years", None)
+        if target_years is None or cond_years is None:
+            return
+        if n_cond == n_target and np.array_equal(target_years, cond_years):
+            return
+
+        pos = {int(y): i for i, y in enumerate(cond_years)}
+        missing = sorted({int(y) for y in target_years} - pos.keys())
+        if missing:
+            raise ValueError(
+                f"conditioning file {self.cond_file} has no entry for target "
+                f"year(s) {missing[:5]}{'...' if len(missing) > 5 else ''} — "
+                f"cond covers {int(cond_years[0])}-{int(cond_years[-1])} while "
+                f"the target tree covers {int(target_years[0])}-"
+                f"{int(target_years[-1])}. Build the cond file for that span."
+            )
+        idx = torch.as_tensor([pos[int(y)] for y in target_years],
+                              dtype=torch.long)
+        self.tensor_data_cond = self.tensor_data_cond[:, idx].contiguous()
+        per_year = n_target / max(len(set(int(y) for y in target_years)), 1)
+        print(f"[DATASET] cond broadcast to the target axis: {n_cond} annual "
+              f"steps -> {n_target} target steps (~{per_year:.0f} per year, "
+              f"step-held)")
+
     def _select_years(self) -> set:
         """Years to load from each realization (targets AND conditioning).
 
@@ -599,7 +672,11 @@ class ClimateDataset(Dataset):
 
         Override in a subclass to change coverage; see EvalClimateDataset, which
         takes every year for evaluation/generation. Do NOT widen this default —
-        it changes what every trained model was fitted on.
+        it changes what every trained model was fitted on. MONTHLY data must opt
+        out of the decimation entirely — pass all_years=True to
+        build_multi_experiment_loader, which swaps in EvalClimateDataset. A
+        decimated monthly axis is 12-month blocks with 4-year holes, and a
+        seq_len window straddling a hole would look contiguous to the model.
         """
         hist_years = list(range(1850, 2015, 5))    # every 5th year
         future_years = list(range(2015, 2101, 2))  # every other year
@@ -682,7 +759,9 @@ class ClimateDataset(Dataset):
                 valid = sorted(selected_years & available)
                 self.xr_data = self.xr_data.sel({self.time_dim: valid})
             # Store year values before converting so we can close xr_data early
-            self._time_values = self.xr_data[self.time_dim].values.astype(int)
+            _tv = self.xr_data[self.time_dim].values
+            self._time_values = self._coord_years(_tv)
+            self._time_steps = self._coord_steps(_tv)
             self.tensor_data = self.convert_xarray_to_tensor(self.xr_data)
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
@@ -743,6 +822,7 @@ class ClimateDataset(Dataset):
             raw_cond = raw_cond.sel({self.time_dim: valid})
 
         # Materialise into a float32 tensor and immediately close the dataset
+        self._cond_years = self._coord_years(raw_cond[self.time_dim].values)
         self.tensor_data_cond = self.convert_xarray_to_tensor(raw_cond).contiguous()
         # Keep a lightweight (no-data) reference for coordinate lookups
         _ds_cond = xr.open_dataset(cond_file)
@@ -752,8 +832,10 @@ class ClimateDataset(Dataset):
         raw_cond.close()
         del raw_cond
 
-        if self.prev_target_channel:
-            self._append_prev_target_channel()
+        # Annual cond -> the target's (possibly monthly) axis. Must happen
+        # BEFORE the previous-state channel is appended: that is a torch.cat
+        # against the target tensor and needs the lengths to already agree.
+        self._broadcast_cond_to_target()
 
         # ── Spatial smoothing on conditioning (before PCA) ───────────────────
         # Applied per-channel via cond_smooth_sigma list. Removes line features
@@ -777,6 +859,16 @@ class ClimateDataset(Dataset):
                 pca_objects=self._pca_cond,     # None on first call → fits
             )
 
+        # ── Previous-state channel, appended LAST ────────────────────────────
+        # After smoothing and PCA, deliberately. It is a TARGET field, not an
+        # emissions inventory: it has no line artefacts to smooth away, and
+        # projecting it onto 5 EOFs would destroy the very state the channel
+        # exists to carry. Appending it earlier also breaks the per-channel
+        # config lists — cond_smooth_sigma and n_components_cond have one entry
+        # per cond_var, and pca_denoise_dataset raises on the count mismatch.
+        if self.prev_target_channel:
+            self._append_prev_target_channel()
+
         # Save diagnostic spatial plots (only on first load)
         diag_dir = os.path.join(self.data_dir, "diagnostics")
         if not os.path.isdir(diag_dir):
@@ -791,7 +883,21 @@ class ClimateDataset(Dataset):
         fall back to the raw-normalised xarray values — the two are identical
         in that case, so the plots are always consistent with model input.
         """
-        all_years = self.dataset_cond[self.time_dim].values
+        # Axis for the cond TENSOR, which is not the cond FILE's axis once it has
+        # been broadcast onto a monthly target (_broadcast_cond_to_target): the
+        # file holds 165 annual steps where the tensor holds 1980 monthly ones.
+        # Plotting the file's axis against the tensor raises, and indexing the
+        # tensor with the file's positions would silently show the wrong maps.
+        all_years = np.asarray(self.dataset_cond[self.time_dim].values)
+        n_steps = self.tensor_data_cond.shape[1]
+        if len(all_years) != n_steps:
+            tv = getattr(self, "_time_values", None)
+            if tv is not None and len(tv) == n_steps:
+                all_years = np.asarray(tv)
+            else:
+                print(f"[COND] diagnostics skipped: cond tensor has {n_steps} "
+                      f"steps but no matching time axis is available")
+                return
         candidate_years = [all_years[0], 2015, 2050, all_years[-1]]
         years_to_show   = [y for y in candidate_years if y in all_years]
         year_indices    = [int(np.where(all_years == y)[0][0]) for y in years_to_show]
@@ -1053,9 +1159,11 @@ class ClimateDataset(Dataset):
         mean = baseline_tensor.mean(dim=1, keepdim=True)      # [n_vars, 1, H, W]
         mean = mean.unsqueeze(0)                               # [1, n_vars, 1, H, W]
 
-        n_years = int(mask.sum())
+        # Timesteps, NOT years: on a monthly axis 1850-1900 is 612 steps, and
+        # calling those "years" has already caused a double-take.
+        n_steps = int(mask.sum())
         print(
-            f"[BASELINE] Computed climatological mean over {n_years} years "
+            f"[BASELINE] Computed climatological mean over {n_steps} timesteps "
             f"({baseline_start}–{baseline_end})  "
             f"shape={tuple(mean.shape)}  "
             f"mean={mean.mean().item():.4f}  std={mean.std().item():.4f}"
@@ -1133,7 +1241,9 @@ class ClimateDataset(Dataset):
                 "prev_target_channel needs the target tensor; it cannot be "
                 "combined with cond_only=True"
             )
-        t = getattr(self, "_time_values", None)
+        t = getattr(self, "_time_steps", None)
+        if t is None:
+            t = getattr(self, "_time_values", None)
         if t is not None and len(t) > 1:
             steps = np.diff(np.asarray(t))
             if not (steps == steps[0]).all():
@@ -1214,6 +1324,79 @@ class EvalClimateDataset(ClimateDataset):
             self.YEAR_MIN = int(year_min)
         if year_max is not None:
             self.YEAR_MAX = int(year_max)
+
+    # ── Time-coordinate helpers ─────────────────────────────────────────
+    # Target trees may be ANNUAL (integer year coord) or MONTHLY (cftime /
+    # datetime64). Conditioning files are always annual, so the two axes have
+    # to be reconciled explicitly rather than by position — see
+    # _broadcast_cond_to_target.
+    @staticmethod
+    def _coord_years(coord_vals) -> np.ndarray:
+        """Integer calendar year per timestep, for int, datetime64 or cftime."""
+        if len(coord_vals) and hasattr(coord_vals[0], "year"):
+            return np.array([int(str(v)[:4]) for v in coord_vals], dtype=int)
+        return np.asarray(coord_vals).astype(int)
+
+    @staticmethod
+    def _coord_steps(coord_vals) -> np.ndarray:
+        """Monotone step counter: months since year 0 if monthly, else years.
+
+        _time_values must stay in YEARS (get_baseline_mean and the TCRE terms
+        in multi_experiment_dataset read it as such), but a monthly axis repeats
+        each year twelve times, so evenness has to be judged on a separate
+        counter.
+        """
+        if len(coord_vals) and hasattr(coord_vals[0], "month"):
+            return np.array([int(str(v)[:4]) * 12 + int(str(v)[5:7]) - 1
+                             for v in coord_vals], dtype=int)
+        return ClimateDataset._coord_years(coord_vals)
+
+    def _broadcast_cond_to_target(self):
+        """Put the annual conditioning tensor on the target's time axis.
+
+        __getitem__ slices target and cond with the SAME index, so the two
+        tensors must agree step for step. With monthly targets and annual cond
+        they do not: cond step i is year i while target step i is month i, and
+        everything past the first year is silently paired with the wrong
+        forcing.
+
+        The mapping is a STEP function — every month of year Y receives year Y's
+        map unchanged (user decision, 2026-08-20). That is exactly the forcing
+        the annual runs were trained on and invents no sub-annual structure; the
+        cost is a discontinuity each January. Linear interpolation between
+        mid-year values, or genuinely monthly CEDS inventories, are the two
+        alternatives if that artefact ever shows up in the output.
+
+        No-op when the axes already match, so the annual configs are unaffected.
+        """
+        if self.tensor_data is None or self.tensor_data_cond is None:
+            return
+        n_target = self.tensor_data.shape[1]
+        n_cond = self.tensor_data_cond.shape[1]
+        target_years = getattr(self, "_time_values", None)
+        cond_years = getattr(self, "_cond_years", None)
+        if target_years is None or cond_years is None:
+            return
+        if n_cond == n_target and np.array_equal(target_years, cond_years):
+            return
+
+        pos = {int(y): i for i, y in enumerate(cond_years)}
+        missing = sorted({int(y) for y in target_years} - pos.keys())
+        if missing:
+            raise ValueError(
+                f"conditioning file {self.cond_file} has no entry for target "
+                f"year(s) {missing[:5]}{'...' if len(missing) > 5 else ''} — "
+                f"cond covers {int(cond_years[0])}-{int(cond_years[-1])} while "
+                f"the target tree covers {int(target_years[0])}-"
+                f"{int(target_years[-1])}. Build the cond file for that span."
+            )
+        idx = torch.as_tensor([pos[int(y)] for y in target_years],
+                              dtype=torch.long)
+        self.tensor_data_cond = self.tensor_data_cond[:, idx].contiguous()
+        per_year = n_target / max(len(set(int(y) for y in target_years)), 1)
+        print(f"[DATASET] cond broadcast to the target axis: {n_cond} annual "
+              f"steps -> {n_target} target steps (~{per_year:.0f} per year, "
+              f"step-held)")
 
     def _select_years(self) -> set:
         """Every year in [YEAR_MIN, YEAR_MAX].

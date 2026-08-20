@@ -73,6 +73,13 @@ cond_smooth_method: gaussian
 # ── Loader settings ──────────────────────────────────────────
 batch_size: 1           # must match config_aero_monthly.yaml; 12 frames do not fit at 8 (see the MEMORY note above)
 mix_scenarios: true    # guarantees cross-scenario batches (critical for conditioning)
+# EVERY year, no decimation. ClimateDataset._select_years normally keeps every
+# 5th historical and every other future year; on a MONTHLY tree that leaves
+# 12-month blocks separated by 4-year holes, and a seq_len-12 window straddling
+# a hole would be handed to the model as contiguous months. It would also trip
+# prev_target_channel's evenly-spaced-axis check. all_years=True swaps in
+# EvalClimateDataset, which loads the lot.
+all_years: true
 steps_per_realization: 1000  # fewer realization switches = less Lustre I/O stalling GPUs
 
 # ── Per-scenario sampling weights — IDENTICAL to config_data_ybias.yaml ──────
