@@ -147,4 +147,23 @@ echo "[roihu] cwd=$(pwd)  data=${LUMI_DATA}"
 echo "[roihu] running: ${SCRIPT} $*"
 
 # One task per GPU, matching --ntasks-per-node to --gres.
-srun --unbuffered python3 "${SCRIPT}" "$@"
+#
+# TORCH DISTRIBUTED ENV, OR IT IS NOT DDP AT ALL. A bare `srun python3` sets
+# none of RANK/LOCAL_RANK/WORLD_SIZE, so accelerate falls back to
+# single-process: job 743643 ran FOUR independent copies of the training, each
+# reporting `rank=0/1 device=cuda`, all four on cuda:0, and OOMed at ~24 GiB
+# apiece on a 95 GiB card. The symptom reads as "seq_len 12 does not fit" and
+# is nothing of the kind — the same contention artifact that invalidated the
+# seq_len sweep in job 696628.
+#
+# The per-task values only exist INSIDE srun, so they are exported in the task
+# shell, not out here. MASTER_ADDR/PORT are job-wide and can be.
+export MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$(hostname)}" | head -n1)"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+echo "[roihu] DDP rendezvous ${MASTER_ADDR}:${MASTER_PORT}, ${SLURM_NTASKS:-1} task(s)"
+
+srun --unbuffered bash -c '
+    export RANK="${SLURM_PROCID}"
+    export LOCAL_RANK="${SLURM_LOCALID}"
+    export WORLD_SIZE="${SLURM_NTASKS}"
+    exec python3 "$@"' _ "${SCRIPT}" "$@"
