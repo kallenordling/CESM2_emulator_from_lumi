@@ -69,7 +69,29 @@ def load_member(sf_dir, ens, var, member):
     ds = xr.open_mfdataset(files, combine="by_coords", chunks={"time": 120})
     if var not in ds:
         raise KeyError(f"{ens}/{var}/{member}: {var} not in {files[0]}")
-    return ds
+    return _center_time(ds)
+
+
+def _center_time(ds):
+    """Re-stamp CAM h0 monthly means at the MIDDLE of their averaging interval.
+
+    CAM writes each monthly mean at the END of the period it covers: January
+    1850 is stamped 1850-02-01, with time_bnds = [1850-01-01, 1850-02-01]. Left
+    alone that shifts the whole record one month — the SF trees came out
+    1850-02..2051-01 — so December of every year is filed under the NEXT year
+    and receives the next year's forcing, and the tail runs one year past the
+    cond files (which is what made the first monthly training run fail).
+
+    The LENS2 monthly trees do not need this: the AWS/intake copies are already
+    mid-month (1850-01-16). Centering here makes the two agree.
+    """
+    if "time_bnds" not in ds:
+        print("  [warn] no time_bnds — leaving the time axis as written")
+        return ds
+    b = ds["time_bnds"]
+    bdim = [d for d in b.dims if d != "time"][0]
+    lo, hi = b.isel({bdim: 0}), b.isel({bdim: 1})
+    return ds.assign_coords(time=lo + (hi - lo) / 2)
 
 
 def build_var(sf_dir, ens, var, member):

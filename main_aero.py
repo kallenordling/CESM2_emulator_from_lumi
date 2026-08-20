@@ -96,6 +96,13 @@ def main(cfg: DictConfig) -> None:
         year_bias=data_cfg.get("year_bias", 0.0),
         year_bias_floor=data_cfg.get("year_bias_floor", 0.05),
         bsp_depth=data_cfg.get("bsp_depth", 0),
+        # Both default to the previous behaviour, so annual configs that set
+        # neither are unaffected. They were previously unreachable: this call
+        # passes an explicit whitelist, so `all_years` and `prev_target_channel`
+        # in a data config were silently ignored — the first monthly run
+        # decimated to every 5th year despite asking for all of them.
+        all_years=data_cfg.get("all_years", False),
+        prev_target_channel=data_cfg.get("prev_target_channel", False),
         # shared ClimateDataset kwargs
         seq_len=data_cfg.seq_len,
         target_vars=OmegaConf.to_container(data_cfg.target_vars, resolve=True),
@@ -118,6 +125,8 @@ def main(cfg: DictConfig) -> None:
             batch_size=data_cfg.batch_size,
             mix_scenarios=data_cfg.get("mix_scenarios", True),
             steps_per_realization=data_cfg.get("steps_per_realization", None),
+            all_years=data_cfg.get("all_years", False),
+            prev_target_channel=data_cfg.get("prev_target_channel", False),
             seq_len=data_cfg.seq_len,
             target_vars=OmegaConf.to_container(data_cfg.target_vars, resolve=True),
             cond_vars=OmegaConf.to_container(data_cfg.cond_vars, resolve=True),
