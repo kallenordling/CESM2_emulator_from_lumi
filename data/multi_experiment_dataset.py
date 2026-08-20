@@ -395,6 +395,18 @@ class MultiExperimentDataLoader:
                 f"non-empty per exp: {', '.join(bucket_summary)}"
             )
 
+        if mix_scenarios and scenario_weights is None:
+            # Unweighted mixing is weighted mixing with equal weights. Spelling
+            # it that way sends it down the SAME cycling path: the old branch
+            # computed batch_size // n_exp, which is 0 for every experiment when
+            # batch_size < n_exp, and then min() over the non-empty counts had
+            # nothing to iterate — "ValueError: min() iterable argument is
+            # empty", which is how the VALIDATION loader died at the first epoch
+            # boundary (jobs 743698, 746611). main_aero builds the val loader
+            # without scenario_weights, so batch_size 1 over 4 experiments hit
+            # this every time.
+            scenario_weights = [1.0] * self.n_exp
+
         if mix_scenarios and scenario_weights is not None:
             # Convert weights to per-experiment integer sample counts that sum
             # to batch_size (largest-remainder rounding to avoid drift).
@@ -784,11 +796,15 @@ class MultiExperimentDataLoader:
         # cycling plan an experiment contributes a different number of windows
         # to each batch, so the per-batch divisor is not a constant.
         cycle_len = len(self._batch_plan)
-        n_cycles = min(
-            len(pool) // self._per_cycle[i]
-            for i, pool in enumerate(index_pools)
-            if self._per_cycle[i] > 0
-        )
+        active = [i for i in range(self.n_exp) if self._per_cycle[i] > 0]
+        if not active:
+            raise ValueError(
+                f"no experiment contributes a sample: batch_size="
+                f"{self.batch_size} over {self.n_exp} experiments produced an "
+                f"all-zero plan. Every scenario would be dropped from this "
+                f"loader."
+            )
+        n_cycles = min(len(index_pools[i]) // self._per_cycle[i] for i in active)
         n_batches = n_cycles * cycle_len
         if self.steps_per_realization is not None:
             n_batches = min(n_batches, self.steps_per_realization)
