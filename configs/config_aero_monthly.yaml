@@ -15,6 +15,10 @@ data_config: config_data_monthly.yaml
 accelerator:
     mixed_precision: bf16
     split_batches: False
+    # NCCL collective timeout in seconds (default in torch is 600). A
+    # realization switch can stall the other ranks in an all-reduce for
+    # longer than that when Lustre is busy — see main_aero.py.
+    nccl_timeout_s: 5400
     # 2 -> 16: batch_size drops 8 -> 1 for seq_len 12, so accumulation makes up
     # the effective batch (see the MEMORY note in config_data_monthly.yaml).
     gradient_accumulation_steps: 16

@@ -7,7 +7,8 @@ os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
 from omegaconf import DictConfig, OmegaConf
 import hydra
 from hydra.utils import instantiate
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from datetime import timedelta
+from accelerate import Accelerator, DistributedDataParallelKwargs, InitProcessGroupKwargs
 from accelerate.utils import set_seed
 from accelerate.logging import get_logger
 from diffusers import DDPMScheduler
@@ -28,10 +29,21 @@ def main(cfg: DictConfig) -> None:
     # Default DDP: every parameter (including EBM scalars) receives a gradient
     # on every backward (the aux branch runs every iter, see unetTrainer.py:912),
     # so neither find_unused_parameters nor static_graph is needed.
+    # NCCL collective timeout. The default is 10 minutes, and that is not enough
+    # here: a REALIZATION SWITCH re-reads 40 monthly chunks per target var off
+    # Lustre and redoes PCA, smoothing and the cond broadcast, while the other
+    # ranks sit in a gradient all-reduce waiting. Usually that costs a minute or
+    # two, but under filesystem contention it can exceed 600 s, and the watchdog
+    # then kills a healthy job — job 750274 died that way after 1h43m, six
+    # epochs in, right as the post-epoch-5 switch started loading.
+    nccl_timeout_s = int(cfg.accelerator.get("nccl_timeout_s", 5400))
     accelerator = Accelerator(
         mixed_precision=cfg.accelerator.mixed_precision,
         gradient_accumulation_steps=cfg.accelerator.gradient_accumulation_steps,
         split_batches=cfg.accelerator.get('split_batches', False),
+        kwargs_handlers=[
+            InitProcessGroupKwargs(timeout=timedelta(seconds=nccl_timeout_s))
+        ],
     )
 
     set_seed(cfg.seed, device_specific=False)
