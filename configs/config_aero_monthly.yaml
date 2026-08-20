@@ -98,7 +98,13 @@ trainer:
                          # sweep.
     save_dir: runs/
     save_name: run_monthly_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
-    load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
+    # ALWAYS FRESH (user decision 2026-08-20): every launch trains from
+    # scratch, so a run's behaviour over 36 h is its own and not inherited
+    # from whatever happened to be in save_dir. "newest" resumes, and that
+    # is how job 749689 picked up run_monthly_bcprect_5.pt from a cancelled
+    # run, skipped 2249 of epoch 6's 2250 steps and deadlocked.
+    # Set back to "newest" only for a deliberate continuation.
+    load_path: 0
     lr: 0.00005
     # ── LR decay (pure function of global_step → resume-invariant; default off) ─
     # Cosine/linear decay from base `lr` (5e-5) to `lr_floor` (5e-6), reaching the
