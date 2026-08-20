@@ -9,7 +9,7 @@ Reads each run's latest ``global_mean_anomaly.csv`` (columns
 
 By default it auto-discovers the newest CSV under each ``run_*`` directory in
 EVAL_ROOT, restricted to ``--runs`` if given. Point EVAL_ROOT at the scratch
-mount (default /mnt/lumi_sc2/eval_output).
+mount (default /mnt/lumi_sc/eval_output).
 
     python plot_running_bias.py --runs sensfix intssp mseyb ybias
     EVAL_ROOT=/some/other/eval_output python plot_running_bias.py
@@ -23,7 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-EVAL_ROOT = os.environ.get("EVAL_ROOT", "/mnt/lumi_sc2/eval_output")
+EVAL_ROOT = os.environ.get("EVAL_ROOT", "/mnt/lumi_sc/eval_output")
 SCENARIOS = ["hist", "ssp370", "ssp126", "ghg", "aaer"]
 
 
