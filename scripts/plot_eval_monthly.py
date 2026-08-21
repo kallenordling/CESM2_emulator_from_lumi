@@ -28,6 +28,26 @@ def gmean(da):
     return da.weighted(np.cos(np.deg2rad(da.lat))).mean(dim=("lat", "lon"))
 
 
+def decimal_year(ds):
+    """Calendar year as a float, so scenarios share one 1850-2100 axis.
+
+    "Years into record" put hist and ssp370 on top of each other at x=0, which
+    is exactly wrong when the point is that one follows the other.
+    """
+    t = ds.time.values
+    yr = np.array([int(str(v)[:4]) for v in t], dtype=float)
+    mo = np.array([int(str(v)[5:7]) for v in t], dtype=float)
+    return yr + (mo - 0.5) / 12.0
+
+
+def running_annual(x, n=12):
+    """12-month running mean; the seasonal cycle otherwise hides the trend."""
+    if len(x) < n:
+        return None
+    k = np.ones(n) / n
+    return np.convolve(x, k, mode="valid")
+
+
 def load(run_dir):
     out = {}
     for f in sorted(glob.glob(os.path.join(run_dir, "monthly_*.nc"))):
@@ -35,7 +55,7 @@ def load(run_dir):
     return out
 
 
-def fig_series(runs, path):
+def fig_series(runs, path, xlim=None):
     vars_ = sorted({v for d in runs.values() for v in d.data_vars})
     fig, axes = plt.subplots(len(vars_), 1, figsize=(11, 3.2 * len(vars_)), squeeze=False)
     for ax, v in zip(axes[:, 0], vars_):
@@ -43,16 +63,30 @@ def fig_series(runs, path):
             if v not in d:
                 continue
             g = gmean(d[v])
-            t = np.arange(d.sizes["time"]) / 12.0
-            mu = g.mean("member")
-            ax.plot(t, mu, lw=1.1, label=f"{name} ({str(d.time.values[0])[:4]}-)")
+            t = decimal_year(d)
+            mu = g.mean("member").values
+            line, = ax.plot(t, mu, lw=0.5, alpha=0.35)
+            # The 12-month mean carries the signal; the raw monthly trace is
+            # kept faint behind it so the seasonal amplitude stays visible.
+            sm = running_annual(mu)
+            if sm is not None:
+                ax.plot(t[11:], sm, lw=1.6, color=line.get_color(),
+                        label=f"{name} ({int(t[0])}-{int(t[-1])})")
+            else:
+                line.set_label(f"{name} ({int(t[0])}-{int(t[-1])})")
+                line.set_alpha(1.0)
             if d.sizes["member"] > 1:
-                ax.fill_between(t, g.min("member"), g.max("member"), alpha=0.18, lw=0)
+                ax.fill_between(t, g.min("member"), g.max("member"),
+                                alpha=0.15, lw=0, color=line.get_color())
         ax.set_ylabel(f"{v} [{UNITS.get(v, '')}]")
-        ax.set_xlabel("years into record")
+        ax.set_xlabel("year")
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8, ncol=2)
-    axes[0, 0].set_title("Weighted global mean, monthly (shading = member spread)")
+    axes[0, 0].set_title("Weighted global mean — thin: monthly, thick: 12-month mean, "
+                         "shading: member spread")
+    if xlim:
+        for ax in axes[:, 0]:
+            ax.set_xlim(*xlim)
     fig.tight_layout()
     fig.savefig(path, dpi=140)
     plt.close(fig)
@@ -117,6 +151,8 @@ def main():
                     help="second run dir to overlay in the series plot "
                          "(e.g. the free-running one against teacher forcing)")
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--xlim", nargs=2, type=float, default=None, metavar=("Y0", "Y1"),
+                    help="fix the year axis, e.g. --xlim 1850 2100")
     args = ap.parse_args()
 
     runs = load(args.run_dir)
@@ -126,7 +162,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     tag = os.path.basename(os.path.normpath(args.run_dir))
 
-    fig_series(runs, os.path.join(out_dir, f"{tag}_series.png"))
+    fig_series(runs, os.path.join(out_dir, f"{tag}_series.png"), args.xlim)
     fig_seasonal(runs, os.path.join(out_dir, f"{tag}_seasonal.png"))
     fig_maps(runs, os.path.join(out_dir, f"{tag}_maps.png"))
 
@@ -138,7 +174,8 @@ def main():
         else:
             merged = {f"{k} truth": runs[k] for k in shared}
             merged.update({f"{k} free": other[k] for k in shared})
-            fig_series(merged, os.path.join(out_dir, f"{tag}_vs_free_series.png"))
+            fig_series(merged, os.path.join(out_dir, f"{tag}_vs_free_series.png"),
+                       args.xlim)
             fig_seasonal(merged, os.path.join(out_dir, f"{tag}_vs_free_seasonal.png"))
     return 0
 
