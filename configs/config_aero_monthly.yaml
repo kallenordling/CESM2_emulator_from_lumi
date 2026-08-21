@@ -19,6 +19,12 @@ accelerator:
     # realization switch can stall the other ranks in an all-reduce for
     # longer than that when Lustre is busy — see main_aero.py.
     nccl_timeout_s: 5400
+    # No buffers exist to synchronise, and DDP's buffer broadcast is the
+    # untraceable collective that deadlocked job 750274 — see main_aero.py.
+    broadcast_buffers: false
+    # Above the number of distinct shapes the shared conv forward sees, so
+    # no rank falls back to eager part-way through a run.
+    recompile_limit: 64
     # 2 -> 16: batch_size drops 8 -> 1 for seq_len 12, so accumulation makes up
     # the effective batch (see the MEMORY note in config_data_monthly.yaml).
     gradient_accumulation_steps: 16

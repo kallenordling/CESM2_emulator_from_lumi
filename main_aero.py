@@ -37,14 +37,40 @@ def main(cfg: DictConfig) -> None:
     # then kills a healthy job — job 750274 died that way after 1h43m, six
     # epochs in, right as the post-epoch-5 switch started loading.
     nccl_timeout_s = int(cfg.accelerator.get("nccl_timeout_s", 5400))
+
+    # broadcast_buffers=False removes DDP's per-forward buffer sync, which is
+    # `_broadcast_coalesced` — the collective dynamo prints "does not know how
+    # to trace" and the one that killed job 750274. When that frame hit
+    # recompile_limit and fell back to eager, the ranks disagreed for one
+    # iteration about whether the broadcast was issued (rank 0 ended one
+    # collective ahead: enqueued 103626 vs 103625) and the all-reduce deadlocked.
+    # Safe here because the model has NO buffers to synchronise: the only
+    # register_buffer in the codebase is the rotary cache, and that no longer
+    # caches (see models/video_net.py).
+    _ddp_kwargs = DistributedDataParallelKwargs(
+        broadcast_buffers=bool(cfg.accelerator.get("broadcast_buffers", True)),
+    )
     accelerator = Accelerator(
         mixed_precision=cfg.accelerator.mixed_precision,
         gradient_accumulation_steps=cfg.accelerator.gradient_accumulation_steps,
         split_batches=cfg.accelerator.get('split_batches', False),
         kwargs_handlers=[
-            InitProcessGroupKwargs(timeout=timedelta(seconds=nccl_timeout_s))
+            InitProcessGroupKwargs(timeout=timedelta(seconds=nccl_timeout_s)),
+            _ddp_kwargs,
         ],
     )
+
+    # Raise the dynamo recompile limit so no rank ever falls back to eager
+    # mid-run. Hitting the default 8 is structural, not accidental: the shared
+    # conv forward sees channels 96/192/288/384 plus skip concatenations, which
+    # is already more than eight distinct shapes. A fallback that happens at a
+    # slightly different iteration on each rank is precisely the asymmetry above.
+    _recompile_limit = cfg.accelerator.get("recompile_limit", None)
+    if _recompile_limit is not None:
+        import torch._dynamo
+        for _attr in ("recompile_limit", "cache_size_limit"):
+            if hasattr(torch._dynamo.config, _attr):
+                setattr(torch._dynamo.config, _attr, int(_recompile_limit))
 
     set_seed(cfg.seed, device_specific=False)
     logger = get_logger(__name__, log_level="INFO")
