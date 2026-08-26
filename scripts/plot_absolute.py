@@ -80,8 +80,12 @@ def fig_series(runs, var, path):
     ax.legend(fontsize=8, ncol=2)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
+    # vector sibling, same convention as the paper_fig_* scripts — these are
+    # figure-set material, not throwaway diagnostics
+    fig.savefig(os.path.splitext(path)[0] + ".pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"[WROTE] {path}")
+    print(f"[WROTE] {os.path.splitext(path)[0]}.pdf")
 
 
 def fig_maps(runs, var, path, period):
@@ -132,8 +136,12 @@ def fig_maps(runs, var, path, period):
     fig.suptitle(f"Absolute {var} [{UNITS.get(var, '')}], {span}", y=1.0)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
+    # vector sibling, same convention as the paper_fig_* scripts — these are
+    # figure-set material, not throwaway diagnostics
+    fig.savefig(os.path.splitext(path)[0] + ".pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"[WROTE] {path}")
+    print(f"[WROTE] {os.path.splitext(path)[0]}.pdf")
 
 
 def main():
