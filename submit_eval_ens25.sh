@@ -118,13 +118,23 @@ sbatch --export="${EXPORTS}" \
        --time="${WALLTIME}" \
        run_eval_aero.sh
 
+# The local sshfs mount that corresponds to LUMI_EVAL_PROJECT's scratch. Eval
+# output follows LUMI_EVAL_PROJECT, not LUMI_PROJECT, so a hardcoded mount name
+# points at the wrong project the moment the two differ (462001112 writes to
+# mnt/lumi_sc, 462001328 to mnt/lumi_sc2).
+case "${LUMI_EVAL_PROJECT}" in
+    462001112) LOCAL_MOUNT="/home/nordling/mnt/lumi_sc"  ;;
+    462001328) LOCAL_MOUNT="/home/nordling/mnt/lumi_sc2" ;;
+    *)         LOCAL_MOUNT="<local mount of /scratch/project_${LUMI_EVAL_PROJECT}>" ;;
+esac
+
 cat <<EOF
 
 [ens25] When it finishes, build the maps against ALL held-out CESM2 members
         (default is 5 — leaving it there discards most of this run's power):
 
   /home/nordling/miniconda3/envs/plotting/bin/python scripts/paper_fig_maps.py \\
-      --eval-dir /home/nordling/mnt/lumi_sc2/eval_output/manual/${SUBDIR} \\
+      --eval-dir ${LOCAL_MOUNT}/eval_output/manual/${SUBDIR} \\
       --n-ref-members 0 \\
       --out plots/paper_fig_maps_ens${MEMBERS}.png \\
       --csv plots/map_stats_ens${MEMBERS}.csv
