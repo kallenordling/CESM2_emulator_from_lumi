@@ -193,6 +193,16 @@ def main() -> int:
                          "mean is better converged and its band ~1.6x tighter, "
                          "which flatters it. Selection is the first N, "
                          "deterministic, never random.")
+    ap.add_argument("--ref-scenarios", nargs="+", default=["ssp370", "ghg"],
+                    metavar="SCEN",
+                    help="anomaly mode: extra reference trajectories drawn "
+                         "alongside the experiment (default: ssp370 ghg)")
+    ap.add_argument("--no-control", action="store_true",
+                    help="anomaly mode: omit the ssp370 control curves. They "
+                         "are drawn by default because the aerosol-removal "
+                         "signal IS the gap between the two, and without the "
+                         "control the reader cannot see it. Ignored in signal "
+                         "mode, where the control is already subtracted.")
     ap.add_argument("--maps", action="store_true",
                     help="also write a 3-panel map figure per variable: "
                          "emulator, CESM2, and their difference, for the final "
@@ -316,7 +326,76 @@ def main() -> int:
                     else V["ylab"].replace("1850–1900", f"{int(yrs.min())}–"
                                            f"{int(yrs.min())+args.baseline_years-1}"))
 
+            # ── reference scenarios, same baseline on each side ─────────────
+            # ssp370 is the RAMIP control: the vertical gap between it and
+            # ssp370-126aer IS the aerosol-removal signal that --mode signal
+            # plots on its own axis, so without it the reader cannot see the
+            # quantity the experiment is about.
+            # ghg is the single-forcing GHG-only run — the limiting case of
+            # removing aerosols entirely — so the pair brackets 126aer from
+            # both sides. It ends in 2050 (that is the extent of the
+            # single-forcing archive), so its curve stops short by design.
+            extras = []
+            for name in ([] if args.no_control else args.ref_scenarios):
+                lab = {"ssp370": "SSP3-7.0 (control)",
+                       "ghg":    "GHG-only"}.get(name, name)
+                ls = {"ssp370": "--", "ghg": ":"}.get(name, "-.")
+                if name == "ssp370":
+                    # CESM2 side from RAMIP's own 10-member ssp370, matching
+                    # what signal mode differences against.
+                    cpath = f"{args.data_root}/cmip6/ramip_ssp370{suffix}.nc"
+                    cyx, CX = ((None, None) if not os.path.exists(cpath) else
+                               cesm_gmean_from_ref(cpath, V["nc"], sc, off))
+                    if CX is None:
+                        print(f"[{var}] ref {name}: MISSING {cpath} — skipped")
+                    epath = os.path.join(args.emu_ctrl_dir or "",
+                                         f"{var}_ssp370.nc")
+                else:
+                    # Trained single-forcing scenarios keep BOTH sides in the
+                    # one eval NetCDF, the same way hist does.
+                    epath = os.path.join(args.emu_ctrl_dir or "",
+                                         f"{var}_{name}.nc")
+                    cyx, CX = ((None, None) if not os.path.exists(epath) else
+                               cesm_gmean_from_eval(epath, var))
+                    if CX is None:
+                        print(f"[{var}] ref {name}: no CESM2 members in "
+                              f"{epath} — skipped")
+                eyx, EX = ((None, None) if not (EM is not None
+                                                and os.path.exists(epath))
+                           else emu_gmean(epath, var, args.n_emu_members))
+                if EX is None and EM is not None:
+                    print(f"[{var}] ref {name}: emulator MISSING {epath}")
+                if CX is None and EX is None:
+                    continue
+                # Each reference has its own extent (GHG stops at 2050), so it
+                # carries its own year axis rather than being forced onto the
+                # experiment's.
+                avail = [a for a in (cyx, eyx) if a is not None]
+                yx = avail[0]
+                for a in avail[1:]:
+                    yx = np.intersect1d(yx, a)
+                yx = yx[(yx >= yrs.min()) & (yx <= yrs.max())]
+                if yx.size == 0:
+                    print(f"[{var}] ref {name}: no overlap with "
+                          f"{yrs.min()}-{yrs.max()} — skipped")
+                    continue
+                d = dict(name=name, label=lab, ls=ls, yrs=yx)
+                if CX is not None:
+                    A = anom(CX[:, np.searchsorted(cyx, yx)], c_base, V["percent"])
+                    d.update(c=A.mean(0), cse=A.std(0, ddof=1)/np.sqrt(A.shape[0]),
+                             nc=A.shape[0])
+                if EX is not None:
+                    A = anom(EX[:, np.searchsorted(eyx, yx)], e_base, V["percent"])
+                    d.update(e=A.mean(0), ese=A.std(0, ddof=1)/np.sqrt(A.shape[0]),
+                             ne=A.shape[0])
+                extras.append(d)
+                print(f"[{var}] ref {name}: {yx.min()}-{yx.max()}  "
+                      f"CESM2 {d.get('nc', 0)} / emulator {d.get('ne', 0)} members")
+
+        if args.mode == "signal":
+            extras = []
         series[var] = dict(yrs=yrs, c=c_v, cse=c_se, e=e_v, ese=e_se,
+                           extras=extras,
                            ylab=ylab, nc=nc_, ne=ne_,
                            unit=(V.get("unit_sig", "K") if args.mode == "signal"
                                  else ("%" if V["percent"] else "K")))
@@ -387,8 +466,23 @@ def main() -> int:
             ax.text(0.5, 0.08, "emulator run for this variable not generated yet",
                     transform=ax.transAxes, ha="center", fontsize=8.5,
                     color=C_EMU, style="italic")
+        # Reference scenarios: same colours so the CESM2/emulator pairing stays
+        # readable, thinner and dashed so the experiment itself stays the
+        # subject, and no uncertainty bands — four more ribbons would bury the
+        # gap the figure exists to show.
+        for d in s.get("extras", ()):
+            if "c" in d:
+                ax.plot(d["yrs"], d["c"], color=C_CESM, lw=1.3, ls=d["ls"],
+                        alpha=0.85,
+                        label=f"CESM2 {d['label']} ({d['nc']} members)")
+            if "e" in d:
+                ax.plot(d["yrs"], d["e"], color=C_EMU, lw=1.3, ls=d["ls"],
+                        alpha=0.85,
+                        label=f"Emulator {d['label']} ({d['ne']} members)")
         ax.set_ylabel(s["ylab"])
-        ax.legend(frameon=False, loc="upper left")
+        ax.legend(frameon=False, loc="upper left",
+                  ncol=2 if s.get("extras") else 1,
+                  fontsize=8.0 if s.get("extras") else 9.5)
         ax.set_title(f"({'abc'[i]})  {VARS[var]['label']}", loc="left",
                      fontsize=10)
         ax.set_xlim(s["yrs"].min(), s["yrs"].max())
@@ -398,7 +492,10 @@ def main() -> int:
     _bl = ("1850–1900" if args.baseline == "hist" else
            f"{int(list(series.values())[0]['yrs'].min())}–"
            f"{int(list(series.values())[0]['yrs'].min())+args.baseline_years-1}")
+    _ex = list(series.values())[0].get("extras") or []
+    _exlab = (", with " + " and ".join(d["label"] for d in _ex)) if _ex else ""
     ttl = (f"SSP3-7.0 with SSP1-2.6 aerosols (ssp370-126aer): anomaly vs {_bl}"
+           f"{_exlab}"
            if args.mode == "anomaly" else
            "ssp370-126aer minus ssp370: the aerosol-removal signal")
     fig.suptitle(ttl + "\nbands: ±2 SE of the ensemble mean", fontsize=10,
