@@ -172,6 +172,15 @@ def main() -> int:
                          "inside the single-forcing runs' 2050 end.")
     ap.add_argument("--maps", action="store_true",
                     help="also write residual maps for --interaction-window")
+    ap.add_argument("--decompose", action="store_true",
+                    help="second figure: where the non-additivity comes from — "
+                         "conditioning additivity, the Arctic excess split by "
+                         "scenario, and whether R has its own geography")
+    ap.add_argument("--cond-dir",
+                    default="/home/nordling/mnt/lumi_sc2/emulator_data",
+                    help="directory holding the per-scenario conditioning files")
+    ap.add_argument("--cond-template",
+                    default="emissions_{scen}_only_timefixed_bc_co2fix.nc")
     ap.add_argument("--allow-no-cartopy", action="store_true")
     ap.add_argument("--out", default="plots/paper_fig_attribution.png")
     ap.add_argument("--csv", default=None)
@@ -471,6 +480,166 @@ def main() -> int:
             fig.savefig(mp, bbox_inches="tight")
             fig.savefig(os.path.splitext(mp)[0] + ".pdf", bbox_inches="tight")
             print(f"wrote {mp}")
+    if args.decompose:
+        rc = decompose(args, plt)
+        if rc:
+            return rc
+    return 0
+
+
+def _wcorr(x, y, w):
+    xm, ym = (x*w).sum(), (y*w).sum()
+    cov = ((x-xm)*(y-ym)*w).sum()
+    return (cov / np.sqrt(((x-xm)**2*w).sum() * ((y-ym)**2*w).sum()),
+            cov / ((x-xm)**2*w).sum())
+
+
+def decompose(args, plt):
+    """Where does the non-additivity come from — the inputs or the model?
+
+    Three questions, three panels:
+      (a) are the CONDITIONING fields additive? If cond(all) = cond(ghg) +
+          cond(aaer) but the response is not additive, the nonlinearity is
+          manufactured by the model rather than read off its inputs — a linear
+          response operator would return R = 0 by construction.
+      (b) which scenario's regional bias builds the emulator's Arctic excess?
+      (c) does R have its own geography, or is it the warming pattern rescaled?
+          r(R, ALL) answers that; r(R, AEROSOL) tests the physical mechanism,
+          since aerosol efficacy falling in a warmer base state predicts R to be
+          ANTI-correlated with the aerosol-only response.
+    """
+    E, (lo_i, hi_i) = args.eval_dir, args.interaction_window
+    var = "TREFHT" if "TREFHT" in args.vars else args.vars[0]
+    V = VARS[var]
+
+    # ── (a) conditioning ─────────────────────────────────────────────────────
+    cond = {}
+    for scen in ("ssp370", "ghg", "aaer"):
+        p = os.path.join(args.cond_dir, args.cond_template.format(scen=scen))
+        if not os.path.exists(p):
+            print(f"[decompose] cond MISSING {p}")
+            cond = None
+            break
+        cond[scen] = xr.open_dataset(p).sel(year=slice(lo_i, hi_i)).mean("year")
+
+    # ── (b, c) response fields ───────────────────────────────────────────────
+    P = {}
+    for side in ("cesm", "model"):
+        for ag, f in (("all", "ssp370"), ("ghg", "ghg"), ("aaer", "aaer")):
+            a, lat, lon = window_maps(os.path.join(E, f"{var}_{f}.nc"),
+                                      var, side, lo_i, hi_i)
+            if a is None:
+                print(f"[decompose] no maps for {side}/{ag}")
+                return 2
+            P[(side, ag)] = a.mean(0)
+    W = area_weights(lat, lon)
+    arc = region_mask(lat, lon, 60, 90, 0, 360)
+    Wa = W * arc; Wa = Wa / Wa.sum()
+    R = {s: P[(s, "all")] - P[(s, "ghg")] - P[(s, "aaer")]
+         for s in ("cesm", "model")}
+    am = lambda x: float((x*Wa).sum())
+
+    fig = plt.figure(figsize=(11.5, 7.2))
+    gs = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.28)
+
+    # (a) conditioning additivity, each channel normalised by its own all-forcing
+    # value — the three channels differ by six orders of magnitude, so absolute
+    # units would show one bar and two slivers.
+    ax = fig.add_subplot(gs[0, 0])
+    if cond is None:
+        ax.text(0.5, 0.5, "conditioning files not found", ha="center",
+                transform=ax.transAxes)
+    else:
+        chans = [c for c in ("CO2", "SUL", "BC") if c in cond["ssp370"]]
+        xs = np.arange(len(chans)); wbar = 0.26
+        g = lambda d, c: float((d[c].values * W).sum())
+        base = [g(cond["ssp370"], c) for c in chans]
+        for k, (scen, lab, col) in enumerate((
+                ("ghg", "GHG-only", C["ghg"]), ("aaer", "Aerosol-only", C["aaer"]))):
+            ax.bar(xs + (k-1)*wbar, [g(cond[scen], c)/b
+                                     for c, b in zip(chans, base)],
+                   wbar, color=col, label=lab)
+        ax.bar(xs + wbar, [(g(cond["ghg"], c) + g(cond["aaer"], c))/b
+                           for c, b in zip(chans, base)],
+               wbar, color=C["sum"], label="GHG + Aerosol")
+        for i, c in enumerate(chans):
+            tot = (g(cond["ghg"], c) + g(cond["aaer"], c))/base[i]
+            d = 1.0 - tot
+            # clear of BOTH the reference line and the bar, which overshoots 1
+            # wherever the single-forcing files leak a little of the other agent
+            ax.annotate(f"{100*d:+.2f}%", (xs[i]+wbar, max(1.0, tot) + 0.03),
+                        ha="center", fontsize=8, color="0.25")
+        ax.axhline(1.0, ls=":", lw=1.0, color="0.3")
+        ax.set_xticks(xs); ax.set_xticklabels(chans)
+        ax.set_ylabel("fraction of the all-forcing field")
+        ax.set_ylim(0, 1.25)
+        ax.legend(frameon=False, fontsize=8, loc="lower right")
+    ax.set_title("(a)  The INPUT is additive\n"
+                 f"conditioning channels, {lo_i}–{hi_i} mean", loc="left",
+                 fontsize=9.5)
+
+    # (b) waterfall: CESM2 Arctic R -> emulator Arctic R
+    ax = fig.add_subplot(gs[0, 1])
+    steps = [("CESM2 R", am(R["cesm"]), "0.45", None)]
+    run = am(R["cesm"])
+    for ag, sgn, lab in (("all", +1, "+ All-forcing bias"),
+                         ("ghg", -1, "− GHG-only bias"),
+                         ("aaer", -1, "− Aerosol-only bias")):
+        d = sgn * am(P[("model", ag)] - P[("cesm", ag)])
+        steps.append((lab, d, C[ag], run)); run += d
+    steps.append(("Emulator R", am(R["model"]), "0.15", None))
+    for i, (lab, val, col, bot) in enumerate(steps):
+        if bot is None:
+            ax.bar(i, val, 0.62, color=col)
+            ax.annotate(f"{val:+.2f}", (i, val), ha="center", va="bottom",
+                        fontsize=8.5, fontweight="bold")
+        else:
+            ax.bar(i, val, 0.62, bottom=bot, color=col, alpha=0.85)
+            ax.annotate(f"{val:+.2f}", (i, bot + val), ha="center",
+                        va="bottom" if val > 0 else "top", fontsize=8.5)
+    ax.set_xticks(range(len(steps)))
+    ax.set_xticklabels([s[0] for s in steps], rotation=20, ha="right",
+                       fontsize=8)
+    ax.set_ylabel(f"Arctic-mean residual ({V['unit']})")
+    ax.axhline(0, lw=0.8, color="0.3")
+    ax.set_title("(b)  The emulator's Arctic excess is three\n"
+                 "same-signed scenario biases, not one", loc="left",
+                 fontsize=9.5)
+
+    # (c, d) does R have its own geography?
+    for j, (ref, name) in enumerate((("all", "All-forcing response"),
+                                     ("aaer", "Aerosol-only response"))):
+        ax = fig.add_subplot(gs[1, j])
+        w = W.ravel()
+        for side, col, lab in (("cesm", C["all"], "CESM2"),
+                               ("model", C["sum"], "Emulator")):
+            x, y = P[(side, ref)].ravel(), R[side].ravel()
+            r, sl = _wcorr(x, y, w)
+            k = slice(None, None, 11)          # thin for legibility only
+            ax.scatter(x[k], y[k], s=1.5, alpha=0.20, color=col, lw=0)
+            xx = np.linspace(x.min(), x.max(), 10)
+            ax.plot(xx, (y*w).sum() + sl*(xx - (x*w).sum()), color=col, lw=2,
+                    label=f"{lab}:  r = {r:+.2f}")
+        ax.axhline(0, ls=":", lw=0.8, color="0.4")
+        ax.set_xlabel(f"{name} ({V['unit']})")
+        if j == 0:
+            ax.set_ylabel(f"Residual R ({V['unit']})")
+        ax.legend(frameon=False, fontsize=8.5, loc="upper left")
+        note = ("R is NOT the warming pattern rescaled"
+                if ref == "all" else
+                "R is ANTI-correlated with the aerosol response\n"
+                "— aerosol efficacy falls in a warmer base state")
+        ax.set_title(f"({'cd'[j]})  {note}", loc="left", fontsize=9.5)
+
+    fig.suptitle(f"Where the non-additivity comes from — {V['label']}, "
+                 f"{lo_i}–{hi_i}\n"
+                 "additive inputs, non-additive response: the model "
+                 "manufactures R rather than reading it off the conditioning",
+                 fontsize=10.5, y=0.99)
+    out = os.path.splitext(args.out)[0] + "_decompose.png"
+    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(os.path.splitext(out)[0] + ".pdf", bbox_inches="tight")
+    print(f"wrote {out}")
     return 0
 
 
