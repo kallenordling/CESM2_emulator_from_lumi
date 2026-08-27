@@ -12,7 +12,11 @@ are computed}
 \date{}
 
 \begin{document}
-\maketitle
+\begin{center}
+{\large\bfseries Forcing-agent attribution: how the residual and its
+decomposition are computed}\\[2pt]
+CESM2 diffusion emulator, checkpoint ep0860
+\end{center}
 
 \section*{Definitions}
 
@@ -26,6 +30,56 @@ single-forcing runs end.
 The evaluation files store per-member anomaly maps
 $x^{s}_{X,i}(t,\phi,\lambda)$, each referenced to its own side's
 $1850$--$1900$ climatology, for member $i=1,\dots,N^{s}_{X}$.
+
+\section*{Symbols}
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabular}{@{}l l p{8.9cm}@{}}
+\toprule
+Symbol & Value here & Meaning \\
+\midrule
+$\phi,\lambda$ & $192\times288$ & latitude, longitude on the native CESM2 grid \\
+$t$ & years & time index, one value per year \\
+$\mathcal{W}$ & $[2041,2050]$ & the averaging window; $|\mathcal{W}|=10$ years \\
+\addlinespace
+$s$ & $c$ or $m$ & the side: $c$ = CESM2 reference, $m$ = emulator \\
+$X$ & $A$, $G$, $E$ & the experiment \\
+\quad $A$ & \texttt{ssp370} & all-forcing: every agent varies together \\
+\quad $G$ & \texttt{ghg} & GHG-only: greenhouse gases vary, all else held at 1850 \\
+\quad $E$ & \texttt{aaer} & aerosol-only: anthropogenic aerosols vary, all else at 1850 \\
+\addlinespace
+$i$ & $1\dots N^{s}_{X}$ & ensemble member index \\
+$N^{s}_{X}$ & $3,10,10$ & members for $A$, $G$, $E$; equal on both sides after
+   \texttt{--match-members} \\
+$x^{s}_{X,i}$ & K & a member's anomaly map, referenced to that side's own
+   $1850$--$1900$ climatology \\
+\addlinespace
+$\bar{X}^{s}_{i}$ & K & Eq.~(1): one member averaged over $\mathcal{W}$ \\
+$\langle X^{s}\rangle$ & K & Eq.~(2): the ensemble mean of those, a single map \\
+$R^{s}$ & K & Eq.~(3): the residual, $\langle A\rangle-\langle G\rangle-\langle E\rangle$
+   --- what the two agents fail to explain between them \\
+\addlinespace
+$w(\phi)$ & $\cos\phi$ & area weight; cells shrink towards the pole \\
+$\langle\!\langle\,\cdot\,\rangle\!\rangle$ & --- & Eq.~(4): area-weighted mean over
+   $\phi\geq60^{\circ}\mathrm{N}$, i.e.\ the Arctic \\
+\addlinespace
+$b_{1}$ & $+1.2180$~K & first bar: CESM2's Arctic-mean residual \\
+$b_{5}$ & $+2.1416$~K & last bar: the emulator's \\
+$\Delta_{A}$ & $+0.4328$~K & middle bar: emulator minus CESM2 for $A$, entering $+$ \\
+$\Delta_{G}$ & $+0.2354$~K & middle bar: emulator minus CESM2 for $G$, entering $-$ \\
+$\Delta_{E}$ & $+0.2554$~K & middle bar: emulator minus CESM2 for $E$, entering $-$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A bar over a symbol always means a mean over time, angle brackets a mean
+over members, and double angle brackets a mean over Arctic area. The
+$\Delta$ terms are emulator errors; $R$ is not an error but a property of
+the climate response, present in CESM2 itself.
+
+\section*{The calculation}
 
 \paragraph{Step 1 --- decadal mean per member.}
 \begin{equation}
