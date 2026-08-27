@@ -52,6 +52,11 @@ SAFE=(
     "${HOME}/.cache/pip"                # pip wheel/http cache
     "${HOME}/.cache/matplotlib"         # font cache (the error above)
     "${HOME}/.cache/miopen"             # ROCm kernel cache — can reach many GB
+    "${HOME}/.cache/comgr"              # ROCm LLVM compile cache. THE INODE KILLER:
+                                        # measured 87,848 files / 2.3 GB on one
+                                        # account, 87% of the 100K file quota, with
+                                        # disk use still only a third of its limit.
+                                        # Watch the FILE count, not just the bytes.
     "${HOME}/.cache/torch"              # torch hub downloads
     "${HOME}/.cache/huggingface"        # model/dataset downloads
     "${HOME}/.cache/conda"
