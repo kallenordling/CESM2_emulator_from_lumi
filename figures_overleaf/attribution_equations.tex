@@ -6,10 +6,12 @@
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{6pt}
 
-\title{Forcing-agent attribution: how the residual and its decomposition
-are computed}
-\author{CESM2 diffusion emulator, checkpoint ep0860}
-\date{}
+% Experiment labels used as subscripts, so the algebra names the runs
+% directly instead of hiding them behind single letters.
+\newcommand{\Xssp}{\mathrm{ssp370}}
+\newcommand{\Xghg}{\mathrm{ghg}}
+\newcommand{\Xaer}{\mathrm{aaer}}
+\newcommand{\ameanN}[1]{\bigl\langle\!\bigl\langle #1 \bigr\rangle\!\bigr\rangle}
 
 \begin{document}
 \begin{center}
@@ -20,12 +22,28 @@ CESM2 diffusion emulator, checkpoint ep0860
 
 \section*{Definitions}
 
-Let $s\in\{c,m\}$ index the side (CESM2 reference, emulator) and
-$X\in\{A,G,E\}$ the experiment: $A$ all-forcing (\texttt{ssp370}), $G$
-GHG-only (\texttt{ghg}), $E$ aerosol-only (\texttt{aaer}). The averaging
-window is $\mathcal{W}=[2041,2050]$, chosen after 2015 so that no major
-volcanic eruption falls inside it, and before 2050, where the
-single-forcing runs end.
+Let $s\in\{c,m\}$ index the side --- $c$ the CESM2 reference, $m$ the
+emulator --- and let the experiment appear directly as a subscript,
+$X\in\{\Xssp,\Xghg,\Xaer\}$:
+
+\begin{itemize}\setlength{\itemsep}{2pt}
+\item $\Xssp$ --- \textbf{all-forcing}. Every agent evolves together
+  (greenhouse gases, aerosols, ozone, land use, biomass burning, solar,
+  volcanic). Historical to 2014, SSP3-7.0 after; the window below sits
+  entirely on the SSP3-7.0 side.
+\item $\Xghg$ --- \textbf{GHG-only}. A single-forcing run in which only
+  greenhouse gases vary; everything else is held at its 1850 value.
+\item $\Xaer$ --- \textbf{aerosol-only}. Only anthropogenic aerosols
+  vary, everything else at 1850.
+\end{itemize}
+
+The two single-forcing ensembles follow SSP3-7.0 after 2015 as well, so
+all three experiments share one scenario pathway --- which is what makes
+their difference meaningful --- and all three end at 2050, which is where
+the single-forcing archive stops.
+
+The averaging window is $\mathcal{W}=[2041,2050]$: after 2015, so no
+major volcanic eruption falls inside it, and before 2050.
 
 The evaluation files store per-member anomaly maps
 $x^{s}_{X,i}(t,\phi,\lambda)$, each referenced to its own side's
@@ -36,7 +54,7 @@ $1850$--$1900$ climatology, for member $i=1,\dots,N^{s}_{X}$.
 \begin{center}
 \small
 \renewcommand{\arraystretch}{1.12}
-\begin{tabular}{@{}l l p{8.9cm}@{}}
+\begin{tabular}{@{}l l p{8.6cm}@{}}
 \toprule
 Symbol & Value here & Meaning \\
 \midrule
@@ -45,31 +63,31 @@ $t$ & years & time index, one value per year \\
 $\mathcal{W}$ & $[2041,2050]$ & the averaging window; $|\mathcal{W}|=10$ years \\
 \addlinespace
 $s$ & $c$ or $m$ & the side: $c$ = CESM2 reference, $m$ = emulator \\
-$X$ & $A$, $G$, $E$ & the experiment \\
-\quad $A$ & \texttt{ssp370} & all-forcing: every agent varies together \\
-\quad $G$ & \texttt{ghg} & GHG-only: greenhouse gases vary, all else held at 1850 \\
-\quad $E$ & \texttt{aaer} & aerosol-only: anthropogenic aerosols vary, all else at 1850 \\
+$X$ & $\Xssp,\Xghg,\Xaer$ & the experiment, named as above \\
 \addlinespace
 $i$ & $1\dots N^{s}_{X}$ & ensemble member index \\
-$N^{s}_{X}$ & $3,10,10$ & members for $A$, $G$, $E$; equal on both sides after
-   \texttt{--match-members} \\
+$N^{s}_{X}$ & $3,10,10$ & members for $\Xssp$, $\Xghg$, $\Xaer$; equal on both
+   sides after \texttt{-{}-match-members} \\
 $x^{s}_{X,i}$ & K & a member's anomaly map, referenced to that side's own
    $1850$--$1900$ climatology \\
 \addlinespace
-$\bar{X}^{s}_{i}$ & K & Eq.~(1): one member averaged over $\mathcal{W}$ \\
-$\langle X^{s}\rangle$ & K & Eq.~(2): the ensemble mean of those, a single map \\
-$R^{s}$ & K & Eq.~(3): the residual, $\langle A\rangle-\langle G\rangle-\langle E\rangle$
-   --- what the two agents fail to explain between them \\
+$\bar{x}^{s}_{X,i}$ & K & Eq.~(1): one member averaged over $\mathcal{W}$ \\
+$\langle x^{s}_{X}\rangle$ & K & Eq.~(2): the ensemble mean of those, a single map \\
+$R^{s}$ & K & Eq.~(3): the residual --- what the two agents fail to explain
+   between them \\
 \addlinespace
 $w(\phi)$ & $\cos\phi$ & area weight; cells shrink towards the pole \\
-$\langle\!\langle\,\cdot\,\rangle\!\rangle$ & --- & Eq.~(4): area-weighted mean over
+$\ameanN{\,\cdot\,}$ & --- & Eq.~(4): area-weighted mean over
    $\phi\geq60^{\circ}\mathrm{N}$, i.e.\ the Arctic \\
 \addlinespace
 $b_{1}$ & $+1.2180$~K & first bar: CESM2's Arctic-mean residual \\
 $b_{5}$ & $+2.1416$~K & last bar: the emulator's \\
-$\Delta_{A}$ & $+0.4328$~K & middle bar: emulator minus CESM2 for $A$, entering $+$ \\
-$\Delta_{G}$ & $+0.2354$~K & middle bar: emulator minus CESM2 for $G$, entering $-$ \\
-$\Delta_{E}$ & $+0.2554$~K & middle bar: emulator minus CESM2 for $E$, entering $-$ \\
+$\Delta_{\Xssp}$ & $+0.4328$~K & middle bar: emulator minus CESM2 for $\Xssp$,
+   entering $+$ \\
+$\Delta_{\Xghg}$ & $+0.2354$~K & middle bar: emulator minus CESM2 for $\Xghg$,
+   entering $-$ \\
+$\Delta_{\Xaer}$ & $+0.2554$~K & middle bar: emulator minus CESM2 for $\Xaer$,
+   entering $-$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -83,26 +101,26 @@ the climate response, present in CESM2 itself.
 
 \paragraph{Step 1 --- decadal mean per member.}
 \begin{equation}
-\bar{X}^{s}_{i}(\phi,\lambda)
+\bar{x}^{s}_{X,i}(\phi,\lambda)
   \;=\; \frac{1}{|\mathcal{W}|}\sum_{t\in\mathcal{W}}
         x^{s}_{X,i}(t,\phi,\lambda)
 \end{equation}
 
 \paragraph{Step 2 --- ensemble mean.}
 \begin{equation}
-\bigl\langle X^{s}\bigr\rangle
-  \;=\; \frac{1}{N^{s}_{X}}\sum_{i=1}^{N^{s}_{X}} \bar{X}^{s}_{i}
+\bigl\langle x^{s}_{X}\bigr\rangle
+  \;=\; \frac{1}{N^{s}_{X}}\sum_{i=1}^{N^{s}_{X}} \bar{x}^{s}_{X,i}
 \end{equation}
-Under equal sampling (\texttt{--match-members}) the emulator ensemble is
+Under equal sampling (\texttt{-{}-match-members}) the emulator ensemble is
 truncated to the reference count, $N^{m}_{X}=N^{c}_{X}$, so that neither
 side's mean is better converged than the other's. Here
-$N_{A}=3$, $N_{G}=10$, $N_{E}=10$.
+$N_{\Xssp}=3$, $N_{\Xghg}=10$, $N_{\Xaer}=10$.
 
 \paragraph{Step 3 --- the residual field.}
 \begin{equation}
-R^{s} \;=\; \bigl\langle A^{s}\bigr\rangle
-          - \bigl\langle G^{s}\bigr\rangle
-          - \bigl\langle E^{s}\bigr\rangle
+R^{s} \;=\; \bigl\langle x^{s}_{\Xssp}\bigr\rangle
+          - \bigl\langle x^{s}_{\Xghg}\bigr\rangle
+          - \bigl\langle x^{s}_{\Xaer}\bigr\rangle
 \label{eq:R}
 \end{equation}
 $R^{s}$ is what the two agents fail to explain between them. It is not a
@@ -114,7 +132,7 @@ $R=(\text{other forcings})+(\text{nonlinear interaction})$.
 With area weights $w(\phi)=\cos\phi$, renormalised inside the mask
 $\phi\geq 60^{\circ}\mathrm{N}$,
 \begin{equation}
-\bigl\langle\!\bigl\langle f \bigr\rangle\!\bigr\rangle
+\ameanN{f}
   \;=\;
   \frac{\displaystyle\sum_{\phi\geq 60^{\circ}}\sum_{\lambda}
         w(\phi)\, f(\phi,\lambda)}
@@ -125,44 +143,42 @@ $\phi\geq 60^{\circ}\mathrm{N}$,
 
 The two end bars are the Arctic-mean residual on each side,
 \begin{equation}
-b_{1}=\bigl\langle\!\bigl\langle R^{c}\bigr\rangle\!\bigr\rangle
-     =+1.2180\ \mathrm{K},
+b_{1}=\ameanN{R^{c}}=+1.2180\ \mathrm{K},
 \qquad
-b_{5}=\bigl\langle\!\bigl\langle R^{m}\bigr\rangle\!\bigr\rangle
-     =+2.1416\ \mathrm{K}.
+b_{5}=\ameanN{R^{m}}=+2.1416\ \mathrm{K}.
 \end{equation}
 
 The three middle bars are the emulator's bias for one experiment,
 carrying the sign with which that experiment enters
 Eq.~\eqref{eq:R}:
 \begin{align}
-\Delta_{A} &= +\bigl\langle\!\bigl\langle
-   \langle A^{m}\rangle-\langle A^{c}\rangle
-   \bigr\rangle\!\bigr\rangle = +(4.674-4.242) = +0.4328\ \mathrm{K},\\
-\Delta_{G} &= -\bigl\langle\!\bigl\langle
-   \langle G^{m}\rangle-\langle G^{c}\rangle
-   \bigr\rangle\!\bigr\rangle = -(4.021-4.257) = +0.2354\ \mathrm{K},\\
-\Delta_{E} &= -\bigl\langle\!\bigl\langle
-   \langle E^{m}\rangle-\langle E^{c}\rangle
-   \bigr\rangle\!\bigr\rangle = -(-1.488+1.233) = +0.2554\ \mathrm{K}.
+\Delta_{\Xssp} &= +\ameanN{\langle x^{m}_{\Xssp}\rangle
+   -\langle x^{c}_{\Xssp}\rangle}
+   = +(4.674-4.242) = +0.4328\ \mathrm{K},\\
+\Delta_{\Xghg} &= -\ameanN{\langle x^{m}_{\Xghg}\rangle
+   -\langle x^{c}_{\Xghg}\rangle}
+   = -(4.021-4.257) = +0.2354\ \mathrm{K},\\
+\Delta_{\Xaer} &= -\ameanN{\langle x^{m}_{\Xaer}\rangle
+   -\langle x^{c}_{\Xaer}\rangle}
+   = -(-1.488+1.233) = +0.2554\ \mathrm{K}.
 \end{align}
 
-The sign flip is the substance of the panel: the emulator's GHG-only run
-is too \emph{cool} and its aerosol-only run too \emph{cold}, yet both
-terms are \emph{subtracted} in Eq.~\eqref{eq:R}, so both push the
-residual \emph{up}. Three biases of different physical sign act on $R$
-in the same direction.
+The sign flip is the substance of the panel: the emulator's $\Xghg$ run
+is too \emph{cool} and its $\Xaer$ run too \emph{cold}, yet both terms
+are \emph{subtracted} in Eq.~\eqref{eq:R}, so both push the residual
+\emph{up}. Three biases of different physical sign act on $R$ in the same
+direction.
 
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
 Arctic mean (K) & CESM2 & emulator & bias \\
 \midrule
-All-forcing (ssp370) & $+4.242$ & $+4.674$ & $+0.433$ \\
-GHG-only             & $+4.257$ & $+4.021$ & $-0.235$ \\
-Aerosol-only         & $-1.233$ & $-1.488$ & $-0.255$ \\
+$\Xssp$ (all-forcing)  & $+4.242$ & $+4.674$ & $+0.433$ \\
+$\Xghg$ (GHG-only)     & $+4.257$ & $+4.021$ & $-0.235$ \\
+$\Xaer$ (aerosol-only) & $-1.233$ & $-1.488$ & $-0.255$ \\
 \midrule
-Residual $R$         & $+1.218$ & $+2.142$ & $+0.924$ \\
+Residual $R$           & $+1.218$ & $+2.142$ & $+0.924$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -170,9 +186,8 @@ Residual $R$         & $+1.218$ & $+2.142$ & $+0.924$ \\
 \section*{Why the waterfall closes exactly}
 
 \begin{equation}
-\bigl\langle\!\bigl\langle R^{m}\bigr\rangle\!\bigr\rangle
- -\bigl\langle\!\bigl\langle R^{c}\bigr\rangle\!\bigr\rangle
- \;=\; \Delta_{A}+\Delta_{G}+\Delta_{E}
+\ameanN{R^{m}}-\ameanN{R^{c}}
+ \;=\; \Delta_{\Xssp}+\Delta_{\Xghg}+\Delta_{\Xaer}
 \label{eq:identity}
 \end{equation}
 \begin{equation*}
@@ -180,14 +195,14 @@ Residual $R$         & $+1.218$ & $+2.142$ & $+0.924$ \\
 \end{equation*}
 
 Equation~\eqref{eq:identity} is an identity, not a fit. Every operator in
-the chain --- the decadal mean, the ensemble mean, the combination
-$A-G-E$, and the area-weighted mean --- is linear, so they commute and
+the chain --- the decadal mean, the ensemble mean, the combination in
+Eq.~\eqref{eq:R}, and the area-weighted mean --- is linear, so they
+commute and
 \begin{equation}
-\bigl\langle\!\bigl\langle R^{m}\bigr\rangle\!\bigr\rangle
- -\bigl\langle\!\bigl\langle R^{c}\bigr\rangle\!\bigr\rangle
- =\bigl\langle\!\bigl\langle
-   (A^{m}\!-\!A^{c})-(G^{m}\!-\!G^{c})-(E^{m}\!-\!E^{c})
-  \bigr\rangle\!\bigr\rangle .
+\ameanN{R^{m}}-\ameanN{R^{c}}
+ =\ameanN{\;\bigl(\langle x^{m}_{\Xssp}\rangle\!-\!\langle x^{c}_{\Xssp}\rangle\bigr)
+          -\bigl(\langle x^{m}_{\Xghg}\rangle\!-\!\langle x^{c}_{\Xghg}\rangle\bigr)
+          -\bigl(\langle x^{m}_{\Xaer}\rangle\!-\!\langle x^{c}_{\Xaer}\rangle\bigr)}
 \end{equation}
 Verified numerically, the closure error is $1.2\times10^{-10}$~K, i.e.\
 floating point. The panel therefore does not test anything: it
@@ -195,12 +210,15 @@ floating point. The panel therefore does not test anything: it
 and the finding is that the split is roughly even rather than one bad
 scenario.
 
-\paragraph{Caveat.} After matching, $\Delta_{A}$ rests on three members
-per side, all the CESM2 \texttt{ssp370} reference in these files
-provides. It is both the largest bar and the least certain, and it is the
-one that would move were the reference rewired to the ten held-out
-LENS2 members. Bar labels in the figure are rounded to two decimals, so
-reading them off gives $2.15$ rather than $2.14$; the underlying values
-close exactly.
+\paragraph{Caveat.} After matching, $\Delta_{\Xssp}$ rests on three
+members per side, all the CESM2 $\Xssp$ reference in these files
+provides --- and that reference is the 3-member CMIP6 ensemble, whereas
+$\Xghg$ and $\Xaer$ are 10-member LENS2 single-forcing runs. Part of
+$R^{c}$ could therefore be a model-configuration difference rather than a
+forcing interaction. It is both the largest bar and the least certain,
+and it is the one that would move were the reference rewired to the ten
+held-out LENS2 $\Xssp$ members. Bar labels in the figure are rounded to
+two decimals, so reading them off gives $2.15$ rather than $2.14$; the
+underlying values close exactly.
 
 \end{document}
