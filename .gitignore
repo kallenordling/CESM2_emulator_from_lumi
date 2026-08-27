@@ -17,3 +17,4 @@ eval_output/
 # Editor / OS
 .DS_Store
 *.swp
+notebook_output/
