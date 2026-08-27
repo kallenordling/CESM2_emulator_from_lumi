@@ -273,6 +273,13 @@ def main() -> int:
                     default="configs/config_data_ybias_BCprect.yaml",
                     help="data config whose experiment_configs define the TRAINED "
                          "members; everything else on disk counts as unseen")
+    ap.add_argument("--no-emu-spread", action="store_true",
+                    help="draw only the emulator's ensemble MEAN, leaving the "
+                         "CESM2 member range as the only shaded envelope. Two "
+                         "overlapping ranges in the same colour are hard to "
+                         "separate where the panels crowd, and the comparison "
+                         "the figure is making is emulator mean vs CESM2 "
+                         "spread.")
     ap.add_argument("--match-members", action="store_true",
                     help="cap the emulator ensemble at the CESM2 reference's "
                          "member count per scenario, so neither side's mean is "
@@ -521,7 +528,7 @@ def main() -> int:
             continue
         mean, members, years = emu[sc]
         keep = years <= args.year_max
-        if members is not None:
+        if members is not None and not args.no_emu_spread:
             _em = anom(members[:, keep], eb)
             ax.fill_between(years[keep], _em.min(axis=0), _em.max(axis=0),
                             color=colour, alpha=0.28, lw=0, zorder=2)
@@ -652,8 +659,10 @@ def main() -> int:
     style = [
         Line2D([], [], color="0.35", lw=2.6,
                label=f"EMULATOR \u2014 ensemble mean ({_n_emu} members)"),
-        Patch(facecolor="0.35", alpha=0.28, label="EMULATOR member range"),
     ]
+    if not args.no_emu_spread:
+        style.append(Patch(facecolor="0.35", alpha=0.28,
+                           label="EMULATOR member range"))
     # Only advertise the reference when one was actually drawn.
     if _has_cesm:
         style[1:1] = [
