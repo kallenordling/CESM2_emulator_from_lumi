@@ -150,6 +150,9 @@ def main() -> int:
                     default="configs/config_data_ybias_BCprect.yaml")
     ap.add_argument("--n-years", type=int, default=10,
                     help="pool the last N years of each experiment")
+    ap.add_argument("--match-members", action="store_true",
+                    help="cap the emulator ensemble at the CESM2 reference's "
+                         "member count per scenario")
     ap.add_argument("--n-ref-members", type=int, default=5,
                     help="CESM2 members to use; matches the emulator's count")
     ap.add_argument("--ref-csv", default=None,
@@ -227,6 +230,13 @@ def main() -> int:
             print(f"[skip] {sc}: missing emulator or reference data")
             continue
         R = ref_all[sc]
+        if args.match_members and R is not None and sc in emu_abs \
+                and emu_abs[sc] is not None:
+            _nc = R.shape[1] if args.n_ref_members <= 0 else min(
+                R.shape[1], args.n_ref_members)
+            if emu_abs[sc].shape[0] > _nc:
+                emu_abs[sc] = emu_abs[sc][:_nc]
+                print(f"[{sc}] match-members: emulator capped to {_nc}")
         if args.n_ref_members > 0:
             R = R[list(R.columns)[:args.n_ref_members]]
 

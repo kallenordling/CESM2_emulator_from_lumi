@@ -273,6 +273,10 @@ def main() -> int:
                     default="configs/config_data_ybias_BCprect.yaml",
                     help="data config whose experiment_configs define the TRAINED "
                          "members; everything else on disk counts as unseen")
+    ap.add_argument("--match-members", action="store_true",
+                    help="cap the emulator ensemble at the CESM2 reference's "
+                         "member count per scenario, so neither side's mean is "
+                         "better converged than the other's")
     ap.add_argument("--n-ref-members", type=int, default=5,
                     help="Use only the first N unseen CESM2 members, so the "
                          "reference ensemble is the same size as the emulator's "
@@ -397,6 +401,17 @@ def main() -> int:
             print(f"[emu] MISSING {p} — panel will show reference only")
             continue
         emu[sc] = read_emulated(p)
+        # Equal-sampling comparison. The stored ensemble mean covers EVERY
+        # member, so it has to be recomputed from the kept ones — using the
+        # file's mean with a thinned member set would compare a 25-member mean
+        # against a 10-member spread.
+        if args.match_members and sc in ref and ref[sc] is not None:
+            _nc = ref[sc].shape[1]
+            _m, _mem, _y = emu[sc]
+            if _mem is not None and _mem.shape[0] > _nc:
+                _mem = _mem[:_nc]
+                emu[sc] = (_mem.mean(axis=0), _mem, _y)
+                print(f"[emu] {sc:7s} match-members: capped to {_nc}")
         print(f"[emu] {sc:7s} {emu[sc][2][0]}-{emu[sc][2][-1]}  "
               f"{0 if emu[sc][1] is None else emu[sc][1].shape[0]} members")
 

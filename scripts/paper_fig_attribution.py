@@ -172,6 +172,9 @@ def main() -> int:
                          "inside the single-forcing runs' 2050 end.")
     ap.add_argument("--maps", action="store_true",
                     help="also write residual maps for --interaction-window")
+    ap.add_argument("--match-members", action="store_true",
+                    help="cap the emulator ensemble at the CESM2 member count "
+                         "of the same file, per scenario")
     ap.add_argument("--decompose", action="store_true",
                     help="second figure: where the non-additivity comes from — "
                          "conditioning additivity, the Arctic excess split by "
@@ -209,6 +212,10 @@ def main() -> int:
                 if M is None:
                     print(f"[{var}/{side}] no members in {p}")
                     continue
+                if args.match_members and side == "model":
+                    _yc, _Mc = gmean_series(p, var, "cesm")
+                    if _Mc is not None and M.shape[0] > _Mc.shape[0]:
+                        M = M[:_Mc.shape[0]]
                 got[agent] = (y, M)
             if not {"hist", "ssp370", "ghg", "aaer"} <= set(got):
                 print(f"[{var}/{side}] incomplete set — skipping this side")
@@ -290,9 +297,13 @@ def main() -> int:
                 ok = True
                 for agent, fname in (("all", "ssp370"), ("ghg", "ghg"),
                                      ("aaer", "aaer")):
-                    a, lat, lon = window_maps(
-                        os.path.join(E, f"{var}_{fname}.nc"), var, side,
-                        lo_i, hi_i)
+                    _p = os.path.join(E, f"{var}_{fname}.nc")
+                    a, lat, lon = window_maps(_p, var, side, lo_i, hi_i)
+                    if (args.match_members and side == "model"
+                            and a is not None):
+                        _ac, _, _ = window_maps(_p, var, "cesm", lo_i, hi_i)
+                        if _ac is not None and a.shape[0] > _ac.shape[0]:
+                            a = a[:_ac.shape[0]]
                     if a is None:
                         print(f"[{var}/{side}] no map for {agent} in "
                               f"{lo_i}-{hi_i}")
@@ -526,11 +537,15 @@ def decompose(args, plt):
     P = {}
     for side in ("cesm", "model"):
         for ag, f in (("all", "ssp370"), ("ghg", "ghg"), ("aaer", "aaer")):
-            a, lat, lon = window_maps(os.path.join(E, f"{var}_{f}.nc"),
-                                      var, side, lo_i, hi_i)
+            _p = os.path.join(E, f"{var}_{f}.nc")
+            a, lat, lon = window_maps(_p, var, side, lo_i, hi_i)
             if a is None:
                 print(f"[decompose] no maps for {side}/{ag}")
                 return 2
+            if args.match_members and side == "model":
+                _ac, _, _ = window_maps(_p, var, "cesm", lo_i, hi_i)
+                if _ac is not None and a.shape[0] > _ac.shape[0]:
+                    a = a[:_ac.shape[0]]
             P[(side, ag)] = a.mean(0)
     W = area_weights(lat, lon)
     arc = region_mask(lat, lon, 60, 90, 0, 360)
@@ -541,45 +556,28 @@ def decompose(args, plt):
 
     fig = plt.figure(figsize=(11.5, 7.2))
     gs = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.28)
+    # (a) waterfall, then one scatter per forcing experiment: the residual
+    # against the all-forcing, GHG-only and aerosol-only responses.
 
-    # (a) conditioning additivity, each channel normalised by its own all-forcing
-    # value — the three channels differ by six orders of magnitude, so absolute
-    # units would show one bar and two slivers.
-    ax = fig.add_subplot(gs[0, 0])
-    if cond is None:
-        ax.text(0.5, 0.5, "conditioning files not found", ha="center",
-                transform=ax.transAxes)
-    else:
+    # CONDITIONING ADDITIVITY — reported as numbers, not a panel. The result
+    # is a one-line fact (the inputs sum to within a couple of percent, so a
+    # linear response operator would return R = 0) and it does not need a
+    # quarter of the figure to say so.
+    if cond is not None:
         chans = [c for c in ("CO2", "SUL", "BC") if c in cond["ssp370"]]
-        xs = np.arange(len(chans)); wbar = 0.26
         g = lambda d, c: float((d[c].values * W).sum())
-        base = [g(cond["ssp370"], c) for c in chans]
-        for k, (scen, lab, col) in enumerate((
-                ("ghg", "GHG-only", C["ghg"]), ("aaer", "Aerosol-only", C["aaer"]))):
-            ax.bar(xs + (k-1)*wbar, [g(cond[scen], c)/b
-                                     for c, b in zip(chans, base)],
-                   wbar, color=col, label=lab)
-        ax.bar(xs + wbar, [(g(cond["ghg"], c) + g(cond["aaer"], c))/b
-                           for c, b in zip(chans, base)],
-               wbar, color=C["sum"], label="GHG + Aerosol")
-        for i, c in enumerate(chans):
-            tot = (g(cond["ghg"], c) + g(cond["aaer"], c))/base[i]
-            d = 1.0 - tot
-            # clear of BOTH the reference line and the bar, which overshoots 1
-            # wherever the single-forcing files leak a little of the other agent
-            ax.annotate(f"{100*d:+.2f}%", (xs[i]+wbar, max(1.0, tot) + 0.03),
-                        ha="center", fontsize=8, color="0.25")
-        ax.axhline(1.0, ls=":", lw=1.0, color="0.3")
-        ax.set_xticks(xs); ax.set_xticklabels(chans)
-        ax.set_ylabel("fraction of the all-forcing field")
-        ax.set_ylim(0, 1.25)
-        ax.legend(frameon=False, fontsize=8, loc="lower right")
-    ax.set_title("(a)  The INPUT is additive\n"
-                 f"conditioning channels, {lo_i}–{hi_i} mean", loc="left",
-                 fontsize=9.5)
+        print(f"\nConditioning additivity, {lo_i}-{hi_i} mean "
+              f"(area-weighted global means)")
+        print(f"{'chan':5} {'ssp370':>13} {'ghg+aaer':>13} {'residual':>10}")
+        for c in chans:
+            a_, t_ = g(cond["ssp370"], c), g(cond["ghg"], c) + g(cond["aaer"], c)
+            print(f"{c:5} {a_:13.6g} {t_:13.6g} {100*(1-t_/a_):9.2f}%")
+        print("  => the INPUT is additive; a linear response operator fed these "
+              "returns R = 0,\n     so the emulator manufactures its "
+              "non-additivity in the mapping.")
 
     # (b) waterfall: CESM2 Arctic R -> emulator Arctic R
-    ax = fig.add_subplot(gs[0, 1])
+    ax = fig.add_subplot(gs[0, 0])
     steps = [("CESM2 R", am(R["cesm"]), "0.45", None)]
     run = am(R["cesm"])
     for ag, sgn, lab in (("all", +1, "+ All-forcing bias"),
@@ -602,14 +600,16 @@ def decompose(args, plt):
                        fontsize=8)
     ax.set_ylabel(f"Arctic-mean residual ({V['unit']})")
     ax.axhline(0, lw=0.8, color="0.3")
-    ax.set_title("(b)  The emulator's Arctic excess is three\n"
+    ax.set_title("(a)  The emulator's Arctic excess is three\n"
                  "same-signed scenario biases, not one", loc="left",
                  fontsize=9.5)
 
     # (c, d) does R have its own geography?
+    SLOT = [(0, 1), (1, 0), (1, 1)]
     for j, (ref, name) in enumerate((("all", "All-forcing response"),
+                                     ("ghg", "GHG-only response"),
                                      ("aaer", "Aerosol-only response"))):
-        ax = fig.add_subplot(gs[1, j])
+        ax = fig.add_subplot(gs[SLOT[j]])
         w = W.ravel()
         for side, col, lab in (("cesm", C["all"], "CESM2"),
                                ("model", C["sum"], "Emulator")):
@@ -622,14 +622,16 @@ def decompose(args, plt):
                     label=f"{lab}:  r = {r:+.2f}")
         ax.axhline(0, ls=":", lw=0.8, color="0.4")
         ax.set_xlabel(f"{name} ({V['unit']})")
-        if j == 0:
+        if SLOT[j][1] == 0:
             ax.set_ylabel(f"Residual R ({V['unit']})")
         ax.legend(frameon=False, fontsize=8.5, loc="upper left")
-        note = ("R is NOT the warming pattern rescaled"
-                if ref == "all" else
-                "R is ANTI-correlated with the aerosol response\n"
-                "— aerosol efficacy falls in a warmer base state")
-        ax.set_title(f"({'cd'[j]})  {note}", loc="left", fontsize=9.5)
+        note = {"all": "R is NOT the warming pattern rescaled",
+                "ghg": "vs the GHG-only response — the agent whose\n"
+                       "pattern R does not simply follow",
+                "aaer": "R is ANTI-correlated with the aerosol response\n"
+                        "— aerosol efficacy falls in a warmer base state",
+                }[ref]
+        ax.set_title(f"({'bcd'[j]})  {note}", loc="left", fontsize=9.5)
 
     fig.suptitle(f"Where the non-additivity comes from — {V['label']}, "
                  f"{lo_i}–{hi_i}\n"

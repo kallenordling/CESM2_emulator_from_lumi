@@ -77,6 +77,12 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--eval-dir", required=True)
     ap.add_argument("--scenarios", nargs="+", default=DEFAULT_SCENARIOS)
+    ap.add_argument("--match-members", action="store_true",
+                    help="cap the emulator ensemble at the CESM2 reference's "
+                         "member count for this scenario. A 25-member emulator "
+                         "mean is better converged than a 10-member CESM2 one, "
+                         "so an uncapped comparison flatters the emulator; "
+                         "selection is the first N, deterministic.")
     ap.add_argument("--members", action="store_true",
                     help="also draw every member-year faintly behind the "
                          "ensemble-mean dots")
@@ -112,6 +118,12 @@ def main() -> int:
         # Temperature and precipitation are stored in separate files, and the
         # CESM2 reference can differ in member count between them, so pair them
         # on the YEAR axis and use each side's own ensemble mean.
+        # The CESM2 side is read first so its member count is available as the
+        # cap for the emulator side.
+        n_ref = None
+        if ("TREFHT", "cesm") in d and ("PRECT", "cesm") in d:
+            n_ref = (d[("TREFHT", "cesm")][1].shape[0],
+                     d[("PRECT", "cesm")][1].shape[0])
         rec = {}
         for side in ("cesm", "model"):
             if ("TREFHT", side) not in d or ("PRECT", side) not in d:
@@ -126,6 +138,8 @@ def main() -> int:
                 continue
             t = T[:, np.searchsorted(yt, yrs)]
             p_ = P[:, np.searchsorted(yp, yrs)]
+            if args.match_members and side == "model" and n_ref:
+                t, p_ = t[:n_ref[0]], p_[:n_ref[1]]
             # The two variables' CESM2 ensembles can differ in size (11 hist
             # members for temperature, 5 for precipitation), so a member-year
             # cloud is only meaningful when the counts match — and even then
