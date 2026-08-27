@@ -275,11 +275,16 @@ def main():
         if not shared:
             print(f"[WARN] no shared scenarios with {args.compare_dir}")
         else:
-            merged = {f"{k} truth": runs[k] for k in shared}
-            merged.update({f"{k} free": other[k] for k in shared})
-            fig_series(merged, os.path.join(out_dir, f"{tag}_vs_free_series.png"),
+            # Label each side by the mode RECORDED IN THE FILE. The previous
+            # hardcoded "truth"/"free" silently mislabelled any other pairing.
+            def _mode(d, fallback):
+                return d.attrs.get("prev_mode", fallback)
+            merged = {f"{k} [{_mode(runs[k], 'A')}]": runs[k] for k in shared}
+            merged.update({f"{k} [{_mode(other[k], 'B')}]": other[k]
+                           for k in shared})
+            fig_series(merged, os.path.join(out_dir, f"{tag}_vs_other_series.png"),
                        args.xlim)
-            fig_seasonal(merged, os.path.join(out_dir, f"{tag}_vs_free_seasonal.png"))
+            fig_seasonal(merged, os.path.join(out_dir, f"{tag}_vs_other_seasonal.png"))
     return 0
 
 

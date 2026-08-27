@@ -27,6 +27,14 @@ THE PREVIOUS-STATE CHANNEL IS THE HARD PART, and --prev-mode picks your poison:
               guess, because all 12 frames are denoised jointly — there is no
               causal order to feed one frame's output into the next.
 
+  none        The channel is FILLED WITH A CONSTANT (--prev-fill, default the
+              CFG null value) for every window, so the model runs on emissions
+              alone with no state to carry. Read this one carefully: training
+              NEVER nulled this channel, so a constant map is outside the
+              distribution the model was fitted on. It answers "what does the
+              forcing alone buy?", and any degradation mixes the loss of state
+              with the model meeting an input it has not seen.
+
   free-refine free, then re-sample the window with the channel set to the
               model's own generated frames, shifted one step. --refine-passes
               controls how many times. Closest to self-consistent rollout that
@@ -194,7 +202,11 @@ def rollout(model, scheduler, cond, n_members, out_channels, seq_len, args,
         t0 = w * seq_len
         cond_win = cond[:, t0:t0 + seq_len].clone()
 
-        if prev_channel is not None and args.prev_mode != "truth":
+        if prev_channel is not None and args.prev_mode == "none":
+            # Emissions only: no state at all, in EVERY window including the
+            # first, which otherwise keeps the dataset's true field.
+            cond_win[prev_channel] = args.prev_fill
+        elif prev_channel is not None and args.prev_mode != "truth":
             if carry is not None:
                 # Free-running: the window opens on the model's own last month
                 # and holds it, since joint denoising gives no causal order to
@@ -241,7 +253,12 @@ def main():
     ap.add_argument("--sample-steps", type=int, default=50)
     ap.add_argument("--max-months", type=int, default=0,
                     help="truncate the record (0 = all) — use for smoke tests")
-    ap.add_argument("--prev-mode", choices=["truth", "free", "free-refine"],
+    ap.add_argument("--prev-fill", type=float, default=NULL_COND,
+                    help="--prev-mode none: the constant written into the "
+                         "previous-state channel (default the CFG null, -1.0). "
+                         "In normalised units, so 0.0 is a mild mid-range map "
+                         "and -1.0 the cold end.")
+    ap.add_argument("--prev-mode", choices=["truth", "free", "free-refine", "none"],
                     default="truth", help="see the module docstring")
     ap.add_argument("--refine-passes", type=int, default=1)
     ap.add_argument("--guidance-co2", type=float, default=1.0)
