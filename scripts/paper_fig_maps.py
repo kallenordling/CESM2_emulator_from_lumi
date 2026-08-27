@@ -295,6 +295,12 @@ def main() -> int:
                     help="ssp126/ssp245 are OUT-OF-TRAINING and referenced "
                          "against 3-member CMIP6 ensembles, temperature only")
     ap.add_argument("--n-years", type=int, default=10)
+    ap.add_argument("--match-members", action="store_true",
+                    help="cap the emulator ensemble at the CESM2 reference's "
+                         "member count per scenario. Welch's SE is dominated "
+                         "by the smaller side, so 25-vs-10 buys real power; "
+                         "matching answers the different question of how the "
+                         "two compare at EQUAL sampling.")
     ap.add_argument("--n-ref-members", type=int, default=5)
     ap.add_argument("--absolute", action="store_true",
                     help="difference the raw fields instead of anomalies "
@@ -395,6 +401,14 @@ def main() -> int:
                 ebase = hist_base["emu"]
             if cbase is None:
                 cbase = hist_base["cesm"]
+            # Equal-sampling comparison: drop the emulator's surplus members so
+            # neither ensemble mean is better converged than the other. The
+            # BASELINE map keeps every member — it is a climatology, not a term
+            # in the sampling error, and thinning it would only add noise.
+            if args.match_members and n_c and n_emu > n_c:
+                edec = edec[:n_c]
+                n_emu = edec.shape[0]
+                print(f"[{var}/{sc}] match-members: emulator capped to {n_emu}")
             F[(var, sc)] = dict(edec=edec, ebase=ebase, cdec=cdec, cbase=cbase,
                                 lat=lat, lon=lon, n_emu=n_emu, n_c=n_c,
                                 yr=eyr, label=label)
