@@ -55,6 +55,89 @@ def load(run_dir):
     return out
 
 
+# Scenario name in the eval files -> directory name in the monthly training
+# tree. The single-forcing runs are upper-case on disk and lower-case in the
+# eval output, which is the sort of mismatch that silently yields "no truth
+# found" if you assume they match.
+SCEN_DIR = {"hist": "hist", "ssp370": "ssp370", "aaer": "AAER", "ghg": "GHG"}
+
+# The training tree stores RAW CESM2 output; the emulator writes denormalised
+# fields. These are exactly PREPROCESS_FN from data/climate_dataset.py, repeated
+# here so this script stays importable without the project's dependencies.
+TRUTH_CONV = {
+    "TREFHT": lambda x: x - 273.15,          # K -> degC
+    "PRECT":  lambda x: x * 8.64e7,          # m/s -> mm/day (x1000 x86400)
+}
+
+
+def _chunk_files(d):
+    """chunk_*.nc sorted NUMERICALLY. Lexical order gives 0, 1, 10, 11, 2 ...
+    and a non-monotonic time axis that xarray will happily concatenate."""
+    fs = glob.glob(os.path.join(d, "chunk_*.nc"))
+    return sorted(fs, key=lambda f: int(os.path.basename(f)[len("chunk_"):-3]))
+
+
+def _open_chunks(files, var):
+    """Concatenate a member's chunks. Falls back to plain open_dataset when dask
+    is unavailable, since open_mfdataset requires it."""
+    try:
+        ds = xr.open_mfdataset(files, combine="nested", concat_dim="time")
+    except (ImportError, ValueError):
+        ds = xr.concat([xr.open_dataset(f) for f in files], dim="time")
+    return ds[var]
+
+
+def load_truth(truth_root, runs, n_members=1):
+    """CESM2 monthly data matching each emulated scenario, same units and shape.
+
+    The eval conditions on ONE realization (recorded in the file's attrs), and
+    with --prev-mode truth it is fed that realization's own previous state — so
+    that member is the like-for-like reference and is preferred over an
+    arbitrary one. n_members > 1 adds others for spread.
+    """
+    truth = {}
+    for name, d in runs.items():
+        sub = SCEN_DIR.get(name)
+        if sub is None:
+            print(f"[truth] {name}: no tree mapping — skipped")
+            continue
+        var_out = {}
+        for var in d.data_vars:
+            root = os.path.join(truth_root, var, sub)
+            if not os.path.isdir(root):
+                print(f"[truth] {name}/{var}: {root} missing — skipped")
+                continue
+            avail = sorted(m for m in os.listdir(root)
+                           if os.path.isdir(os.path.join(root, m))
+                           and m != "diagnostics")
+            want = d.attrs.get("realization")
+            picks = ([want] if want in avail else []) + [m for m in avail if m != want]
+            picks = picks[:n_members]
+            if not picks:
+                print(f"[truth] {name}/{var}: no members under {root}")
+                continue
+            arrs = []
+            for m in picks:
+                files = _chunk_files(os.path.join(root, m))
+                if not files:
+                    continue
+                arrs.append(TRUTH_CONV.get(var, lambda x: x)(_open_chunks(files, var)))
+            if not arrs:
+                continue
+            da = xr.concat(arrs, dim="member").assign_coords(
+                member=np.arange(len(arrs)))
+            # Clip to the emulated period so the two lines cover the same years.
+            t = d.time.values
+            da = da.sel(time=slice(t.min(), t.max()))
+            var_out[var] = da
+            print(f"[truth] {name}/{var}: {len(picks)} member(s) "
+                  f"{picks[0]}{' (matched)' if picks[0] == want else ''}, "
+                  f"{da.sizes.get('time', 0)} months")
+        if var_out:
+            truth[name] = xr.Dataset(var_out)
+    return truth
+
+
 def fig_series(runs, path, xlim=None):
     vars_ = sorted({v for d in runs.values() for v in d.data_vars})
     fig, axes = plt.subplots(len(vars_), 1, figsize=(11, 3.2 * len(vars_)), squeeze=False)
@@ -150,6 +233,13 @@ def main():
     ap.add_argument("--compare-dir", default=None,
                     help="second run dir to overlay in the series plot "
                          "(e.g. the free-running one against teacher forcing)")
+    ap.add_argument("--truth-root", default=None, metavar="DIR",
+                    help="monthly training tree (<VAR>/<scenario>/<member>/"
+                         "chunk_*.nc). Overlays the CESM2 data the emulator is "
+                         "imitating, converted to the same units.")
+    ap.add_argument("--truth-members", type=int, default=1,
+                    help="how many CESM2 members to load (default 1: the "
+                         "realization the eval was conditioned on)")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--xlim", nargs=2, type=float, default=None, metavar=("Y0", "Y1"),
                     help="fix the year axis, e.g. --xlim 1850 2100")
@@ -162,9 +252,22 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     tag = os.path.basename(os.path.normpath(args.run_dir))
 
-    fig_series(runs, os.path.join(out_dir, f"{tag}_series.png"), args.xlim)
-    fig_seasonal(runs, os.path.join(out_dir, f"{tag}_seasonal.png"))
-    fig_maps(runs, os.path.join(out_dir, f"{tag}_maps.png"))
+    # CESM2 goes in the SAME dict, so every figure gets it without special
+    # cases; the key carries the label the legend shows.
+    plot_sets = dict(runs)
+    if args.truth_root:
+        truth = load_truth(args.truth_root, runs, args.truth_members)
+        if not truth:
+            print("[truth] nothing loaded — figures will show the emulator only")
+        plot_sets = {}
+        for name in runs:
+            plot_sets[f"{name} emulator"] = runs[name]
+            if name in truth:
+                plot_sets[f"{name} CESM2"] = truth[name]
+
+    fig_series(plot_sets, os.path.join(out_dir, f"{tag}_series.png"), args.xlim)
+    fig_seasonal(plot_sets, os.path.join(out_dir, f"{tag}_seasonal.png"))
+    fig_maps(plot_sets, os.path.join(out_dir, f"{tag}_maps.png"))
 
     if args.compare_dir:
         other = load(args.compare_dir)
