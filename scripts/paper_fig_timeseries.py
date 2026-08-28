@@ -510,10 +510,21 @@ def main() -> int:
                                              source="cesm2", member=str(_m),
                                              value=float(_v)))
 
-            # CESM2 held-out ensemble: mean dashed + member spread
-            ax.fill_between(Ra.index, Ra.min(axis=1, skipna=True),
-                            Ra.max(axis=1, skipna=True),
-                            color=colour, alpha=0.12, lw=0, zorder=1)
+            # CESM2 held-out ensemble: mean dashed + member spread.
+            # With the emulator's own band suppressed (--no-emu-spread) this is
+            # the ONLY shading in the panel, so it can carry more weight without
+            # the two envelopes being confused; a thin edge pins down where the
+            # envelope actually ends, which a soft fill alone leaves ambiguous
+            # where scenarios overlap.
+            _band_alpha = 0.26 if args.no_emu_spread else 0.12
+            _lo = Ra.min(axis=1, skipna=True)
+            _hi = Ra.max(axis=1, skipna=True)
+            ax.fill_between(Ra.index, _lo, _hi,
+                            color=colour, alpha=_band_alpha, lw=0, zorder=1)
+            if args.no_emu_spread:
+                for _edge in (_lo, _hi):
+                    ax.plot(Ra.index, _edge, color=colour, lw=0.7,
+                            alpha=0.55, zorder=1)
             # CESM2 reference gets OPEN CIRCLE MARKERS, not just a dash pattern.
             # Solid-vs-dashed in the same colour is not readable where the two
             # curves coincide (which is most of the record); a marker shape stays
