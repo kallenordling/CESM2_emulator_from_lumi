@@ -331,12 +331,18 @@ for key, (label, _, colour) in SCENARIOS.items():
                  color=colour, lw=2.6, zorder=4, label=label)
 
     # ── the numbers, on the years both sides cover ───────────────────────────
+    # The ranges differ — CESM2's aaer/ghg trees stop in 2050 while the emulator
+    # runs to 2100 — so compare only where both exist.
     common = np.intersect1d(emu_anom["year"].values, years_ref)
-    e = emu_anom.mean("member").sel(year=common)
-    c = ref_mean.sel(year=common)
-    difference = e - c
-    # sigma of CESM2's members about their own mean, per year: the internal
-    # variability a single realization shows by chance.
+    emulator_mean = emu_anom.mean("member").sel(year=common)
+    cesm_mean = ref_mean.sel(year=common)
+
+    # This is the line drawn in panels (b)-(d).
+    difference = emulator_mean - cesm_mean
+    # ... and this is the grey band it is drawn over: how far a single CESM2
+    # realization strays from the forced response by chance. A difference
+    # inside +/-2 sigma is no larger than the disagreement between two CESM2
+    # runs, which is the standard the emulator is being held to.
     sigma = ref_anom.sel(year=common).std("member", ddof=1)
     bias_series[key] = (common, difference, sigma)
     stats[key] = dict(
