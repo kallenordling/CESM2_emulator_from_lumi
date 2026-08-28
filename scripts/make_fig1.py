@@ -69,6 +69,7 @@ SCENARIOS = {
 }
 
 BASELINE = (1850, 1900)   # the anomaly reference window
+BASELINE_SLICE = slice(*BASELINE)   # used as da.sel(year=BASELINE_SLICE)
 YEAR_MAX = 2100
 
 # Cap the emulator at the CESM2 member count. A 25-member mean is better
@@ -101,18 +102,40 @@ print(__doc__.split("WHAT THE FIGURE")[0])
 # against those would be marking its own homework, so the reference is built
 # from the members on disk that do NOT appear in the training config.
 
-cfg = yaml.safe_load(open(DATA_CONFIG))
-trained = {e["scenario_name"]: set(e.get("realizations", []))
-           for e in cfg["experiment_configs"]}
+# There are two sources of truth to reconcile.
+#
+#   1. The TRAINING CONFIG says which realizations the emulator was fitted on.
+#      Its experiment_configs section looks like:
+#          - scenario_name: hist
+#            realizations: [LE2-1001.001, LE2-1011.001, ...]
+#   2. The DISK holds every realization that was staged, trained on or not.
+#
+# Held out = on disk, minus trained on. Reading the list from the config rather
+# than hardcoding it means the two cannot drift apart when training changes.
+
+config = yaml.safe_load(open(DATA_CONFIG))
+trained_members = {
+    experiment["scenario_name"]: set(experiment.get("realizations", []))
+    for experiment in config["experiment_configs"]
+}
 
 heldout = {}
 for key, (_, subdir, _) in SCENARIOS.items():
-    on_disk = {d for d in os.listdir(f"{TREE_ROOT}/{subdir}")
-               if os.path.isdir(f"{TREE_ROOT}/{subdir}/{d}") and d != "diagnostics"}
-    heldout[key] = sorted(on_disk - trained.get(key, set()))
-    print(f"[step 1] {key:7s} {len(on_disk):2d} on disk, "
-          f"{len(trained.get(key, set())):2d} trained, "
-          f"{len(heldout[key]):2d} held out")
+    experiment_dir = f"{TREE_ROOT}/{subdir}"
+
+    # One subdirectory per realization. "diagnostics" is a folder of staging
+    # plots that sits alongside them and is not a member.
+    members_on_disk = {
+        name for name in os.listdir(experiment_dir)
+        if name != "diagnostics" and os.path.isdir(f"{experiment_dir}/{name}")
+    }
+    members_trained_on = trained_members.get(key, set())
+    heldout[key] = sorted(members_on_disk - members_trained_on)
+
+    print(f"[step 1] {key:7s} {len(members_on_disk):2d} on disk"
+          f" - {len(members_trained_on):2d} trained"
+          f" = {len(heldout[key]):2d} held out")
+
 
 # =============================================================================
 #  STEP 2 — read the held-out CESM2 members (or reuse the cache)
@@ -123,14 +146,24 @@ for key, (_, subdir, _) in SCENARIOS.items():
 #
 # The result per experiment is a table of year x member.
 
+# Everything below is an xarray.DataArray with dims (member, year), so a
+# baseline is `da.sel(year=slice(1850, 1900))` and an anomaly is a subtraction —
+# the same notation the NetCDF files themselves invite.
+
+cesm = {}
+
 if os.path.exists(CACHE):
     print(f"[step 2] reusing {CACHE}")
-    _c = pd.read_csv(CACHE)
-    cesm = {k: g.pivot(index="year", columns="member", values="gmean").sort_index()
-            for k, g in _c.groupby("scenario")}
+    cached = pd.read_csv(CACHE)          # long form: one row per member-year
+
+    for scenario, rows in cached.groupby("scenario"):
+        # long form -> a table with one column per member, one row per year
+        table = rows.pivot(index="year", columns="member", values="gmean")
+        table = table.sort_index()
+        # table -> a DataArray with dims (member, year)
+        cesm[scenario] = table.to_xarray().to_array("member")
 else:
     print(f"[step 2] reading members from {TREE_ROOT} (minutes, not seconds)")
-    cesm = {}
     for key, (_, subdir, _) in SCENARIOS.items():
         columns = {}
         for i, member in enumerate(heldout[key], 1):
@@ -141,15 +174,25 @@ else:
             gmean = ds["TREFHT"].weighted(weights).mean(("lat", "lon")).compute()
             years = np.asarray(ds["time" if "time" in gmean.dims else "year"]
                                .values).astype(int)
-            series = pd.Series(np.asarray(gmean.values, float), index=years)
-            columns[member] = series[~series.index.duplicated()].sort_index()
+            columns[member] = pd.Series(np.asarray(gmean.values, float),
+                                        index=years).sort_index()
             ds.close()
-        cesm[key] = pd.DataFrame(columns).sort_index()
+        # one Series per member -> a year x member table -> (member, year)
+        table = pd.DataFrame(columns).sort_index().rename_axis("year")
+        cesm[key] = table.to_xarray().to_array("member")
+    # Flatten back to long form for the cache: one row per member-year, which
+    # survives a CSV round-trip without needing the column names to be parsed.
+    rows = []
+    for scenario, da in cesm.items():
+        for member in da["member"].values:
+            series = da.sel(member=member)
+            for year, value in zip(series["year"].values, series.values):
+                rows.append(dict(scenario=scenario, member=str(member),
+                                 year=int(year), gmean=float(value)))
+
     os.makedirs(os.path.dirname(CACHE) or ".", exist_ok=True)
-    pd.DataFrame([dict(scenario=k, member=m, year=int(y), gmean=float(v))
-                  for k, df in cesm.items() for m in df.columns
-                  for y, v in df[m].dropna().items()]).to_csv(CACHE, index=False)
-    print(f"[step 2] cached to {CACHE}")
+    pd.DataFrame(rows).to_csv(CACHE, index=False)
+    print(f"[step 2] cached {len(rows)} member-years to {CACHE}")
 
 # NOTE ON BAD DATA: a member with a corrupt year shows up here as a NaN or an
 # obvious outlier, and would drag the reference mean and inflate its spread.
@@ -170,8 +213,11 @@ for key in SCENARIOS:
     names = sorted([v for v in ds.data_vars
                     if re.fullmatch(r"TREFHT_model_gmean_m\d+", v)],
                    key=lambda s: int(s.rsplit("_m", 1)[1]))
-    emulator[key] = (ds["year"].values.astype(int),
-                     np.stack([ds[n].values for n in names]))   # (member, year)
+    emulator[key] = xr.DataArray(
+        np.stack([ds[n].values for n in names]),
+        dims=("member", "year"),
+        coords={"member": np.arange(1, len(names) + 1),
+                "year": ds["year"].values.astype(int)})
     ds.close()
     print(f"[step 3] {key:7s} {len(names):2d} emulator members")
 
@@ -185,11 +231,10 @@ for key in SCENARIOS:
 
 if MATCH_MEMBER_COUNTS:
     for key in SCENARIOS:
-        n = cesm[key].shape[1]
-        years, members = emulator[key]
-        if members.shape[0] > n:
-            emulator[key] = (years, members[:n])
-            print(f"[step 4] {key:7s} emulator capped {members.shape[0]} -> {n}")
+        n = cesm[key].sizes["member"]
+        have = emulator[key].sizes["member"]
+        emulator[key] = emulator[key].isel(member=slice(None, n))
+        print(f"[step 4] {key:7s} emulator capped {have} -> {n}")
 
 # =============================================================================
 #  STEP 5 — anomalies: each side referenced to ITS OWN pre-industrial
@@ -204,16 +249,14 @@ if MATCH_MEMBER_COUNTS:
 
 cesm_base, emu_base = {}, {}
 for key in SCENARIOS:
-    # CESM2 side
-    window = cesm[key].loc[BASELINE[0]:BASELINE[1]]
-    cesm_base[key] = float(window.mean(axis=1).mean()) if len(window) else np.nan
-    # emulator side
-    years, members = emulator[key]
-    in_base = (years >= BASELINE[0]) & (years <= BASELINE[1])
-    emu_base[key] = float(members[:, in_base].mean()) if in_base.any() else np.nan
+    # The baseline is a slice of the year axis, and the anomaly is what is left
+    # once it is subtracted:  da_anom = da - da.sel(year=BASELINE_SLICE).mean()
+    cesm_base[key] = float(cesm[key].sel(year=BASELINE_SLICE).mean())
+    emu_base[key] = float(emulator[key].sel(year=BASELINE_SLICE).mean())
 
-# ssp370 begins in 2015 and has no pre-industrial of its own, so it inherits
-# the historical baseline — the SAME convention applied to both sides.
+# ssp370 begins in 2015, so the slice above is empty and its mean is NaN. That
+# is not an error to defend against: the rule is that a scenario without a
+# pre-industrial of its own inherits the historical one, on BOTH sides.
 for key in SCENARIOS:
     if not np.isfinite(cesm_base[key]):
         cesm_base[key] = cesm_base["hist"]
@@ -260,42 +303,39 @@ ax_bias = [fig.add_subplot(grid[1, i], sharey=None if i == 0 else None)
 
 stats, bias_series = {}, {}
 for key, (label, _, colour) in SCENARIOS.items():
-    ref = cesm[key]
-    ref = ref[ref.index <= YEAR_MAX]
-    ref_anom = ref - cesm_base[key]                 # year x member
-    ref_mean = ref_anom.mean(axis=1)
+    # Anomaly = the series minus its own baseline. One line per side.
+    ref_anom = (cesm[key] - cesm_base[key]).sel(year=slice(None, YEAR_MAX))
+    emu_anom = (emulator[key] - emu_base[key]).sel(year=slice(None, YEAR_MAX))
 
-    lo, hi = ref_anom.min(axis=1), ref_anom.max(axis=1)
-    ax_main.fill_between(ref_anom.index, lo, hi, color=colour, alpha=0.26,
+    ref_mean = ref_anom.mean("member")
+    lo, hi = ref_anom.min("member"), ref_anom.max("member")
+    years_ref = ref_anom["year"].values
+
+    ax_main.fill_between(years_ref, lo, hi, color=colour, alpha=0.26,
                          lw=0, zorder=1)
     for edge in (lo, hi):                           # a thin edge pins the band
-        ax_main.plot(ref_anom.index, edge, color=colour, lw=0.7, alpha=0.55,
-                     zorder=1)
-    ax_main.plot(ref_anom.index, ref_mean.values, color=colour, lw=1.2, ls="--",
+        ax_main.plot(years_ref, edge, color=colour, lw=0.7, alpha=0.55, zorder=1)
+    ax_main.plot(years_ref, ref_mean, color=colour, lw=1.2, ls="--",
                  marker="o", markersize=3.4, markevery=8, markerfacecolor="white",
                  markeredgecolor=colour, zorder=5,
                  path_effects=[pe.withStroke(linewidth=3.0, foreground="white")])
-
-    years, members = emulator[key]
-    keep = years <= YEAR_MAX
-    emu_anom = members[:, keep] - emu_base[key]
-    ax_main.plot(years[keep], emu_anom.mean(axis=0), color=colour, lw=2.6,
-                 zorder=4, label=label)
+    ax_main.plot(emu_anom["year"].values, emu_anom.mean("member"),
+                 color=colour, lw=2.6, zorder=4, label=label)
 
     # ── the numbers, on the years both sides cover ───────────────────────────
-    common = np.intersect1d(years[keep], ref_anom.index.values)
-    e = pd.Series(emu_anom.mean(axis=0), index=years[keep]).loc[common]
-    c = ref_mean.loc[common]
+    common = np.intersect1d(emu_anom["year"].values, years_ref)
+    e = emu_anom.mean("member").sel(year=common)
+    c = ref_mean.sel(year=common)
     difference = e - c
     # sigma of CESM2's members about their own mean, per year: the internal
     # variability a single realization shows by chance.
-    sigma = ref_anom.loc[common].sub(c, axis=0).std(axis=1)
+    sigma = ref_anom.sel(year=common).std("member", ddof=1)
     bias_series[key] = (common, difference, sigma)
     stats[key] = dict(
-        n_emu=emu_anom.shape[0], n_cesm=ref_anom.shape[1],
+        n_emu=emu_anom.sizes["member"], n_cesm=ref_anom.sizes["member"],
         bias=float(difference.mean()),
         rmse=float(np.sqrt((difference ** 2).mean())),
-        inside=float((difference.abs() <= 2 * sigma).mean()) * 100)
+        inside=float((abs(difference) <= 2 * sigma).mean()) * 100)
     print(f"[step 7] {key:7s} bias {stats[key]['bias']:+.3f} degC, "
           f"rmse {stats[key]['rmse']:.3f}, "
           f"{stats[key]['inside']:.0f}% of years within CESM2's own spread")
@@ -312,9 +352,9 @@ for i, (group, title) in enumerate(bias_panels):
     ax.axhline(0, lw=0.8, color="0.3", zorder=1)
     for key in group:
         years, difference, sigma = bias_series[key]
-        ax.fill_between(years, -2 * sigma.values, 2 * sigma.values,
+        ax.fill_between(years, -2 * sigma, 2 * sigma,
                         color="0.45", alpha=0.22, lw=0, zorder=0)
-        ax.plot(years, difference.values, color=SCENARIOS[key][2], lw=1.4, zorder=3)
+        ax.plot(years, difference, color=SCENARIOS[key][2], lw=1.4, zorder=3)
     ax.set_title(f"{title}\nn = "
                  f"{'/'.join(str(stats[k]['n_emu']) for k in group)} emulator, "
                  f"{'/'.join(str(stats[k]['n_cesm']) for k in group)} CESM2",
@@ -335,7 +375,8 @@ for i, (group, title) in enumerate(bias_panels):
         ax.tick_params(labelleft=False)
 
 # every bias panel on one y-scale, so their sizes are comparable by eye
-limit = 1.15 * max(max(abs(d.min()), abs(d.max()), 2 * s.max())
+limit = 1.15 * max(max(abs(float(d.min())), abs(float(d.max())),
+                       2 * float(s.max()))
                    for _, d, s in bias_series.values())
 for ax in ax_bias:
     ax.set_ylim(-limit, limit)
