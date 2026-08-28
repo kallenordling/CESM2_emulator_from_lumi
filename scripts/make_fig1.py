@@ -76,11 +76,14 @@ YEAR_MAX = 2100
 # converged than a 10-member one, and comparing them would flatter the emulator.
 MATCH_MEMBER_COUNTS = True
 
+# Highest member number to look for in the eval files. They currently hold 25;
+# anything absent is simply skipped, so this only has to be large enough.
+MAX_MEMBERS = 100
+
 # =============================================================================
 
 import glob
 import os
-import re
 
 import matplotlib
 matplotlib.use("Agg")                      # no display needed; write files only
@@ -211,20 +214,15 @@ emulator = {}
 for key in SCENARIOS:
     ds = xr.open_dataset(f"{EVAL_DIR}/TREFHT_{key}.nc")
 
-    # The file has one variable per member, named with the member number:
-    #     TREFHT_model_gmean_m1, TREFHT_model_gmean_m2, ... _m25
-    # Collect them as {member number: variable name}. Taking the number from
-    # the name — rather than sorting the names — matters: sorted() on strings
-    # gives m1, m10, m11, ..., m2, so member 10 would end up second and every
-    # member-by-member comparison after this would be against the wrong one.
-    variable_of_member = {}
-    for variable in ds.data_vars:
-        match = re.fullmatch(r"TREFHT_model_gmean_m(\d+)", variable)
-        if match:
-            variable_of_member[int(match.group(1))] = variable
-
-    member_numbers = sorted(variable_of_member)          # 1, 2, 3, ... 25
-    series_per_member = [ds[variable_of_member[n]].values for n in member_numbers]
+    # eval_aero.py names one variable per ensemble member:
+    #     TREFHT_model_gmean_m1, TREFHT_model_gmean_m2, ... one per member.
+    # Build those names rather than pattern-matching whatever the file holds,
+    # and take them in numeric order — m1, m2, ... m10 — because everything
+    # downstream compares the two ensembles member by member.
+    member_numbers = [n for n in range(1, MAX_MEMBERS + 1)
+                      if f"TREFHT_model_gmean_m{n}" in ds.data_vars]
+    series_per_member = [ds[f"TREFHT_model_gmean_m{n}"].values
+                         for n in member_numbers]
 
     emulator[key] = xr.DataArray(
         np.stack(series_per_member),
