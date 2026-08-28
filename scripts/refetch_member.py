@@ -78,15 +78,21 @@ def years_of(ds, var):
     return dim, [int(str(v)[:4]) for v in ds[dim].values]
 
 
-def scan(member_dir, var):
-    """{chunk path: [bad years]} for years that are entirely NaN."""
+def scan(member_dir, var, force_years=()):
+    """{chunk path: [years to replace]}.
+
+    Detects years that are entirely NaN. That catches dropped fields but NOT a
+    year that is present and wrong: LE2-1231.012 also carries 1930 = 286.02 K,
+    1.3 K below its neighbours (~10 sigma), which is finite and so invisible to
+    a NaN test. Pass such years explicitly in `force_years`.
+    """
     bad = {}
     for f in chunk_files(member_dir):
         with xr.open_dataset(f) as ds:
             dim, yrs = years_of(ds, var)
             a = ds[var].values
         for i, y in enumerate(yrs):
-            if not np.isfinite(a[i]).all():
+            if not np.isfinite(a[i]).all() or y in force_years:
                 bad.setdefault(f, []).append(y)
     return bad
 
@@ -118,6 +124,10 @@ def main() -> int:
     ap.add_argument("--scenario", default="hist", choices=sorted(SCEN_KEY))
     ap.add_argument("--tree-root", nargs="+", required=True,
                     help="one or more training_data roots to repair")
+    ap.add_argument("--years", nargs="+", type=int, default=[],
+                    help="replace these years as well, even though they are "
+                         "finite — for values that are present but wrong, "
+                         "which a NaN scan cannot see")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -130,7 +140,7 @@ def main() -> int:
         if not os.path.isdir(d):
             print(f"[skip] {d} does not exist")
             continue
-        bad = scan(d, args.variable)
+        bad = scan(d, args.variable, set(args.years))
         n = sum(len(v) for v in bad.values())
         print(f"[scan] {d}\n       {n} bad year(s) in {len(bad)} chunk(s): "
               f"{sorted(y for v in bad.values() for y in v)}")
@@ -182,7 +192,8 @@ def main() -> int:
     print("\n[verify]")
     ok = True
     for d in targets:
-        left = scan(d, args.variable)
+        left = scan(d, args.variable)   # NaN-only: forced years are
+                                        # finite by construction
         n = sum(len(v) for v in left.values())
         print(f"  {d}: {n} bad year(s) remaining")
         ok &= (n == 0)
