@@ -259,24 +259,25 @@ if MATCH_MEMBER_COUNTS:
 # Experiments that start in 2015 (ssp370) have no pre-industrial of their own,
 # so they inherit the historical baseline — the same convention on both sides.
 
+# hist, aaer and ghg all start in 1850, so each has its own baseline:
+#     da_anom = da - da.sel(year=BASELINE_SLICE).mean()
 cesm_base, emu_base = {}, {}
 for key in SCENARIOS:
-    # The baseline is a slice of the year axis, and the anomaly is what is left
-    # once it is subtracted:  da_anom = da - da.sel(year=BASELINE_SLICE).mean()
+    if key == "ssp370":
+        continue
     cesm_base[key] = float(cesm[key].sel(year=BASELINE_SLICE).mean())
     emu_base[key] = float(emulator[key].sel(year=BASELINE_SLICE).mean())
 
-# ssp370 begins in 2015, so the slice above is empty and its mean is NaN. That
-# is not an error to defend against: the rule is that a scenario without a
-# pre-industrial of its own inherits the historical one, on BOTH sides.
+# ssp370 is the exception: it begins in 2015 and has no pre-industrial of its
+# own, so it inherits the historical baseline — on BOTH sides, which is what
+# keeps the two comparable.
+cesm_base["ssp370"] = cesm_base["hist"]
+emu_base["ssp370"] = emu_base["hist"]
+
 for key in SCENARIOS:
-    if not np.isfinite(cesm_base[key]):
-        cesm_base[key] = cesm_base["hist"]
-    if not np.isfinite(emu_base[key]):
-        emu_base[key] = emu_base["hist"]
+    inherited = "   (inherited from hist)" if key == "ssp370" else ""
     print(f"[step 5] {key:7s} baseline: CESM2 {cesm_base[key]:.3f}, "
-          f"emulator {emu_base[key]:.3f}"
-          + ("   (inherited from hist)" if key == "ssp370" else ""))
+          f"emulator {emu_base[key]:.3f}{inherited}")
 # The two numbers differ by ~273 because the tree stores kelvin and the eval
 # writes degrees Celsius. That never matters: each side is only ever compared
 # with its own baseline subtracted, and a difference of anomalies is unitless
