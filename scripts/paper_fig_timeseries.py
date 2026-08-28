@@ -683,14 +683,20 @@ def main() -> int:
                    label=f"CESM2 \u2014 unseen ensemble mean "
                          f"({_n_cesm} members)"),
         ]
-        style.append(Patch(facecolor="0.35", alpha=0.12,
-                           label="CESM2 member range"))
+        # Two grey CESM2 patches sit in this legend and they are NOT the same
+        # quantity: panel (a) shades the full min-max range of the members,
+        # panels (b)-(d) shade +/-2 sigma about their mean. Unlabelled by panel
+        # they read as a duplicate entry, so each says where it applies, and the
+        # swatch alpha matches what is actually drawn there.
+        style.append(Patch(facecolor="0.35",
+                           alpha=(0.26 if args.no_emu_spread else 0.12),
+                           label="(a) CESM2 member range (min\u2013max)"))
     if BIAS_GROUPS:
+        _pans = ("b" if len(BIAS_GROUPS) == 1 else
+                 f"b\u2013{'bcde'[len(BIAS_GROUPS) - 1]}")
         style.append(Patch(
             facecolor="0.55", alpha=0.20,
-            label=f"CESM2 spread about its mean, "
-                  + ("b" if len(BIAS_GROUPS) == 1 else
-                     f"b\u2013{'bcde'[len(BIAS_GROUPS) - 1]}") + " "
+            label=f"({_pans}) CESM2 spread about its mean "
                   f"(\u00b12\u03c3, mean \u00b1{2*_sig:.2f} {META['unit']})"))
     # Both legends top-left: that corner is empty until ~1950 in every
     # scenario, whereas lower-right sits on top of the AAER curve.
