@@ -207,33 +207,40 @@ else:
 # =============================================================================
 #  STEP 3 — read the emulator's output
 # =============================================================================
-# eval_aero.py writes one NetCDF per scenario holding each ensemble member's
-# global-mean series as TREFHT_model_gmean_m1, _m2, ... already in degC.
+# eval_aero.py writes one NetCDF per scenario. It holds every member's MAP,
+# `TREFHT_model` with dims (member, year, lat, lon), in degC. The global mean
+# is computed from that here rather than taken from the file.
 
 emulator = {}
 for key in SCENARIOS:
     ds = xr.open_dataset(f"{EVAL_DIR}/TREFHT_{key}.nc")
 
-    # eval_aero.py names one variable per ensemble member:
-    #     TREFHT_model_gmean_m1, TREFHT_model_gmean_m2, ... one per member.
-    # Build those names rather than pattern-matching whatever the file holds,
-    # and take them in numeric order — m1, m2, ... m10 — because everything
-    # downstream compares the two ensembles member by member.
-    member_numbers = []
-    series_per_member = []
-    for n in range(1, MAX_MEMBERS + 1):
-        variable = f"TREFHT_model_gmean_m{n}"
-        if variable in ds.data_vars:
-            member_numbers.append(n)
-            series_per_member.append(ds[variable].values)
+    # The global means are computed HERE, from the member MAPS, rather than
+    # read from the file's precomputed gmean fields. It costs a full read of
+    # the maps — a few GB per scenario — but the weighting is then visible in
+    # this script instead of being inherited from whatever eval_aero did.
+    #
+    # eval_aero writes `TREFHT_model` with dims (member, year, lat, lon).
+    if "TREFHT_model" in ds.data_vars:
+        field = ds["TREFHT_model"]
+    else:
+        # Older eval output put each member in its own variable,
+        # TREFHT_model_m1, _m2, ... Stack them onto a member dimension so the
+        # rest of the script sees one layout. Delete this branch once every
+        # eval file in use has been rewritten.
+        member_numbers, maps = [], []
+        for n in range(1, MAX_MEMBERS + 1):
+            variable = f"TREFHT_model_m{n}"
+            if variable in ds.data_vars:
+                member_numbers.append(n)
+                maps.append(ds[variable])
+        field = xr.concat(maps, dim="member").assign_coords(member=member_numbers)
 
-    emulator[key] = xr.DataArray(
-        np.stack(series_per_member),
-        dims=("member", "year"),
-        coords={"member": member_numbers,
-                "year": ds["year"].values.astype(int)})
+    weights = np.cos(np.deg2rad(field["lat"]))
+    emulator[key] = field.weighted(weights).mean(("lat", "lon")).compute()
+    print(f"[step 3] {key:7s} {emulator[key].sizes['member']:2d} emulator members "
+          f"(global means computed from the maps)")
     ds.close()
-    print(f"[step 3] {key:7s} {len(member_numbers):2d} emulator members")
 
 # =============================================================================
 #  STEP 4 — put both ensembles on the same footing
