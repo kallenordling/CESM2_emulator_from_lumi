@@ -219,10 +219,13 @@ for key in SCENARIOS:
     # Build those names rather than pattern-matching whatever the file holds,
     # and take them in numeric order — m1, m2, ... m10 — because everything
     # downstream compares the two ensembles member by member.
-    member_numbers = [n for n in range(1, MAX_MEMBERS + 1)
-                      if f"TREFHT_model_gmean_m{n}" in ds.data_vars]
-    series_per_member = [ds[f"TREFHT_model_gmean_m{n}"].values
-                         for n in member_numbers]
+    member_numbers = []
+    series_per_member = []
+    for n in range(1, MAX_MEMBERS + 1):
+        variable = f"TREFHT_model_gmean_m{n}"
+        if variable in ds.data_vars:
+            member_numbers.append(n)
+            series_per_member.append(ds[variable].values)
 
     emulator[key] = xr.DataArray(
         np.stack(series_per_member),
