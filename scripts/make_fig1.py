@@ -208,18 +208,30 @@ else:
 
 emulator = {}
 for key in SCENARIOS:
-    path = f"{EVAL_DIR}/TREFHT_{key}.nc"
-    ds = xr.open_dataset(path)
-    names = sorted([v for v in ds.data_vars
-                    if re.fullmatch(r"TREFHT_model_gmean_m\d+", v)],
-                   key=lambda s: int(s.rsplit("_m", 1)[1]))
+    ds = xr.open_dataset(f"{EVAL_DIR}/TREFHT_{key}.nc")
+
+    # The file has one variable per member, named with the member number:
+    #     TREFHT_model_gmean_m1, TREFHT_model_gmean_m2, ... _m25
+    # Collect them as {member number: variable name}. Taking the number from
+    # the name — rather than sorting the names — matters: sorted() on strings
+    # gives m1, m10, m11, ..., m2, so member 10 would end up second and every
+    # member-by-member comparison after this would be against the wrong one.
+    variable_of_member = {}
+    for variable in ds.data_vars:
+        match = re.fullmatch(r"TREFHT_model_gmean_m(\d+)", variable)
+        if match:
+            variable_of_member[int(match.group(1))] = variable
+
+    member_numbers = sorted(variable_of_member)          # 1, 2, 3, ... 25
+    series_per_member = [ds[variable_of_member[n]].values for n in member_numbers]
+
     emulator[key] = xr.DataArray(
-        np.stack([ds[n].values for n in names]),
+        np.stack(series_per_member),
         dims=("member", "year"),
-        coords={"member": np.arange(1, len(names) + 1),
+        coords={"member": member_numbers,
                 "year": ds["year"].values.astype(int)})
     ds.close()
-    print(f"[step 3] {key:7s} {len(names):2d} emulator members")
+    print(f"[step 3] {key:7s} {len(member_numbers):2d} emulator members")
 
 # =============================================================================
 #  STEP 4 — put both ensembles on the same footing
