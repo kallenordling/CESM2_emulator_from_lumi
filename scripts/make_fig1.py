@@ -274,14 +274,9 @@ for key in SCENARIOS:
 cesm_base["ssp370"] = cesm_base["hist"]
 emu_base["ssp370"] = emu_base["hist"]
 
-for key in SCENARIOS:
-    inherited = "   (inherited from hist)" if key == "ssp370" else ""
-    print(f"[step 5] {key:7s} baseline: CESM2 {cesm_base[key]:.3f}, "
-          f"emulator {emu_base[key]:.3f}{inherited}")
-# The two numbers differ by ~273 because the tree stores kelvin and the eval
-# writes degrees Celsius. That never matters: each side is only ever compared
-# with its own baseline subtracted, and a difference of anomalies is unitless
-# in that respect.
+# The CESM2 and emulator baselines differ by ~273: the tree stores kelvin, the
+# eval writes degrees Celsius. That never matters here, because each side is
+# only ever used with its own baseline subtracted.
 
 # =============================================================================
 #  STEP 6 — lay out the figure
