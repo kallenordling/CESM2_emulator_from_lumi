@@ -88,6 +88,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -375,11 +376,6 @@ for i, (group, title) in enumerate(bias_panels):
                  fontsize=9, loc="left", pad=4)
     ax.text(0.02, 0.94, f"({'bcd'[i]})", transform=ax.transAxes,
             fontweight="bold", va="top", fontsize=9)
-    ax.text(0.02, 0.04, "\n".join(
-        f"{SCENARIOS[k][0].split(' (')[0]}: {stats[k]['bias']:+.2f} "
-        f"+/- {stats[k]['rmse']:.2f} degC, {stats[k]['inside']:.0f}% in band"
-        for k in group), transform=ax.transAxes, fontsize=7.2, va="bottom",
-        color="0.25")
     ax.set_xlabel("Year")
     if i == 0:
         ax.set_ylabel("Bias (degC)\nensemble means")
@@ -388,12 +384,21 @@ for i, (group, title) in enumerate(bias_panels):
         # labels adds nothing and collides with the neighbouring panel's text.
         ax.tick_params(labelleft=False)
 
-# every bias panel on one y-scale, so their sizes are comparable by eye
+# Every bias panel gets ONE y-scale, so a bias in one is the same size on the
+# page as a bias in another, and ONE x-range — the same 1850-2100 as panel (a),
+# so the columns line up under it. aaer and ghg end in 2050 and simply stop
+# there, which is honest: the run is short, not the bias small.
 limit = 1.15 * max(max(abs(float(d.min())), abs(float(d.max())),
                        2 * float(s.max()))
                    for _, d, s in bias_series.values())
 for ax in ax_bias:
     ax.set_ylim(-limit, limit)
+    ax.set_xlim(BASELINE[0], YEAR_MAX)
+    # Prune the ticks at both ends: with three panels side by side spanning the
+    # same years, a label on the right edge of one lands on the label at the
+    # left edge of the next.
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=3, prune="both",
+                                           steps=[1, 5, 10]))
 
 # =============================================================================
 #  STEP 9 — legends
