@@ -24,8 +24,9 @@ emulator (solid) against held-out CESM2 (dashed with circles), with CESM2's
 member range shaded.
 
 Panels (b-d): the bias — emulator ensemble mean minus CESM2 ensemble mean — over
-a grey band of +/-2 sigma of CESM2's own members about their mean. A bias line
-inside that band is indistinguishable from internal variability.
+a grey band showing the full range of CESM2's own members about their mean. A
+bias line inside that band is indistinguishable from internal variability. The
+member range is what panel (a) shades too, so "spread" means one thing here.
 
 THE ONE IDEA THAT MATTERS
 -------------------------
@@ -41,7 +42,7 @@ equal ensemble sizes, and each side referenced to its own pre-industrial.
 # =============================================================================
 
 # Where the emulator's evaluation output lives (one NetCDF per scenario).
-EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25"
+EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_memberdim"
 
 # Where the CESM2 training trees live: <TREE_ROOT>/<scenario>/<member>/chunk_*.nc
 TREE_ROOT = "/home/nordling/mnt/lumi_sc/emulator_data/training_data/TREFHT"
@@ -76,9 +77,6 @@ YEAR_MAX = 2100
 # converged than a 10-member one, and comparing them would flatter the emulator.
 MATCH_MEMBER_COUNTS = True
 
-# Highest member number to look for in the eval files. They currently hold 25;
-# anything absent is simply skipped, so this only has to be large enough.
-MAX_MEMBERS = 100
 
 # =============================================================================
 
@@ -220,21 +218,9 @@ for key in SCENARIOS:
     # the maps — a few GB per scenario — but the weighting is then visible in
     # this script instead of being inherited from whatever eval_aero did.
     #
-    # eval_aero writes `TREFHT_model` with dims (member, year, lat, lon).
-    if "TREFHT_model" in ds.data_vars:
-        field = ds["TREFHT_model"]
-    else:
-        # Older eval output put each member in its own variable,
-        # TREFHT_model_m1, _m2, ... Stack them onto a member dimension so the
-        # rest of the script sees one layout. Delete this branch once every
-        # eval file in use has been rewritten.
-        member_numbers, maps = [], []
-        for n in range(1, MAX_MEMBERS + 1):
-            variable = f"TREFHT_model_m{n}"
-            if variable in ds.data_vars:
-                member_numbers.append(n)
-                maps.append(ds[variable])
-        field = xr.concat(maps, dim="member").assign_coords(member=member_numbers)
+    # eval_aero writes `TREFHT_model` with dims (member, year, lat, lon), so the
+    # whole ensemble arrives as one array and nothing has to be reassembled.
+    field = ds["TREFHT_model"]
 
     weights = np.cos(np.deg2rad(field["lat"]))
     emulator[key] = field.weighted(weights).mean(("lat", "lon")).compute()
@@ -348,17 +334,21 @@ for key, (label, _, colour) in SCENARIOS.items():
 
     # This is the line drawn in panels (b)-(d).
     difference = emulator_mean - cesm_mean
-    # ... and this is the grey band it is drawn over: how far a single CESM2
-    # realization strays from the forced response by chance. A difference
-    # inside +/-2 sigma is no larger than the disagreement between two CESM2
-    # runs, which is the standard the emulator is being held to.
-    sigma = ref_anom.sel(year=common).std("member", ddof=1)
-    bias_series[key] = (common, difference, sigma)
+    # ... and this is the grey band it is drawn over: the FULL RANGE of CESM2's
+    # members about their own mean, min to max. Panel (a) shades the member
+    # range too, so "spread" means one thing in this figure rather than two.
+    # A difference inside the band is no larger than the disagreement between
+    # the most extreme pair of CESM2 runs.
+    deviation = ref_anom.sel(year=common) - cesm_mean      # (member, year)
+    spread_low = deviation.min("member")
+    spread_high = deviation.max("member")
+    bias_series[key] = (common, difference, spread_low, spread_high)
     stats[key] = dict(
         n_emu=emu_anom.sizes["member"], n_cesm=ref_anom.sizes["member"],
         bias=float(difference.mean()),
         rmse=float(np.sqrt((difference ** 2).mean())),
-        inside=float((abs(difference) <= 2 * sigma).mean()) * 100)
+        inside=float(((difference >= spread_low)
+                      & (difference <= spread_high)).mean()) * 100)
     print(f"[step 7] {key:7s} bias {stats[key]['bias']:+.3f} degC, "
           f"rmse {stats[key]['rmse']:.3f}, "
           f"{stats[key]['inside']:.0f}% of years within CESM2's own spread")
@@ -366,7 +356,7 @@ for key, (label, _, colour) in SCENARIOS.items():
 # =============================================================================
 #  STEP 8 — draw the bias panels
 # =============================================================================
-# The grey band is +/-2 sigma of CESM2's members about their own mean, computed
+# The grey band is the min-to-max range of CESM2's members about their own mean,
 # per year. Where the coloured bias line sits inside it, the emulator differs
 # from CESM2 by no more than one CESM2 member differs from another.
 
@@ -374,8 +364,8 @@ for i, (group, title) in enumerate(bias_panels):
     ax = ax_bias[i]
     ax.axhline(0, lw=0.8, color="0.3", zorder=1)
     for key in group:
-        years, difference, sigma = bias_series[key]
-        ax.fill_between(years, -2 * sigma, 2 * sigma,
+        years, difference, spread_low, spread_high = bias_series[key]
+        ax.fill_between(years, spread_low, spread_high,
                         color="0.45", alpha=0.22, lw=0, zorder=0)
         ax.plot(years, difference, color=SCENARIOS[key][2], lw=1.4, zorder=3)
     ax.set_title(f"{title}\nn = "
@@ -397,8 +387,8 @@ for i, (group, title) in enumerate(bias_panels):
 # so the columns line up under it. aaer and ghg end in 2050 and simply stop
 # there, which is honest: the run is short, not the bias small.
 limit = 1.15 * max(max(abs(float(d.min())), abs(float(d.max())),
-                       2 * float(s.max()))
-                   for _, d, s in bias_series.values())
+                       abs(float(lo.min())), abs(float(hi.max())))
+                   for _, d, lo, hi in bias_series.values())
 for ax in ax_bias:
     ax.set_ylim(-limit, limit)
     ax.set_xlim(BASELINE[0], YEAR_MAX)
@@ -419,9 +409,9 @@ style = [
     Line2D([], [], color="0.35", lw=1.2, ls="--", marker="o", markersize=3.4,
            markerfacecolor="white", markeredgecolor="0.35",
            label="CESM2 — held-out ensemble mean"),
-    Patch(facecolor="0.35", alpha=0.26, label="(a) CESM2 member range (min–max)"),
-    Patch(facecolor="0.55", alpha=0.20,
-          label="(b–d) CESM2 spread about its mean (±2σ)"),
+    # One entry, because every panel now shades the same quantity.
+    Patch(facecolor="0.35", alpha=0.26,
+          label="CESM2 member range (min–max)"),
 ]
 legend_scenarios = ax_main.legend(frameon=False, ncols=4, loc="lower left",
                                   bbox_to_anchor=(0.0, 1.14), handlelength=2.2)
