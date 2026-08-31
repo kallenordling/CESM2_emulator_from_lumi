@@ -111,6 +111,7 @@ import xarray as xr
 import yaml
 
 os.makedirs(OUT_DIR, exist_ok=True)
+inventory = []          # one row per file written, summarised at the end
 
 # =============================================================================
 #  STEP 1 — find out which members the emulator was trained on
@@ -170,12 +171,18 @@ for variable in VARIABLES:
                 if name != "diagnostics"                 # a folder of staging plots
                 and os.path.isdir(f"{source_dir}/{name}"))
 
-            member_names = []
+            # Split them explicitly, so what went in and what stayed out are
+            # both named rather than one being the leftover of the other.
+            member_names, excluded_as_trained = [], []
             for name in all_members:
                 if HELD_OUT_ONLY and name in trained_members.get(scenario, set()):
-                    continue
-                member_names.append(name)
+                    excluded_as_trained.append(name)
+                else:
+                    member_names.append(name)
+
+            dropped_by_limit = []
             if MAX_MEMBERS:
+                dropped_by_limit = member_names[MAX_MEMBERS:]
                 member_names = member_names[:MAX_MEMBERS]
 
             if not member_names:
@@ -220,6 +227,8 @@ for variable in VARIABLES:
             source_units = field.attrs.get("units")
             dataset.close()
             source_description = spec[0]
+            # These scenarios were never trained on, so every member is usable.
+            excluded_as_trained, dropped_by_limit = [], []
 
         # =====================================================================
         #  STEP 4 — convert to the emulator's units
@@ -242,14 +251,52 @@ for variable in VARIABLES:
                         "lat": lat, "lon": lon},
                 attrs={"units": EMULATOR_UNITS[variable],
                        "long_name": f"CESM2 {variable}, absolute, all members"})},
-            attrs={"experiment": scenario,
-                   "source": source_description,
-                   "source_units": str(source_units),
-                   "members": "held-out only" if HELD_OUT_ONLY else "all",
-                   "description": "CESM2 reference for emulator evaluation"},
+            attrs={
+                "experiment": scenario,
+                "description": "CESM2 reference for emulator evaluation",
+                # ── what is in this file ─────────────────────────────────────
+                "source": source_description,
+                "source_units": str(source_units),
+                "units": EMULATOR_UNITS[variable],
+                "n_members": len(member_names),
+                "member_names": ", ".join(member_names),
+                "years": f"{years[0]}-{years[-1]}",
+                # ── and what was deliberately left out ───────────────────────
+                "member_selection": ("held-out only" if HELD_OUT_ONLY
+                                     else "all members, trained ones included"),
+                "excluded_trained_members": (", ".join(excluded_as_trained)
+                                             or "none"),
+                "excluded_by_max_members": (", ".join(dropped_by_limit) or "none"),
+                "training_config": DATA_CONFIG if HELD_OUT_ONLY else "n/a",
+            },
         )
         out_path = f"{OUT_DIR}/{variable}_{scenario}.nc"
         reference.to_netcdf(out_path)
         print(f"[{variable}/{scenario}] wrote {out_path}  "
-              f"({len(member_names)} members, {len(years)} years, "
-              f"{os.path.getsize(out_path) / 1e6:.0f} MB)")
+              f"({os.path.getsize(out_path) / 1e6:.0f} MB)")
+        print(f"    source   : {source_description}  [{source_units} -> "
+              f"{EMULATOR_UNITS[variable]}]")
+        print(f"    years    : {years[0]}-{years[-1]}  ({len(years)})")
+        print(f"    IN  ({len(member_names):2d}): {', '.join(member_names)}")
+        if excluded_as_trained:
+            print(f"    OUT ({len(excluded_as_trained):2d}): trained on — "
+                  f"{', '.join(excluded_as_trained)}")
+        if dropped_by_limit:
+            print(f"    OUT ({len(dropped_by_limit):2d}): MAX_MEMBERS — "
+                  f"{', '.join(dropped_by_limit)}")
+        inventory.append(dict(variable=variable, scenario=scenario,
+                              members=len(member_names),
+                              excluded=len(excluded_as_trained),
+                              years=f"{years[0]}-{years[-1]}",
+                              source=source_description))
+
+
+# =============================================================================
+#  Summary — every file written, and what went into it
+# =============================================================================
+print(f"\n{len(inventory)} files in {OUT_DIR}")
+print(f"{'variable':9} {'scenario':9} {'members':>7} {'excluded':>8} "
+      f"{'years':>10}  source")
+for row in inventory:
+    print(f"{row['variable']:9} {row['scenario']:9} {row['members']:7d} "
+          f"{row['excluded']:8d} {row['years']:>10}  {row['source']}")
