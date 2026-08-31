@@ -1250,158 +1250,51 @@ def save_netcdf(
     name: str,
     gen_ensemble: np.ndarray,
     gen_years: np.ndarray,
-    baseline_map: np.ndarray,
-    cesm_ensemble: np.ndarray | None,
-    cesm_years: np.ndarray | None,
     out_path: str,
     ckpt_path: str,
-    gen_baseline_map: np.ndarray | None = None,
     var: str = "TREFHT",
     units: str = "degC",
 ):
-    """Save ensemble model output (and optionally CESM2 reference) to NetCDF.
+    """Save the emulator's raw output: absolute fields, one map per year.
 
-    Variables written (prefix = `var`, e.g. TREFHT or PRECT; units = `units`)
+    Variables written (prefix = `var`, e.g. TREFHT or PRECT)
     -----------------
-    {var}_model_mean          (year, lat, lon)  — ensemble mean
-    {var}_model_mean_anom     (year, lat, lon)  — ensemble mean anomaly
-    {var}_model_gmean_mean    (year,)           — ensemble mean global-mean
-    {var}_model_gmean_mean_anom (year,)         — ensemble mean global-mean anomaly
-    {var}_model         (member, year, lat, lon)  — every member, absolute
-    {var}_model_anom    (member, year, lat, lon)  — every member, anomaly
-    {var}_model_gmean       (member, year)        — every member, global-mean
-    {var}_model_gmean_anom  (member, year)        — every member, global-mean anomaly
+    {var}_model   (member, year, lat, lon)  — absolute, in `units`
 
-    MEMBER IS A DIMENSION, not part of the variable name. This replaces the
-    older layout of one variable per member ({var}_model_m1, _m2, ... _m25),
-    which turned a 25-member eval into a hundred variables and forced every
-    reader to parse numbers out of names to put them back in order. Files
-    written before this change still carry the old names; a reader that wants
-    to handle both should look for `{var}_model` first and fall back.
-    baseline_map              (lat, lon)        — 1850-1900 CESM2 climatology
-    {var}_model_baseline      (lat, lon)        — 1850-1900 model climatology
+    THAT IS THE WHOLE FILE. No anomalies, no global means, no ensemble means,
+    no CESM2 reference. Every one of those is a reduction of this array that an
+    analysis script can do for itself in a line:
 
-    If cesm_data is provided, also writes:
-    {var}_cesm / _anom / _gmean / _gmean_anom
+        anomaly      = da - da.sel(year=slice(1850, 1900)).mean()
+        global mean  = da.weighted(np.cos(np.deg2rad(da.lat))).mean(("lat","lon"))
+        ensemble mean= da.mean("member")
+
+    Writing them here instead fixed a baseline period, a weighting and a
+    reference ensemble into the file, so a script that wanted different ones had
+    to ignore most of it — and the file carried four copies of the same data.
+
+    The CESM2 reference is deliberately absent: it is not model output, it does
+    not change between evaluations, and it is already on disk in the training
+    tree and under cmip6/. Analysis scripts read it from there.
     """
-    N_ENS = gen_ensemble.shape[0]
-    gen_mean = gen_ensemble.mean(axis=0)           # (T, H, W) ensemble mean
-
-    coords_model = {"year": gen_years, "lat": LAT, "lon": LON}
-    w = np.cos(np.deg2rad(LAT))[:, np.newaxis]
-    w = w / w.mean()
-    bl_scalar = float((baseline_map * w).mean())
-
-    anom_mean       = gen_mean - baseline_map
-    gmean_mean      = (gen_mean * w).mean(axis=(-2, -1))
-    gmean_mean_anom = gmean_mean - bl_scalar
-
+    n_members = gen_ensemble.shape[0]
     ds = xr.Dataset(
         {
-            f"{var}_model_mean": xr.DataArray(
-                gen_mean, dims=["year", "lat", "lon"], coords=coords_model,
-                attrs={"units": units, "long_name": f"Ensemble mean model {var} (N={N_ENS})"}),
-            f"{var}_model_mean_anom": xr.DataArray(
-                anom_mean, dims=["year", "lat", "lon"], coords=coords_model,
-                attrs={"units": units, "long_name": f"Ensemble mean {var} anomaly re 1850-1900"}),
-            f"{var}_model_gmean_mean": xr.DataArray(
-                gmean_mean, dims=["year"], coords={"year": gen_years},
-                attrs={"units": units, "long_name": f"Ensemble mean global-mean {var}"}),
-            f"{var}_model_gmean_mean_anom": xr.DataArray(
-                gmean_mean_anom, dims=["year"], coords={"year": gen_years},
-                attrs={"units": units, "long_name": f"Ensemble mean global-mean {var} anomaly re 1850-1900"}),
-            "baseline_map": xr.DataArray(
-                baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
-                attrs={"units": units, "long_name": "1850-1900 climatological mean (CESM2)"}),
+            f"{var}_model": xr.DataArray(
+                gen_ensemble,
+                dims=["member", "year", "lat", "lon"],
+                coords={"member": np.arange(1, n_members + 1),
+                        "year": gen_years, "lat": LAT, "lon": LON},
+                attrs={"units": units,
+                       "long_name": f"Emulated {var}, absolute, all members"}),
         },
         attrs={
-            "experiment":        name,
-            "checkpoint":        os.path.basename(ckpt_path),
-            "baseline":          f"{BASELINE_START}-{BASELINE_END}",
-            "n_model_ensemble":  N_ENS,
-            "description":       "CESM2 aerosol emulator evaluation output",
+            "experiment":       name,
+            "checkpoint":       os.path.basename(ckpt_path),
+            "n_model_ensemble": n_members,
+            "description":      "CESM2 aerosol emulator output — absolute fields",
         },
     )
-
-    # ── every member, on a `member` dimension ────────────────────────────────
-    # One variable each instead of four per member: the whole ensemble is a
-    # single array, which is what it is.
-    member_ids = np.arange(1, N_ENS + 1)
-    coords_members = {"member": member_ids, "year": gen_years,
-                      "lat": LAT, "lon": LON}
-    gmean_members = (gen_ensemble * w).mean(axis=(-2, -1))     # (member, year)
-
-    ds[f"{var}_model"] = xr.DataArray(
-        gen_ensemble, dims=["member", "year", "lat", "lon"], coords=coords_members,
-        attrs={"units": units, "long_name": f"Model {var}, all members"})
-    ds[f"{var}_model_anom"] = xr.DataArray(
-        gen_ensemble - baseline_map, dims=["member", "year", "lat", "lon"],
-        coords=coords_members,
-        attrs={"units": units,
-               "long_name": f"Model {var} anomaly re 1850-1900, all members"})
-    ds[f"{var}_model_gmean"] = xr.DataArray(
-        gmean_members, dims=["member", "year"],
-        coords={"member": member_ids, "year": gen_years},
-        attrs={"units": units, "long_name": f"Global-mean {var}, all members"})
-    ds[f"{var}_model_gmean_anom"] = xr.DataArray(
-        gmean_members - bl_scalar, dims=["member", "year"],
-        coords={"member": member_ids, "year": gen_years},
-        attrs={"units": units,
-               "long_name": f"Global-mean {var} anomaly, all members"})
-
-    if gen_baseline_map is not None:
-        ds[f"{var}_model_baseline"] = xr.DataArray(
-            gen_baseline_map, dims=["lat", "lon"], coords={"lat": LAT, "lon": LON},
-            attrs={"units": units,
-                   "long_name": f"Model {BASELINE_START}-{BASELINE_END} climatological mean"})
-
-    if cesm_ensemble is not None and cesm_years is not None:
-        N_CESM = cesm_ensemble.shape[0]
-        cesm_data = cesm_ensemble.mean(axis=0)          # (T, H, W) ensemble mean
-        coords_cesm = {"cesm_year": cesm_years, "lat": LAT, "lon": LON}
-        gmean_cesm      = (cesm_data * w).mean(axis=(-2, -1))
-        anom_cesm       = cesm_data - baseline_map
-        gmean_cesm_anom = gmean_cesm - bl_scalar
-        ds[f"{var}_cesm_mean"] = xr.DataArray(
-            cesm_data, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-            attrs={"units": units, "long_name": f"CESM2 {var} ensemble mean (N={N_CESM})"})
-        ds[f"{var}_cesm_mean_anom"] = xr.DataArray(
-            anom_cesm, dims=["cesm_year", "lat", "lon"], coords=coords_cesm,
-            attrs={"units": units, "long_name": f"CESM2 ensemble mean {var} anomaly re 1850-1900"})
-        ds[f"{var}_cesm_gmean_mean"] = xr.DataArray(
-            gmean_cesm, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-            attrs={"units": units, "long_name": f"CESM2 ensemble mean global-mean {var}"})
-        ds[f"{var}_cesm_gmean_mean_anom"] = xr.DataArray(
-            gmean_cesm_anom, dims=["cesm_year"], coords={"cesm_year": cesm_years},
-            attrs={"units": units, "long_name": f"CESM2 ensemble mean global-mean {var} anomaly re 1850-1900"})
-        # CESM2's members on their own dimension. It is separate from the
-        # model's because the two ensembles differ in size, and on `cesm_year`
-        # because their records differ in length.
-        cesm_ids = np.arange(1, N_CESM + 1)
-        coords_cesm_members = {"cesm_member": cesm_ids, "cesm_year": cesm_years,
-                               "lat": LAT, "lon": LON}
-        gmean_cesm_members = (cesm_ensemble * w).mean(axis=(-2, -1))
-
-        ds[f"{var}_cesm"] = xr.DataArray(
-            cesm_ensemble, dims=["cesm_member", "cesm_year", "lat", "lon"],
-            coords=coords_cesm_members,
-            attrs={"units": units, "long_name": f"CESM2 {var}, all members"})
-        ds[f"{var}_cesm_anom"] = xr.DataArray(
-            cesm_ensemble - baseline_map,
-            dims=["cesm_member", "cesm_year", "lat", "lon"],
-            coords=coords_cesm_members,
-            attrs={"units": units,
-                   "long_name": f"CESM2 {var} anomaly re 1850-1900, all members"})
-        ds[f"{var}_cesm_gmean"] = xr.DataArray(
-            gmean_cesm_members, dims=["cesm_member", "cesm_year"],
-            coords={"cesm_member": cesm_ids, "cesm_year": cesm_years},
-            attrs={"units": units, "long_name": f"CESM2 global-mean {var}, all members"})
-        ds[f"{var}_cesm_gmean_anom"] = xr.DataArray(
-            gmean_cesm_members - bl_scalar, dims=["cesm_member", "cesm_year"],
-            coords={"cesm_member": cesm_ids, "cesm_year": cesm_years},
-            attrs={"units": units,
-                   "long_name": f"CESM2 global-mean {var} anomaly, all members"})
-
     ds.to_netcdf(out_path)
     print(f"  → saved {out_path}")
 
@@ -2647,12 +2540,8 @@ def main():
                 name             = name,
                 gen_ensemble     = gen_ensemble,
                 gen_years        = cond_years,
-                baseline_map     = baseline_map,
-                cesm_ensemble    = cesm_ens_exp,
-                cesm_years       = cesm_years_exp,
                 out_path         = nc_out,
                 ckpt_path        = ckpt_path,
-                gen_baseline_map = gen_baseline_map,
             )
 
         # -- anomaly maps --------------------------------------------------
@@ -2741,12 +2630,8 @@ def main():
                     name             = name,
                     gen_ensemble     = gen_ens_pr,
                     gen_years        = cond_years,
-                    baseline_map     = precip_baseline_map,
-                    cesm_ensemble    = cesm_ens_pr,
-                    cesm_years       = cesm_years_pr,
                     out_path         = nc_out_pr,
                     ckpt_path        = ckpt_path,
-                    gen_baseline_map = gen_baseline_pr,
                     var              = "PRECT",
                     units            = "mm/day",
                 )
