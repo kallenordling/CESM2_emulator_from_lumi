@@ -1,48 +1,107 @@
 #!/usr/bin/env python3
-"""Build CESM2 reference files in the same shape as the emulator's eval output.
+"""
+================================================================================
+ CESM2 REFERENCE FILES — the model data the emulator is judged against
+================================================================================
 
-WHY
----
-eval_aero.py now writes one thing per scenario — the emulator's absolute
-fields, `{var}_model` with dims (member, year, lat, lon). The CESM2 side was
-deliberately dropped from it: CESM2 is not model output and does not change
-between evaluations.
+Run it with no arguments:
 
-But every analysis then has to rebuild the reference by walking
-training_data/<VAR>/<scenario>/<member>/chunk_*.nc, forty files per member and
-thirty-odd members, which takes ten to fifteen minutes over a network mount and
-is repeated in every script that needs it. This does that walk ONCE and writes:
+    python scripts/make_cesm2_reference.py
+
+Everything configurable is in the SETTINGS block below. The script then runs top
+to bottom in five numbered steps, with no helper functions, so it can be read as
+a description of what the reference data is and where it comes from.
+
+WHY THIS EXISTS
+---------------
+eval_aero.py writes only the emulator's own output — `{var}_model` with dims
+(member, year, lat, lon) and nothing else. So the CESM2 side has to come from
+somewhere, and the raw form is awkward: one directory per member, forty chunk
+files inside each, thirty-odd members per experiment. Walking that takes two
+minutes on LUMI and ten to fifteen over a network mount, and every analysis
+script that needs a reference was repeating it.
+
+This walks it ONCE and writes, per variable and scenario:
 
     {var}_cesm   (member, year, lat, lon)   absolute, in the emulator's units
 
-so a plotting script reads one file per (variable, scenario) and is done.
+which mirrors the eval file exactly, so a plotting script opens one file per
+side and compares them directly.
 
-WHAT IS IN IT
--------------
-HELD-OUT MEMBERS ONLY, by default: those present on disk but absent from the
-training config's experiment_configs. Scoring an emulator against members it
-was fitted on is marking its own homework, and having the reference file
-contain only held-out members makes that mistake impossible downstream rather
-than merely discouraged. --all-members overrides it.
+THREE THINGS THE FILE GUARANTEES
+--------------------------------
+1. HELD-OUT MEMBERS ONLY. The emulator was fitted on some CESM2 members;
+   scoring against those would be marking its own homework. Filtering here,
+   rather than in each analysis, makes the mistake impossible downstream
+   instead of merely discouraged.
 
-The member coordinate carries the member NAMES (LE2-1231.012), not indices:
-unlike the emulator's interchangeable draws, these identify specific
-realizations, and a name is what you need when one turns out to be corrupt.
+2. MEMBER NAMES, NOT NUMBERS. The emulator's members are interchangeable
+   random draws, so integers suffice for it. CESM2's identify specific
+   realizations — you need the name when one turns out to be corrupt, as
+   LE2-1231.012 was.
 
-UNITS are converted to what the emulator writes, so the two files can be
-compared without a second thought: TREFHT K -> degC, PRECT m/s -> mm/day.
-
-ssp126 and ssp245 have no LENS2 tree; their reference is the pre-aggregated
-CMIP6 ensemble under cmip6/, which this reads instead.
-
-Usage
------
-    python scripts/make_cesm2_reference.py                     # all defaults
-    python scripts/make_cesm2_reference.py --variables TREFHT \\
-        --scenarios hist ssp370 --out-dir /scratch/.../cesm2_reference
+3. THE EMULATOR'S UNITS. Kelvin becomes degrees Celsius and m/s becomes
+   mm/day here, so nothing downstream has to remember which side is which.
 """
 
-import argparse
+# =============================================================================
+#  SETTINGS
+# =============================================================================
+
+# Where emulator_data lives. The default is LUMI's copy, where the training
+# tree is on fast local storage; over the sshfs mount this script still works
+# but takes ten to fifteen minutes per variable instead of one.
+DATA_ROOT = "/scratch/project_462001112/emulator_data"
+
+OUT_DIR = f"{DATA_ROOT}/cesm2_reference"
+
+# The training config decides which members are OFF LIMITS as a reference.
+DATA_CONFIG = "configs/config_data_ybias_BCprect.yaml"
+
+VARIABLES = ["TREFHT", "PRECT"]
+SCENARIOS = ["hist", "ssp370", "aaer", "ghg", "ssp126", "ssp245"]
+
+# Set False to include the members the emulator trained on. Only ever useful
+# for diagnosing the emulator's fit to its own training data.
+HELD_OUT_ONLY = True
+
+# 0 = every member. A small number makes a quick structural test.
+MAX_MEMBERS = 0
+
+# ── Where each scenario's CESM2 data comes from ──────────────────────────────
+# hist, ssp370, aaer and ghg have a LENS2 training tree, one directory per
+# member. Note the capitalisation: the tree uses AAER and GHG where the rest of
+# the codebase says aaer and ghg.
+TREE_SUBDIR = {"hist": "hist", "ssp370": "ssp370", "aaer": "AAER", "ghg": "GHG"}
+
+# ssp126 and ssp245 were never trained on and have no tree. Their reference is
+# a pre-aggregated 3-member CMIP6 ensemble in a single file.
+CMIP6_FILE = {
+    ("ssp126", "TREFHT"): ("cmip6/ssp126.nc", "tas"),
+    ("ssp126", "PRECT"):  ("cmip6/ssp126_pr.nc", "pr"),
+    ("ssp245", "TREFHT"): ("cmip6/ssp245.nc", "tas"),
+    ("ssp245", "PRECT"):  ("cmip6/ssp245_pr.nc", "pr"),
+}
+
+# ── Unit conversions into what the emulator writes ───────────────────────────
+# Keyed by the `units` attribute found in the source file. Anything not listed
+# stops the script rather than being guessed at: a wrong factor here would
+# silently rescale every comparison made with these files.
+TO_EMULATOR_UNITS = {
+    "TREFHT": {
+        "K":    lambda x: x - 273.15,
+        "degC": lambda x: x,
+    },
+    "PRECT": {
+        "m/s":        lambda x: x * 1000.0 * 86400.0,   # m->mm, s->day
+        "kg m-2 s-1": lambda x: x * 86400.0,            # CMIP6 `pr`, 1 kg/m2 = 1 mm
+        "mm/day":     lambda x: x,
+    },
+}
+EMULATOR_UNITS = {"TREFHT": "degC", "PRECT": "mm/day"}
+
+# =============================================================================
+
 import glob
 import os
 import sys
@@ -51,137 +110,146 @@ import numpy as np
 import xarray as xr
 import yaml
 
-# scenario -> training-tree subdirectory (None = no tree, use the CMIP6 file)
-TREE_SUBDIR = {"hist": "hist", "ssp370": "ssp370", "aaer": "AAER", "ghg": "GHG",
-               "ssp126": None, "ssp245": None}
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# scenario -> (file under the data root, variable inside it) for the CMIP6 route
-CMIP6_SOURCE = {
-    "ssp126": {"TREFHT": ("cmip6/ssp126.nc", "tas"),
-               "PRECT":  ("cmip6/ssp126_pr.nc", "pr")},
-    "ssp245": {"TREFHT": ("cmip6/ssp245.nc", "tas"),
-               "PRECT":  ("cmip6/ssp245_pr.nc", "pr")},
-}
+# =============================================================================
+#  STEP 1 — find out which members the emulator was trained on
+# =============================================================================
+# The training config lists them per experiment:
+#     experiment_configs:
+#       - scenario_name: hist
+#         realizations: [LE2-1001.001, LE2-1011.001, ...]
+# Everything else on disk is fair game as a reference.
 
-# raw units -> the emulator's units
-CONVERT = {
-    "TREFHT": {"K": lambda x: x - 273.15, "degC": lambda x: x},
-    "PRECT":  {"m/s": lambda x: x * 8.64e7,          # x1000 mm/m, x86400 s/day
-               "kg m-2 s-1": lambda x: x * 86400.0,  # CMIP6 `pr`
-               "mm/day": lambda x: x},
-}
-UNITS = {"TREFHT": "degC", "PRECT": "mm/day"}
+trained_members = {}
+if HELD_OUT_ONLY:
+    config = yaml.safe_load(open(DATA_CONFIG))
+    for experiment in config["experiment_configs"]:
+        trained_members[experiment["scenario_name"]] = set(
+            experiment.get("realizations", []))
+    print(f"[step 1] {DATA_CONFIG}: "
+          + ", ".join(f"{k} {len(v)} trained" for k, v in trained_members.items()))
+else:
+    print("[step 1] HELD_OUT_ONLY is off — including trained members")
 
+# The remaining steps run once per (variable, scenario).
+for variable in VARIABLES:
+    for scenario in SCENARIOS:
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data-root", default="/scratch/project_462001112/emulator_data")
-    ap.add_argument("--data-config", default="configs/config_data_ybias_BCprect.yaml",
-                    help="its experiment_configs define the TRAINED members")
-    ap.add_argument("--out-dir", default=None,
-                    help="default <data-root>/cesm2_reference")
-    ap.add_argument("--variables", nargs="+", default=["TREFHT", "PRECT"])
-    ap.add_argument("--scenarios", nargs="+",
-                    default=["hist", "ssp370", "aaer", "ghg"])
-    ap.add_argument("--all-members", action="store_true",
-                    help="include members used in training as well")
-    ap.add_argument("--max-members", type=int, default=0,
-                    help="keep only the first N (0 = all); for quick tests")
-    args = ap.parse_args()
+        # =====================================================================
+        #  STEP 2 — decide where this scenario's data comes from
+        # =====================================================================
+        from_tree = scenario in TREE_SUBDIR
 
-    out_dir = args.out_dir or os.path.join(args.data_root, "cesm2_reference")
-    os.makedirs(out_dir, exist_ok=True)
+        if from_tree:
+            source_dir = f"{DATA_ROOT}/training_data/{variable}/{TREE_SUBDIR[scenario]}"
+            if not os.path.isdir(source_dir):
+                print(f"[{variable}/{scenario}] no tree at {source_dir} — skipped")
+                continue
+        else:
+            spec = CMIP6_FILE.get((scenario, variable))
+            if spec is None:
+                print(f"[{variable}/{scenario}] no CMIP6 file listed — skipped")
+                continue
+            source_file = f"{DATA_ROOT}/{spec[0]}"
+            cmip6_variable = spec[1]
+            if not os.path.exists(source_file):
+                print(f"[{variable}/{scenario}] {spec[0]} does not exist — skipped")
+                continue
 
-    trained = {}
-    if not args.all_members:
-        cfg = yaml.safe_load(open(args.data_config))
-        trained = {e["scenario_name"]: set(e.get("realizations", []))
-                   for e in cfg["experiment_configs"]}
+        # =====================================================================
+        #  STEP 3 — read the members
+        # =====================================================================
+        # Either way this produces: `data` (member, year, lat, lon),
+        # `member_names`, `years`, `lat`, `lon` — and the units it arrived in.
 
-    for var in args.variables:
-        for scen in args.scenarios:
-            out_path = os.path.join(out_dir, f"{var}_{scen}.nc")
-            subdir = TREE_SUBDIR.get(scen)
+        if from_tree:
+            # One directory per member, forty chunk files inside each.
+            all_members = sorted(
+                name for name in os.listdir(source_dir)
+                if name != "diagnostics"                 # a folder of staging plots
+                and os.path.isdir(f"{source_dir}/{name}"))
 
-            # ── the CMIP6 route, for scenarios with no LENS2 tree ────────────
-            if subdir is None:
-                spec = CMIP6_SOURCE.get(scen, {}).get(var)
-                src = os.path.join(args.data_root, spec[0]) if spec else None
-                if not src or not os.path.exists(src):
-                    print(f"[{var}/{scen}] no CMIP6 reference "
-                          f"({spec[0] if spec else 'unknown'}) — skipped")
+            member_names = []
+            for name in all_members:
+                if HELD_OUT_ONLY and name in trained_members.get(scenario, set()):
                     continue
-                ds = xr.open_dataset(src)
-                da = ds[spec[1]]
-                raw_units = da.attrs.get("units")
-                convert = CONVERT[var].get(raw_units)
-                if convert is None:
-                    print(f"[{var}/{scen}] units {raw_units!r} unknown — skipped")
-                    continue
-                da = convert(da).transpose("member", "year", "lat", "lon")
-                members = [str(m) for m in da["member"].values]
-                data = da.values
-                years = da["year"].values.astype(int)
-                lat, lon = da["lat"].values, da["lon"].values
-                ds.close()
-                source = spec[0]
+                member_names.append(name)
+            if MAX_MEMBERS:
+                member_names = member_names[:MAX_MEMBERS]
 
-            # ── the training-tree route ─────────────────────────────────────
-            else:
-                root = os.path.join(args.data_root, "training_data", var, subdir)
-                if not os.path.isdir(root):
-                    print(f"[{var}/{scen}] {root} missing — skipped")
-                    continue
-                on_disk = sorted(m for m in os.listdir(root)
-                                 if m != "diagnostics"
-                                 and os.path.isdir(os.path.join(root, m)))
-                members = [m for m in on_disk if m not in trained.get(scen, set())]
-                if args.max_members:
-                    members = members[:args.max_members]
-                if not members:
-                    print(f"[{var}/{scen}] no held-out members — skipped")
-                    continue
+            if not member_names:
+                print(f"[{variable}/{scenario}] every member on disk was trained "
+                      f"on — nothing to use as a reference")
+                continue
 
-                stack, years, lat, lon = [], None, None, None
-                for i, mem in enumerate(members, 1):
-                    files = sorted(glob.glob(os.path.join(root, mem, "chunk_*.nc")),
-                                   key=lambda f: int(os.path.basename(f)[6:-3]))
-                    print(f"[{var}/{scen}] [{i}/{len(members)}] {mem}", flush=True)
-                    ds = xr.open_mfdataset(files, combine="by_coords",
+            per_member = []
+            years = lat = lon = source_units = None
+            for i, name in enumerate(member_names, 1):
+                print(f"[{variable}/{scenario}] [{i}/{len(member_names)}] {name}",
+                      flush=True)
+                # Sort the chunks NUMERICALLY: lexically they run 0, 1, 10, 11,
+                # 2, ... and the time axis would come out scrambled.
+                chunks = sorted(
+                    glob.glob(f"{source_dir}/{name}/chunk_*.nc"),
+                    key=lambda path: int(os.path.basename(path)[len("chunk_"):-3]))
+                member = xr.open_mfdataset(chunks, combine="by_coords",
                                            decode_times=False)
-                    da = ds[var]
-                    raw_units = da.attrs.get("units")
-                    convert = CONVERT[var].get(raw_units)
-                    if convert is None:
-                        sys.exit(f"{mem}: units {raw_units!r} have no conversion "
-                                 f"to {UNITS[var]}")
-                    tdim = da.dims[0]
-                    stack.append(convert(da).values)
-                    if years is None:
-                        years = np.asarray(ds[tdim].values).astype(int)
-                        lat, lon = ds["lat"].values, ds["lon"].values
-                    ds.close()
-                data = np.stack(stack)
-                source = f"training_data/{var}/{subdir}"
+                field = member[variable]
+                per_member.append(field.values)
+                if years is None:
+                    time_dim = field.dims[0]          # the tree stores plain years
+                    years = np.asarray(member[time_dim].values).astype(int)
+                    lat = member["lat"].values
+                    lon = member["lon"].values
+                    source_units = field.attrs.get("units")
+                member.close()
 
-            out = xr.Dataset(
-                {f"{var}_cesm": xr.DataArray(
-                    data, dims=["member", "year", "lat", "lon"],
-                    coords={"member": members, "year": years,
-                            "lat": lat, "lon": lon},
-                    attrs={"units": UNITS[var],
-                           "long_name": f"CESM2 {var}, absolute, all members"})},
-                attrs={"experiment": scen, "source": source,
-                       "members": "held-out only" if not args.all_members else "all",
-                       "description": "CESM2 reference for emulator evaluation"},
-            )
-            out.to_netcdf(out_path)
-            print(f"[{var}/{scen}] wrote {out_path}  "
-                  f"({len(members)} members, {len(years)} years, "
-                  f"{os.path.getsize(out_path)/1e6:.0f} MB)")
-    return 0
+            data = np.stack(per_member)
+            source_description = f"training_data/{variable}/{TREE_SUBDIR[scenario]}"
 
+        else:
+            # One file, members already stacked on a `member` dimension.
+            dataset = xr.open_dataset(source_file)
+            field = dataset[cmip6_variable].transpose("member", "year", "lat", "lon")
+            data = field.values
+            member_names = [str(m) for m in field["member"].values]
+            years = field["year"].values.astype(int)
+            lat = field["lat"].values
+            lon = field["lon"].values
+            source_units = field.attrs.get("units")
+            dataset.close()
+            source_description = spec[0]
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+        # =====================================================================
+        #  STEP 4 — convert to the emulator's units
+        # =====================================================================
+        convert = TO_EMULATOR_UNITS[variable].get(source_units)
+        if convert is None:
+            sys.exit(f"[{variable}/{scenario}] source units {source_units!r} have "
+                     f"no conversion to {EMULATOR_UNITS[variable]}. Known: "
+                     f"{sorted(TO_EMULATOR_UNITS[variable])}")
+        data = convert(data)
+
+        # =====================================================================
+        #  STEP 5 — write one file, shaped like the emulator's
+        # =====================================================================
+        reference = xr.Dataset(
+            {f"{variable}_cesm": xr.DataArray(
+                data,
+                dims=["member", "year", "lat", "lon"],
+                coords={"member": member_names, "year": years,
+                        "lat": lat, "lon": lon},
+                attrs={"units": EMULATOR_UNITS[variable],
+                       "long_name": f"CESM2 {variable}, absolute, all members"})},
+            attrs={"experiment": scenario,
+                   "source": source_description,
+                   "source_units": str(source_units),
+                   "members": "held-out only" if HELD_OUT_ONLY else "all",
+                   "description": "CESM2 reference for emulator evaluation"},
+        )
+        out_path = f"{OUT_DIR}/{variable}_{scenario}.nc"
+        reference.to_netcdf(out_path)
+        print(f"[{variable}/{scenario}] wrote {out_path}  "
+              f"({len(member_names)} members, {len(years)} years, "
+              f"{os.path.getsize(out_path) / 1e6:.0f} MB)")
