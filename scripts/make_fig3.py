@@ -10,7 +10,7 @@ Run it with no arguments:
 
 Everything configurable is in the SETTINGS block below. There are no
 command-line options and no helper functions: the script runs top to bottom in
-six numbered steps, so it can be read as a description of how the figure is
+seven numbered steps, so it can be read as a description of how the figure is
 made. Same shape as make_fig1.py and make_fig2.py.
 
 WHAT THE FIGURE SHOWS
@@ -99,6 +99,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import numpy as np
 import xarray as xr
+from scipy import stats
 
 # =============================================================================
 #  STEP 1 — collect the emulator's global means for the last N years
@@ -110,7 +111,8 @@ import xarray as xr
 # `.sel(year=slice(-N_YEARS, None))` would select YEARS -20 to 0, which do not
 # exist; the last N years are an INDEX selection, hence isel.
 
-emulator = {}          # (variable, scenario) -> 1-D array of member-years
+emulator = {}            # (variable, scenario) -> 1-D array of member-years
+emulator_by_member = {}  # the same values, still shaped (member, year)
 for variable in VARIABLES:
     for scenario in SCENARIOS:
         path = f"{EVAL_DIR}/{variable}_{scenario}.nc"
@@ -122,6 +124,7 @@ for variable in VARIABLES:
         # Flatten (member, year) into one sample: every member-year is one draw
         # from the model's climate over this window.
         emulator[(variable, scenario)] = global_mean.values.ravel()
+        emulator_by_member[(variable, scenario)] = global_mean.values  # (member, year)
         dataset.close()
         print(f"[step 1] {variable:6s} {scenario:7s} emulator: "
               f"{global_mean.sizes['member']:2d} members x {len(years)} years "
@@ -136,6 +139,7 @@ for variable in VARIABLES:
 # that filtering happened when the reference was built.
 
 cesm = {}
+cesm_by_member = {}
 for variable in VARIABLES:
     for scenario in SCENARIOS:
         path = f"{REFERENCE_DIR}/{variable}_{scenario}.nc"
@@ -145,6 +149,7 @@ for variable in VARIABLES:
         global_mean = field.weighted(weights).mean(("lat", "lon")).compute()
         years = global_mean["year"].values
         cesm[(variable, scenario)] = global_mean.values.ravel()
+        cesm_by_member[(variable, scenario)] = global_mean.values      # (member, year)
         member_count = global_mean.sizes["member"]
         dataset.close()
         print(f"[step 2] {variable:6s} {scenario:7s} CESM2:    "
@@ -269,31 +274,92 @@ for variable in VARIABLES:
     plt.close(figure)
 
 # =============================================================================
-#  STEP 6 — the same numbers as a LaTeX table
+#  STEP 6 — are the means the same, and are the distributions the same?
+# =============================================================================
+# The obvious thing — a t-test and a KS test on the 500 vs 200 pooled
+# member-years — IS WRONG, and badly. Both assume independent samples, but
+# consecutive years inside one member are strongly correlated: over these
+# windows the lag-1 autocorrelation of the pooled values runs 0.56 to 0.93,
+# because every member carries the same forced trend across the 20 years. The
+# effective sample size is a small fraction of the nominal one, and the tests
+# return absurd confidence — p ~ 1e-26 for aaer, which no honest reading of 500
+# correlated points supports.
+#
+# So each question gets a form of the data that satisfies its test:
+#
+# ARE THE MEANS THE SAME?  Welch's t-test on the MEMBER MEANS — one number per
+#   member, 25 against 6-11. Members are independent realizations, so these are
+#   genuinely independent units. Welch rather than Student because the two sides
+#   need not have equal variance.
+#
+# ARE THE DISTRIBUTIONS THE SAME?  Two-sample Kolmogorov-Smirnov, and Levene for
+#   the variances, on values with each side's OWN ensemble-mean trajectory
+#   removed. That subtracts the forced signal — the trend the members share —
+#   and leaves internal variability. It also removes the correlation: the lag-1
+#   autocorrelation of the residuals is below 0.06, so the samples now behave as
+#   independent draws. This asks the question the figure is really about: does
+#   the emulator's spread ABOUT its own trajectory match CESM2's?
+
+tests = {}
+for variable in VARIABLES:
+    for scenario in SCENARIOS:
+        emulator_series = emulator_by_member[(variable, scenario)]
+        cesm_series = cesm_by_member[(variable, scenario)]
+
+        # means: one value per member
+        mean_test = stats.ttest_ind(emulator_series.mean(axis=1),
+                                    cesm_series.mean(axis=1), equal_var=False)
+
+        # distributions: internal variability, forced signal removed
+        emulator_residual = (emulator_series
+                             - emulator_series.mean(axis=0, keepdims=True)).ravel()
+        cesm_residual = (cesm_series
+                         - cesm_series.mean(axis=0, keepdims=True)).ravel()
+        ks_test = stats.ks_2samp(emulator_residual, cesm_residual)
+        variance_test = stats.levene(emulator_residual, cesm_residual)
+
+        tests[(variable, scenario)] = dict(
+            mean_p=float(mean_test.pvalue),
+            ks_p=float(ks_test.pvalue),
+            levene_p=float(variance_test.pvalue))
+        print(f"[step 6] {variable:6s} {scenario:7s} "
+              f"means p={mean_test.pvalue:.4f} "
+              f"{'DIFFER' if mean_test.pvalue < 0.05 else 'same'}, "
+              f"distribution p={ks_test.pvalue:.3f} "
+              f"{'DIFFER' if ks_test.pvalue < 0.05 else 'same'}, "
+              f"variance p={variance_test.pvalue:.3f}")
+
+# =============================================================================
+#  STEP 7 — the same numbers as a LaTeX table
 # =============================================================================
 # Plain LaTeX with borders: \toprule and \cmidrule need \usepackage{booktabs},
 # and without it \cmidrule silently typesets "(lr)2-3" into the table.
 
+# A p-value formatter: below 0.001 the exact value is noise, so say so.
+def format_p(value):
+    return "$<$0.001" if value < 0.001 else f"{value:.3f}"
+
+
 table_rows = []
 for variable in VARIABLES:
-    unit_table = VARIABLES[variable][2]
     for scenario in SCENARIOS:
         row = statistics[(variable, scenario)]
+        test = tests[(variable, scenario)]
         table_rows.append(
             f"{VARIABLES[variable][0]} & {SCENARIOS[scenario][0]} & "
-            f"{row['emulator_mean']:.3f} & {row['cesm_mean']:.3f} & "
-            f"{row['mean_difference']:+.3f} & "
-            f"{row['emulator_sd']:.3f} & {row['cesm_sd']:.3f} & "
-            f"{row['sd_ratio']:.2f} \\\\")
+            f"{row['mean_difference']:+.3f} & {format_p(test['mean_p'])} & "
+            f"{'no' if test['mean_p'] < 0.05 else 'yes'} & "
+            f"{row['sd_ratio']:.2f} & {format_p(test['ks_p'])} & "
+            f"{'no' if test['ks_p'] < 0.05 else 'yes'} \\\\")
 
 table_tex = "\n".join([
-    r"\begin{tabular}{|l|l|r|r|r|r|r|r|}",
+    r"\begin{tabular}{|l|l|r|r|c|r|r|c|}",
     r"\hline",
     r"\textbf{Variable} & \textbf{Experiment} & "
     r"\multicolumn{3}{c|}{\textbf{Mean}} & "
-    r"\multicolumn{3}{c|}{\textbf{Standard deviation}} \\",
+    r"\multicolumn{3}{c|}{\textbf{Distribution}} \\",
     r"\cline{3-8}",
-    r" & & Emulator & CESM2 & Difference & Emulator & CESM2 & Ratio \\",
+    r" & & Difference & $p$ & Same? & SD ratio & $p$ & Same? \\",
     r"\hline",
     *table_rows,
     r"\hline",
@@ -304,10 +370,20 @@ os.makedirs(os.path.dirname(TABLE) or ".", exist_ok=True)
 with open(TABLE, "w") as handle:
     handle.write(
         f"% Global-mean distributions over the last {N_YEARS} years of each\n"
-        f"% experiment, pooling every member-year: emulator 25 members,\n"
-        f"% CESM2 6-11 held-out members. Units are degC for temperature and\n"
-        f"% mm/day for precipitation. An sd ratio below 1 means the emulator\n"
-        f"% generates too little variability.\n"
-        f"% Generated by scripts/make_fig3.py — do not edit by hand.\n")
+        f"% experiment. Units: degC for temperature, mm/day for precipitation.\n"
+        f"%\n"
+        f"% MEAN columns: emulator minus CESM2, and Welch's t-test on the MEMBER\n"
+        f"%   MEANS (25 emulator members against 6-11 CESM2 members). Members are\n"
+        f"%   independent realizations, so these are independent samples.\n"
+        f"%\n"
+        f"% DISTRIBUTION columns: the ratio of standard deviations, and a\n"
+        f"%   two-sample Kolmogorov-Smirnov test on values with each side's own\n"
+        f"%   ensemble-mean trajectory removed — i.e. on internal variability,\n"
+        f"%   with the shared forced trend taken out. That removal is what makes\n"
+        f"%   the samples independent enough to test: on the raw pooled\n"
+        f"%   member-years the lag-1 autocorrelation is 0.56-0.93 and any test\n"
+        f"%   assuming independence is meaningless.\n"
+        f"%\n"
+        f"% 'Same?' is p > 0.05. Generated by scripts/make_fig3.py — do not edit.\n")
     handle.write(table_tex + "\n")
-print(f"[step 6] wrote {TABLE}")
+print(f"[step 7] wrote {TABLE}")
