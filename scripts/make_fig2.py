@@ -484,15 +484,19 @@ for key in SCENARIOS:
         f"{row['corr']:.3f} & {row['rmse']:.3f} & {row['bias']:+.3f} & "
         f"{row['inside']:.0f} \\\\")
 
+# Plain LaTeX: \hline and | rules, no booktabs. \toprule/\midrule/\cmidrule
+# need \usepackage{booktabs}, and without it \cmidrule(lr){2-3} does not error
+# — it prints "(lr)2-3" into the table as text.
 table_tex = "\n".join([
-    r"\begin{tabular}{lrrrrrr}",
-    r"\toprule",
-    r"Experiment & \multicolumn{2}{c}{members} & $r$ & RMSE & Bias & In band \\",
-    r"\cmidrule(lr){2-3}",
-    r" & emulator & CESM2 & & (\%-points) & (\%-points) & (\%) \\",
-    r"\midrule",
+    r"\begin{tabular}{|l|r|r|r|r|r|r|}",
+    r"\hline",
+    r"\textbf{Experiment} & \multicolumn{2}{c|}{\textbf{Members}} & "
+    r"\textbf{$r$} & \textbf{RMSE} & \textbf{Bias} & \textbf{In band} \\",
+    r"\cline{2-3}",
+    r" & Emulator & CESM2 & & (\%-points) & (\%-points) & (\%) \\",
+    r"\hline",
     *rows_tex,
-    r"\bottomrule",
+    r"\hline",
     r"\end{tabular}",
 ])
 
