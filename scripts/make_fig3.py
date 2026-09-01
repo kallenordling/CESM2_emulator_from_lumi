@@ -10,12 +10,13 @@ Run it with no arguments:
 
 Everything configurable is in the SETTINGS block below. There are no
 command-line options and no helper functions: the script runs top to bottom in
-seven numbered steps, so it can be read as a description of how the figure is
+six numbered steps, so it can be read as a description of how the figure is
 made. Same shape as make_fig1.py and make_fig2.py.
 
 WHAT THE FIGURE SHOWS
 ---------------------
-One panel per experiment and variable. Each histogram pools EVERY member-year
+TWO figures, one per variable, each a 2x2 grid of the four experiments. Each
+histogram pools EVERY member-year
 of the last 20 years — 25 members x 20 years = 500 values for the emulator, and
 6 to 11 members x 20 years for CESM2 — and asks whether the two samples are
 drawn from the same distribution.
@@ -59,7 +60,10 @@ EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_absolute"
 # members only, already in the emulator's units.
 REFERENCE_DIR = "/home/nordling/mnt/lumi_sc/emulator_data/cesm2_reference"
 
-OUT = "plots/fig3.png"                 # the .pdf sibling is written alongside
+# One figure per variable, each a 2x2 grid of experiments. {var} is filled in
+# with TREFHT or PRECT, so temperature and precipitation can be placed
+# separately in the paper rather than as one eight-panel block.
+OUT = "plots/fig3_{var}.png"           # the .pdf sibling is written alongside
 
 # LaTeX table of the distribution statistics, for \input into the paper.
 TABLE = "plots/fig3_distributions.tex"
@@ -183,34 +187,30 @@ for variable in VARIABLES:
               f"(ratio {row['sd_ratio']:.2f})")
 
 # =============================================================================
-#  STEP 4 — lay out the figure
+#  STEP 4 — draw one 2x2 figure per variable
 # =============================================================================
-# One row per variable, one column per experiment.
-
-plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9.5,
-                     "axes.spines.top": False, "axes.spines.right": False,
-                     "axes.grid": True, "grid.alpha": 0.25})
-figure, axes = plt.subplots(len(VARIABLES), len(SCENARIOS),
-                            figsize=(4.0 * len(SCENARIOS), 3.2 * len(VARIABLES)),
-                            squeeze=False)
-
-# =============================================================================
-#  STEP 5 — draw the histograms
-# =============================================================================
-# Both sides share one set of bin edges per panel, spanning the combined range:
-# with different edges the two shapes would not be comparable.
+# Rows and columns are just the four experiments wrapped two-by-two; with only
+# four panels a 2x2 block sits better on a page than a 1x4 strip, and leaves the
+# panels wide enough to read the distribution shapes.
 #
-# density=True, not counts. The emulator contributes 500 member-years and CESM2
-# between 120 and 220, so raw counts would show the sample sizes rather than the
-# distributions.
+# Both sides share one set of bin edges per panel, spanning the combined range:
+# with different edges the two shapes would not be comparable. density=True, not
+# counts — the emulator contributes 500 member-years against CESM2's 120 to 220,
+# so raw counts would show the sample sizes rather than the distributions.
 
 EMULATOR_COLOUR = "#D55E00"
 CESM_COLOUR = "#0072B2"
 
-for row_index, variable in enumerate(VARIABLES):
+plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9.5,
+                     "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": True, "grid.alpha": 0.25})
+
+for variable in VARIABLES:
     variable_label, unit_axis, _ = VARIABLES[variable]
-    for column_index, scenario in enumerate(SCENARIOS):
-        axis = axes[row_index][column_index]
+    figure, axes = plt.subplots(2, 2, figsize=(9.0, 6.6))
+
+    for panel_index, scenario in enumerate(SCENARIOS):
+        axis = axes[panel_index // 2][panel_index % 2]
         emulator_values = emulator[(variable, scenario)]
         cesm_values = cesm[(variable, scenario)]
 
@@ -233,40 +233,49 @@ for row_index, variable in enumerate(VARIABLES):
         axis.set_title(f"{SCENARIOS[scenario][0]}\n"
                        f"$\\Delta$mean {row['mean_difference']:+.3f}, "
                        f"sd ratio {row['sd_ratio']:.2f}",
-                       fontsize=9, loc="left")
-        axis.set_xlabel(f"{variable_label} ({unit_axis})")
-        if column_index == 0:
+                       fontsize=9.5, loc="left")
+        axis.text(0.03, 0.95, f"({'abcd'[panel_index]})", transform=axis.transAxes,
+                  fontweight="bold", va="top", fontsize=9)
+        # Axis labels only on the outside, so the panels are not repetitive.
+        if panel_index // 2 == 1:
+            axis.set_xlabel(f"{variable_label} ({unit_axis})")
+        if panel_index % 2 == 0:
             axis.set_ylabel("Probability density")
-        axis.text(0.03, 0.95, f"({'abcdefgh'[row_index * len(SCENARIOS) + column_index]})",
-                  transform=axis.transAxes, fontweight="bold", va="top", fontsize=9)
+
+    # =========================================================================
+    #  STEP 5 — legend and title, then save
+    # =========================================================================
+    # tight_layout FIRST, so the title and legend are placed relative to the
+    # settled axes; the other way round lets tight_layout move the axes out from
+    # under them and the legend lands on top of the title.
+    legend_entries = [
+        Patch(facecolor=CESM_COLOUR, alpha=0.45, label="CESM2 (held-out members)"),
+        Line2D([], [], color=EMULATOR_COLOUR, lw=2.0, label="Emulator"),
+        Line2D([], [], color="0.35", lw=1.4, ls="--", label="distribution mean"),
+    ]
+    figure.tight_layout()
+    # The legend sits just above the axes and the title above THAT. The title
+    # runs to two lines, so it needs clearance for both of them or its second
+    # line lands on the legend.
+    legend = figure.legend(handles=legend_entries, frameon=False, ncols=3,
+                           loc="lower center", bbox_to_anchor=(0.5, 1.005))
+    title = figure.suptitle(
+        f"{variable_label}: global-mean distributions over the last {N_YEARS} "
+        f"years\nevery member-year pooled; shared bins per panel; densities, "
+        f"not counts", fontsize=10.5, y=1.135)
+
+    out_png = OUT.format(var=variable)
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+    for path in (out_png, os.path.splitext(out_png)[0] + ".pdf"):
+        # Both the legend and the title sit OUTSIDE the axes, so both have to
+        # be named here; a tight bbox crops whatever it is not told about.
+        figure.savefig(path, bbox_inches="tight",
+                       bbox_extra_artists=[legend, title])
+        print(f"[step 5] wrote {path}")
+    plt.close(figure)
 
 # =============================================================================
-#  STEP 6 — legend and title
-# =============================================================================
-
-legend_entries = [
-    Patch(facecolor=CESM_COLOUR, alpha=0.45, label="CESM2 (held-out members)"),
-    Line2D([], [], color=EMULATOR_COLOUR, lw=2.0, label="Emulator"),
-    Line2D([], [], color="0.35", lw=1.4, ls="--", label="distribution mean"),
-]
-# tight_layout FIRST, then the title and legend are placed relative to the
-# settled axes; doing it the other way round lets tight_layout move the axes out
-# from under them, which is how the legend ends up on top of the title.
-figure.tight_layout()
-figure.suptitle(
-    f"Global-mean distributions over the last {N_YEARS} years of each experiment"
-    f"\nevery member-year pooled; shared bins per panel; densities, not counts",
-    fontsize=10.5, y=1.10)
-legend = figure.legend(handles=legend_entries, frameon=False, ncols=3,
-                       loc="lower center", bbox_to_anchor=(0.5, 1.005))
-
-os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
-for path in (OUT, os.path.splitext(OUT)[0] + ".pdf"):
-    figure.savefig(path, bbox_inches="tight", bbox_extra_artists=[legend])
-    print(f"[step 6] wrote {path}")
-
-# =============================================================================
-#  STEP 7 — the same numbers as a LaTeX table
+#  STEP 6 — the same numbers as a LaTeX table
 # =============================================================================
 # Plain LaTeX with borders: \toprule and \cmidrule need \usepackage{booktabs},
 # and without it \cmidrule silently typesets "(lr)2-3" into the table.
@@ -307,4 +316,4 @@ with open(TABLE, "w") as handle:
         f"% generates too little variability.\n"
         f"% Generated by scripts/make_fig3.py — do not edit by hand.\n")
     handle.write(table_tex + "\n")
-print(f"[step 7] wrote {TABLE}")
+print(f"[step 6] wrote {TABLE}")
