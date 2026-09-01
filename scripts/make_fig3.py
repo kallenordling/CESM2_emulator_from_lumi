@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
- FIGURE 3 — distribution of global means over each experiment's last 20 years
+ FIGURES 3 AND 4 — distributions of global means, last 20 years
 ================================================================================
 
 Run it with no arguments:
@@ -15,7 +15,8 @@ made. Same shape as make_fig1.py and make_fig2.py.
 
 WHAT THE FIGURE SHOWS
 ---------------------
-TWO figures, one per variable, each a 2x2 grid of the four experiments. Each
+TWO figures — fig03 for temperature, fig04 for precipitation — each a 2x2
+grid of the four experiments. Each
 histogram pools EVERY member-year
 of the last 20 years — 25 members x 20 years = 500 values for the emulator, and
 6 to 11 members x 20 years for CESM2 — and asks whether the two samples are
@@ -60,13 +61,15 @@ EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_absolute"
 # members only, already in the emulator's units.
 REFERENCE_DIR = "/home/nordling/mnt/lumi_sc/emulator_data/cesm2_reference"
 
-# One figure per variable, each a 2x2 grid of experiments. {var} is filled in
-# with TREFHT or PRECT, so temperature and precipitation can be placed
-# separately in the paper rather than as one eight-panel block.
-OUT = "plots/fig3_{var}.png"           # the .pdf sibling is written alongside
+# One figure per variable, each a 2x2 grid of experiments, so temperature and
+# precipitation can be placed separately in the paper rather than as one
+# eight-panel block. They are the paper's figures 3 and 4.
+FIGURE_NAME = {"TREFHT": "fig03", "PRECT": "fig04"}
 
-# LaTeX table of the distribution statistics, for \input into the paper.
-TABLE = "plots/fig3_distributions.tex"
+OUT = "plots/{name}.png"               # the .pdf sibling is written alongside
+
+# LaTeX table of the statistics, one per figure so each can sit beside it.
+TABLE = "plots/{name}_stats.tex"
 
 # How many years at the END of each experiment go into the histogram.
 N_YEARS = 20
@@ -264,7 +267,7 @@ for variable in VARIABLES:
     legend = figure.legend(handles=legend_entries, frameon=False, ncols=3,
                            loc="lower center", bbox_to_anchor=(0.5, 1.005))
 
-    out_png = OUT.format(var=variable)
+    out_png = OUT.format(name=FIGURE_NAME[variable])
     os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
     for path in (out_png, os.path.splitext(out_png)[0] + ".pdf"):
         # The legend sits OUTSIDE the axes, so it has to be named here; a
@@ -340,50 +343,53 @@ def format_p(value):
     return "$<$0.001" if value < 0.001 else f"{value:.3f}"
 
 
-table_rows = []
 for variable in VARIABLES:
+    variable_label, _, unit_table = VARIABLES[variable]
+
+    table_rows = []
     for scenario in SCENARIOS:
         row = statistics[(variable, scenario)]
         test = tests[(variable, scenario)]
         table_rows.append(
-            f"{VARIABLES[variable][0]} & {SCENARIOS[scenario][0]} & "
+            f"{SCENARIOS[scenario][0]} & "
             f"{row['mean_difference']:+.3f} & {format_p(test['mean_p'])} & "
             f"{'no' if test['mean_p'] < 0.05 else 'yes'} & "
             f"{row['sd_ratio']:.2f} & {format_p(test['ks_p'])} & "
             f"{'no' if test['ks_p'] < 0.05 else 'yes'} \\\\")
 
-table_tex = "\n".join([
-    r"\begin{tabular}{|l|l|r|r|c|r|r|c|}",
-    r"\hline",
-    r"\textbf{Variable} & \textbf{Experiment} & "
-    r"\multicolumn{3}{c|}{\textbf{Mean}} & "
-    r"\multicolumn{3}{c|}{\textbf{Distribution}} \\",
-    r"\cline{3-8}",
-    r" & & Difference & $p$ & Same? & SD ratio & $p$ & Same? \\",
-    r"\hline",
-    *table_rows,
-    r"\hline",
-    r"\end{tabular}",
-])
+    table_tex = "\n".join([
+        r"\begin{tabular}{|l|r|r|c|r|r|c|}",
+        r"\hline",
+        r"\textbf{Experiment} & \multicolumn{3}{c|}{\textbf{Mean}} & "
+        r"\multicolumn{3}{c|}{\textbf{Distribution}} \\",
+        r"\cline{2-7}",
+        r" & Difference (%s) & $p$ & Same? & SD ratio & $p$ & Same? \\" % unit_table,
+        r"\hline",
+        *table_rows,
+        r"\hline",
+        r"\end{tabular}",
+    ])
 
-os.makedirs(os.path.dirname(TABLE) or ".", exist_ok=True)
-with open(TABLE, "w") as handle:
-    handle.write(
-        f"% Global-mean distributions over the last {N_YEARS} years of each\n"
-        f"% experiment. Units: degC for temperature, mm/day for precipitation.\n"
-        f"%\n"
-        f"% MEAN columns: emulator minus CESM2, and Welch's t-test on the MEMBER\n"
-        f"%   MEANS (25 emulator members against 6-11 CESM2 members). Members are\n"
-        f"%   independent realizations, so these are independent samples.\n"
-        f"%\n"
-        f"% DISTRIBUTION columns: the ratio of standard deviations, and a\n"
-        f"%   two-sample Kolmogorov-Smirnov test on values with each side's own\n"
-        f"%   ensemble-mean trajectory removed — i.e. on internal variability,\n"
-        f"%   with the shared forced trend taken out. That removal is what makes\n"
-        f"%   the samples independent enough to test: on the raw pooled\n"
-        f"%   member-years the lag-1 autocorrelation is 0.56-0.93 and any test\n"
-        f"%   assuming independence is meaningless.\n"
-        f"%\n"
-        f"% 'Same?' is p > 0.05. Generated by scripts/make_fig3.py — do not edit.\n")
-    handle.write(table_tex + "\n")
-print(f"[step 7] wrote {TABLE}")
+    table_path = TABLE.format(name=FIGURE_NAME[variable])
+    os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
+    with open(table_path, "w") as handle:
+        handle.write(
+            f"% {variable_label}: global-mean statistics over the last {N_YEARS}\n"
+            f"% years of each experiment. Differences are emulator minus CESM2,\n"
+            f"% in {unit_table}.\n"
+            f"%\n"
+            f"% MEAN columns: Welch's t-test on the MEMBER MEANS (25 emulator\n"
+            f"%   members against 6-11 CESM2 members). Members are independent\n"
+            f"%   realizations, so these are independent samples.\n"
+            f"%\n"
+            f"% DISTRIBUTION columns: ratio of standard deviations, and a\n"
+            f"%   two-sample Kolmogorov-Smirnov test on values with each side's\n"
+            f"%   own ensemble-mean trajectory removed — i.e. on internal\n"
+            f"%   variability, with the shared forced trend taken out. That\n"
+            f"%   removal is what makes the samples independent enough to test:\n"
+            f"%   on the raw pooled member-years the lag-1 autocorrelation is\n"
+            f"%   0.56-0.93 and any test assuming independence is meaningless.\n"
+            f"%\n"
+            f"% 'Same?' is p > 0.05. Generated by scripts/make_fig3.py.\n")
+        handle.write(table_tex + "\n")
+    print(f"[step 7] wrote {table_path}")
