@@ -54,6 +54,13 @@ FIGURE_NAME = {"TREFHT": "fig05", "PRECT": "fig06"}
 
 OUT = "plots/{name}.png"               # the .pdf sibling is written alongside
 
+# Cap the emulator at the CESM2 member count, per experiment. The eval has 25
+# members and CESM2 has 6-11, so leaving them unequal means the two ensemble
+# means are converged to different degrees and the tests compare samples of very
+# different size. Matching makes every comparison n against n. Selection is the
+# first N members — deterministic, never random.
+MATCH_MEMBER_COUNTS = True
+
 # How many years at the END of each experiment to show.
 N_YEARS = 30
 
@@ -125,6 +132,22 @@ for variable in VARIABLES:
         print(f"[step 2] {variable:6s} {scenario:7s} CESM2    "
               f"{global_mean.sizes['member']:2d} members, "
               f"{global_mean['year'].values[0]}-{global_mean['year'].values[-1]}")
+
+# =============================================================================
+#  STEP 2b — same n on both sides
+# =============================================================================
+# The cap for each experiment is CESM2's own member count, so this waits until
+# both sides are read. Truncating rather than subsampling keeps it reproducible.
+
+if MATCH_MEMBER_COUNTS:
+    for variable in VARIABLES:
+        for scenario in SCENARIOS:
+            years, values = emulator[(variable, scenario)]
+            n_cesm = cesm[(variable, scenario)][1].shape[0]
+            if values.shape[0] > n_cesm:
+                emulator[(variable, scenario)] = (years, values[:n_cesm])
+                print(f"[step 2b] {variable:6s} {scenario:7s} emulator "
+                      f"{values.shape[0]} -> {n_cesm} members")
 
 # =============================================================================
 #  STEP 3 — the offset, and the spread it hides inside
