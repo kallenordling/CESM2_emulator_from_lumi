@@ -704,6 +704,7 @@ class UNetModel3D(nn.Module):
             year_cond=False,
             cond_map=True,
             cond_channels=0,
+            cond_mode="film",
     ):
         super().__init__()
 
@@ -711,6 +712,29 @@ class UNetModel3D(nn.Module):
         self.year_cond = year_cond
         self.day_cond = day_cond
         self.cond_channels = cond_channels
+
+        # HOW THE CONDITIONING REACHES THE NETWORK.
+        #
+        #   "film"   (default, the architecture every published run used)
+        #            Both paths: the cond map is added to the input AND a
+        #            SpatialCondEncoder feeds per-pixel FiLM into both ResnetBlocks
+        #            at every down level, the bottleneck and every up level.
+        #
+        #   "direct" Input injection ONLY. The cond map is projected once and
+        #            added to x before the first convolution; no encoder, no FiLM,
+        #            no modulation anywhere inside the UNet.
+        #
+        # The comparison this exists to make: FiLM lets the conditioning
+        # multiply activations at every scale, so the network learns a joint,
+        # entangled function of (CO2, SUL, BC) — powerful in-distribution, but
+        # with no structure guaranteeing sensible behaviour on forcing
+        # COMBINATIONS it never saw. Direct injection is additive and enters at
+        # one place, which is a far weaker hypothesis class and might therefore
+        # extrapolate more predictably to scenarios like ssp126 and ssp245.
+        # Whether that trade is worth it is the experiment.
+        if cond_mode not in ("film", "direct"):
+            raise ValueError(f"cond_mode must be 'film' or 'direct', got {cond_mode!r}")
+        self.cond_mode = cond_mode
 
         # Input and output size to the model will be how many variables we are predicting
         # in_channels = n_vars
@@ -791,7 +815,7 @@ class UNetModel3D(nn.Module):
         # Per-pixel FiLM is injected into both ResnetBlocks at every UNet level
         # via zero-initialised 1x1x1 projection convs so the model starts as the
         # unconditioned baseline and learns conditioning gradually.
-        if cond_channels > 0:
+        if cond_channels > 0 and cond_mode == "film":
             self.spatial_cond_encoder = SpatialCondEncoder(
                 cond_channels=cond_channels,
                 dims=dims,
@@ -852,6 +876,32 @@ class UNetModel3D(nn.Module):
             self.cond_encoder = None
             self.cond_scale   = None
             self.cond_shift   = None
+
+        elif cond_channels > 0 and cond_mode == "direct":
+            # DIRECT-ONLY: the single additive path, and nothing else.
+            #
+            # Same projection the "film" mode also builds, with the same
+            # Kaiming/zero init — so the two architectures start identically on
+            # this path and differ ONLY by the presence of the FiLM machinery.
+            # NOT zero-initialised: with no FiLM to carry the conditioning,
+            # a zero-init here would leave the model unconditioned with no
+            # gradient toward the cond map at all.
+            self.spatial_cond_encoder = None
+            self.cond_input_proj = LonCircularConv3d(
+                cond_channels, in_channels, (1, 3, 3), padding=(0, 1, 1))
+            nn.init.kaiming_normal_(self.cond_input_proj.conv.weight, a=0.01)
+            nn.init.zeros_(self.cond_input_proj.conv.bias)
+
+            self.cond_down_projs        = None
+            self.cond_down_block1_projs = None
+            self.cond_up_projs          = None
+            self.cond_up_block1_projs   = None
+            self.cond_mid_proj          = None
+            self.cond_mid_block1_proj   = None
+            self.cond_encoder           = None
+            self.cond_scale             = None
+            self.cond_shift             = None
+
         else:
             self.spatial_cond_encoder   = None
             self.cond_input_proj        = None   # no direct injection without cond
@@ -1024,8 +1074,12 @@ class UNetModel3D(nn.Module):
         # drop rate and, critically, would zero rows to 0.0 instead of -1.0,
         # teaching the model a wrong null conditioning value.
         NULL_COND_VALUE = -1.0
-        cond_spatial_feats = None
-        if self.spatial_cond_encoder is not None:
+        # Build the conditioning input ONCE, for whichever paths exist. Both the
+        # direct projection and the FiLM encoder consume it, and in "direct" mode
+        # there is no encoder — so this cannot live inside the encoder branch.
+        cond_map_input = None
+        if self.cond_channels > 0 and (self.cond_input_proj is not None
+                                       or self.spatial_cond_encoder is not None):
             if exists(cond_map):
                 cond_map_input = cond_map
             else:
@@ -1037,6 +1091,9 @@ class UNetModel3D(nn.Module):
                     NULL_COND_VALUE,
                     device=x.device, dtype=x.dtype,
                 )
+
+        cond_spatial_feats = None
+        if self.spatial_cond_encoder is not None:
             cond_spatial_feats = self.spatial_cond_encoder(cond_map_input)
 
         if exists(lowres_cond):
@@ -1046,7 +1103,9 @@ class UNetModel3D(nn.Module):
         # Projects cond_map into input space and adds it to x before input_conv.
         # This gives an immediate, zero-lag gradient path from loss → cond_map,
         # active from step 1 regardless of the FiLM projection warm-up.
-        if self.cond_input_proj is not None and self.spatial_cond_encoder is not None:
+        # (Gated on the projection alone: in "direct" mode there is no encoder,
+        # and requiring one here would silently disable the only cond path.)
+        if self.cond_input_proj is not None and cond_map_input is not None:
             x = x + self.cond_input_proj(cond_map_input)
 
         # Send x through first convolution and temporal operation
