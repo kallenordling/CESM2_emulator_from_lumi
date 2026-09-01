@@ -71,6 +71,13 @@ OUT = "plots/{name}.png"               # the .pdf sibling is written alongside
 # LaTeX table of the statistics, one per figure so each can sit beside it.
 TABLE = "plots/{name}_stats.tex"
 
+# Cap the emulator at the CESM2 member count, per experiment. The eval has 25
+# members and CESM2 has 6-11, so leaving them unequal means the two ensemble
+# means are converged to different degrees and the tests compare samples of very
+# different size. Matching makes every comparison n against n. Selection is the
+# first N members — deterministic, never random.
+MATCH_MEMBER_COUNTS = True
+
 # How many years at the END of each experiment go into the histogram.
 N_YEARS = 20
 
@@ -158,6 +165,23 @@ for variable in VARIABLES:
         print(f"[step 2] {variable:6s} {scenario:7s} CESM2:    "
               f"{member_count:2d} members x {len(years)} years "
               f"({years[0]}-{years[-1]}) = {cesm[(variable, scenario)].size} values")
+
+# =============================================================================
+#  STEP 2b — same n on both sides
+# =============================================================================
+# Done after both are read, because the cap for each experiment is CESM2's own
+# member count. Truncating rather than subsampling keeps the run reproducible.
+
+if MATCH_MEMBER_COUNTS:
+    for variable in VARIABLES:
+        for scenario in SCENARIOS:
+            n_cesm = cesm_by_member[(variable, scenario)].shape[0]
+            series = emulator_by_member[(variable, scenario)]
+            if series.shape[0] > n_cesm:
+                emulator_by_member[(variable, scenario)] = series[:n_cesm]
+                emulator[(variable, scenario)] = series[:n_cesm].ravel()
+                print(f"[step 2b] {variable:6s} {scenario:7s} emulator "
+                      f"{series.shape[0]} -> {n_cesm} members")
 
 # =============================================================================
 #  STEP 3 — describe each distribution
