@@ -243,7 +243,7 @@ for variable in VARIABLES:
             axis.set_ylabel("Probability density")
 
     # =========================================================================
-    #  STEP 5 — legend and title, then save
+    #  STEP 5 — legend, then save
     # =========================================================================
     # tight_layout FIRST, so the title and legend are placed relative to the
     # settled axes; the other way round lets tight_layout move the axes out from
@@ -254,23 +254,17 @@ for variable in VARIABLES:
         Line2D([], [], color="0.35", lw=1.4, ls="--", label="distribution mean"),
     ]
     figure.tight_layout()
-    # The legend sits just above the axes and the title above THAT. The title
-    # runs to two lines, so it needs clearance for both of them or its second
-    # line lands on the legend.
+    # No figure title: the paper's caption says what the figure is, and a
+    # heading repeating it wastes the space above the panels.
     legend = figure.legend(handles=legend_entries, frameon=False, ncols=3,
                            loc="lower center", bbox_to_anchor=(0.5, 1.005))
-    title = figure.suptitle(
-        f"{variable_label}: global-mean distributions over the last {N_YEARS} "
-        f"years\nevery member-year pooled; shared bins per panel; densities, "
-        f"not counts", fontsize=10.5, y=1.135)
 
     out_png = OUT.format(var=variable)
     os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
     for path in (out_png, os.path.splitext(out_png)[0] + ".pdf"):
-        # Both the legend and the title sit OUTSIDE the axes, so both have to
-        # be named here; a tight bbox crops whatever it is not told about.
-        figure.savefig(path, bbox_inches="tight",
-                       bbox_extra_artists=[legend, title])
+        # The legend sits OUTSIDE the axes, so it has to be named here; a
+        # tight bbox crops whatever it is not told about.
+        figure.savefig(path, bbox_inches="tight", bbox_extra_artists=[legend])
         print(f"[step 5] wrote {path}")
     plt.close(figure)
 
