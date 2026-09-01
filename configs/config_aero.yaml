@@ -19,6 +19,16 @@ model:
     in_channels: 2        # was 1 — (TREFHT, PRECT) joint-denoised target
     out_channels: 2       # was 1
     cond_channels: 3      # was 2 — (CO2, SUL, BC)
+    # How the conditioning reaches the network. "film" is the architecture every
+    # published run used: the cond map is added to the input AND drives per-pixel
+    # FiLM at every UNet level. "direct" keeps only the additive input path — see
+    # run_directcond.sh and models/video_net.py.
+    #
+    # It is listed here, not just in the A/B config, because Hydra runs in struct
+    # mode: an override for a key the config does not define is an error, not an
+    # addition. Without this line `model.cond_mode=direct` fails with
+    # "Key 'cond_mode' is not in struct".
+    cond_mode: film
     dim_mults: [1, 2, 3, 4]
     resnet_groups: 8
     attn_dim_head: 32
