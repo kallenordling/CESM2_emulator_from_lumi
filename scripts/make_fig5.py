@@ -30,6 +30,11 @@ Two things are drawn per panel, and the contrast between them is the point:
     the offset and why the timeseries figures 1 and 2 show the bias comfortably
     inside their spread band.
 
+  * DOTTED EDGES — the emulator's own member range, for comparison with that
+    band. Equal widths mean the emulator generates the right amount of internal
+    variability even where its mean is offset; unequal widths are visible here
+    as well as in the standard-deviation ratios of figures 3 and 4.
+
 The horizontal dashed lines are each side's mean over the whole window. Their
 separation is the offset with the year-to-year wiggle removed.
 
@@ -190,6 +195,16 @@ for variable in VARIABLES:
         axis.fill_between(cesm_years, cesm_values.min(axis=0), cesm_values.max(axis=0),
                           color=CESM_COLOUR, alpha=0.18, lw=0, zorder=1)
 
+        # The emulator's own member range, drawn as EDGES rather than a second
+        # fill: two overlapping translucent bands in different colours turn to
+        # mud where they cross, and they cross almost everywhere here. The edges
+        # let the two envelopes be compared directly — which matters because the
+        # emulator's precipitation spread is 1.09-1.27x CESM2's (fig04), so the
+        # bands are not the same width and the figure should show that.
+        for edge in (emulator_values.min(axis=0), emulator_values.max(axis=0)):
+            axis.plot(emulator_years, edge, color=EMULATOR_COLOUR, lw=0.9,
+                      ls=":", alpha=0.75, zorder=2)
+
         # The two ensemble means. The gap between these IS the offset.
         axis.plot(cesm_years, cesm_values.mean(axis=0), color=CESM_COLOUR,
                   lw=2.2, zorder=4, label="CESM2")
@@ -217,10 +232,12 @@ for variable in VARIABLES:
         Line2D([], [], color=CESM_COLOUR, lw=2.2, label="CESM2 ensemble mean"),
         Line2D([], [], color=EMULATOR_COLOUR, lw=2.2, label="Emulator ensemble mean"),
         Patch(facecolor=CESM_COLOUR, alpha=0.18, label="CESM2 member range"),
+        Line2D([], [], color=EMULATOR_COLOUR, lw=0.9, ls=":",
+               label="Emulator member range"),
         Line2D([], [], color="0.35", lw=1.1, ls="--", label=f"{N_YEARS}-year mean"),
     ]
     figure.tight_layout()
-    legend = figure.legend(handles=legend_entries, frameon=False, ncols=4,
+    legend = figure.legend(handles=legend_entries, frameon=False, ncols=3,
                            loc="lower center", bbox_to_anchor=(0.5, 1.005))
 
     out_png = OUT.format(name=FIGURE_NAME[variable])
