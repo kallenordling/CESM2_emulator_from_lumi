@@ -78,8 +78,17 @@ TABLE = "plots/{name}_stats.tex"
 # first N members — deterministic, never random.
 MATCH_MEMBER_COUNTS = True
 
-# How many years at the END of each experiment go into the histogram.
-N_YEARS = 20
+# How many years at the END of each experiment go into the statistics.
+# 0 = every year of the record.
+#
+# READ THE SD RATIO DIFFERENTLY DEPENDING ON THIS. Over a short window the
+# spread is mostly internal variability. Over the FULL record it is dominated by
+# the forced trend — hist spans 165 years and about 1 degC of warming — so the
+# raw standard deviations below measure "how much does the climate move over the
+# record", not "how noisy is it". The KS test is unaffected: it runs on residuals
+# with each side's ensemble-mean trajectory removed, which subtracts the trend
+# whatever the window length.
+N_YEARS = 0
 
 # Variables, with the unit shown on the axis and in the table.
 VARIABLES = {"TREFHT": ("Temperature", "$^{\\circ}$C", "degC"),
@@ -127,7 +136,9 @@ for variable in VARIABLES:
     for scenario in SCENARIOS:
         path = f"{EVAL_DIR}/{variable}_{scenario}.nc"
         dataset = xr.open_dataset(path)
-        field = dataset[f"{variable}_model"].isel(year=slice(-N_YEARS, None))
+        field = dataset[f"{variable}_model"]
+        if N_YEARS:
+            field = field.isel(year=slice(-N_YEARS, None))
         weights = np.cos(np.deg2rad(field["lat"]))
         global_mean = field.weighted(weights).mean(("lat", "lon")).compute()
         years = global_mean["year"].values
@@ -154,7 +165,9 @@ for variable in VARIABLES:
     for scenario in SCENARIOS:
         path = f"{REFERENCE_DIR}/{variable}_{scenario}.nc"
         dataset = xr.open_dataset(path)
-        field = dataset[f"{variable}_cesm"].isel(year=slice(-N_YEARS, None))
+        field = dataset[f"{variable}_cesm"]
+        if N_YEARS:
+            field = field.isel(year=slice(-N_YEARS, None))
         weights = np.cos(np.deg2rad(field["lat"]))
         global_mean = field.weighted(weights).mean(("lat", "lon")).compute()
         years = global_mean["year"].values
@@ -398,8 +411,9 @@ for variable in VARIABLES:
     os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
     with open(table_path, "w") as handle:
         handle.write(
-            f"% {variable_label}: global-mean statistics over the last {N_YEARS}\n"
-            f"% years of each experiment. Differences are emulator minus CESM2,\n"
+            f"% {variable_label}: global-mean statistics over "
+            f"{('the last %d years' % N_YEARS) if N_YEARS else 'the FULL record'}\n"
+            f"% of each experiment. Differences are emulator minus CESM2,\n"
             f"% in {unit_table}.\n"
             f"%\n"
             f"% MEAN columns: Welch's t-test on the MEMBER MEANS (25 emulator\n"
