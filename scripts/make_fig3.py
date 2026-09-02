@@ -104,7 +104,7 @@ BASELINE = (1850, 1900)
 # record", not "how noisy is it". The KS test is unaffected: it runs on residuals
 # with each side's ensemble-mean trajectory removed, which subtracts the trend
 # whatever the window length.
-N_YEARS = 30
+N_YEARS = 20
 
 # Variables, with the unit shown on the axis and in the table.
 VARIABLES = {"TREFHT": ("Temperature", "$^{\\circ}$C", "degC"),
