@@ -38,8 +38,15 @@ Two things are drawn per panel, and the contrast between them is the point:
 The horizontal dashed lines are each side's mean over the whole window. Their
 separation is the offset with the year-to-year wiggle removed.
 
-ABSOLUTE VALUES, NOT ANOMALIES. An anomaly plot subtracts each side's own
-baseline and so removes the very thing being shown.
+ANOMALIES, each side referenced to its own 1850-1900 mean (ANOMALY in the
+settings). That is deliberate and it CHANGES WHAT THE FIGURE SHOWS: referencing
+each side to its own baseline removes the mean-state offset, so what is left is
+the difference in WARMING. The emulator's pre-industrial is about 0.12 degC
+cooler than CESM2's, and in anomaly space that difference is gone before the
+comparison starts.
+
+Set ANOMALY = False to see the absolute climates instead, which is what
+demonstrates the offset.
 """
 
 # =============================================================================
@@ -65,6 +72,15 @@ OUT = "plots/{name}.png"               # the .pdf sibling is written alongside
 # different size. Matching makes every comparison n against n. Selection is the
 # first N members — deterministic, never random.
 MATCH_MEMBER_COUNTS = True
+
+# ── ABSOLUTE VALUES OR ANOMALIES ─────────────────────────────────────────────
+# True: every series has its OWN side's 1850-1900 mean subtracted, matching
+# figures 1-4. The panels then compare WARMING rather than absolute climate, and
+# the mean-state offset is removed before the comparison instead of being what
+# the comparison shows. ssp370 has no pre-industrial of its own and inherits
+# hist's baseline, the same convention on both sides.
+ANOMALY = True
+BASELINE = (1850, 1900)
 
 # How many years at the END of each experiment to show.
 N_YEARS = 30
@@ -155,6 +171,46 @@ if MATCH_MEMBER_COUNTS:
                       f"{values.shape[0]} -> {n_cesm} members")
 
 # =============================================================================
+#  STEP 2c — anomalies, each side referenced to its own pre-industrial
+# =============================================================================
+# The baseline window lies outside the plotted range, so it is taken from the
+# FULL record, read again here rather than from the truncated arrays above.
+
+if ANOMALY:
+    baselines = {}
+    for variable in VARIABLES:
+        for scenario in SCENARIOS:
+            for side, directory, field_name in (
+                    ("emulator", EVAL_DIR, f"{variable}_model"),
+                    ("cesm", REFERENCE_DIR, f"{variable}_cesm")):
+                dataset = xr.open_dataset(f"{directory}/{variable}_{scenario}.nc")
+                field = dataset[field_name]
+                window = ((field["year"] >= BASELINE[0])
+                          & (field["year"] <= BASELINE[1]))
+                if bool(window.any()):
+                    weights = np.cos(np.deg2rad(field["lat"]))
+                    baselines[(side, variable, scenario)] = float(
+                        field.isel(year=window.values)
+                             .weighted(weights).mean(("lat", "lon")).mean())
+                else:
+                    baselines[(side, variable, scenario)] = np.nan
+                dataset.close()
+            # ssp370 begins in 2015: it inherits the historical baseline.
+            for side in ("emulator", "cesm"):
+                if not np.isfinite(baselines[(side, variable, scenario)]):
+                    baselines[(side, variable, scenario)] = \
+                        baselines[(side, variable, "hist")]
+            years, values = emulator[(variable, scenario)]
+            emulator[(variable, scenario)] = (
+                years, values - baselines[("emulator", variable, scenario)])
+            years, values = cesm[(variable, scenario)]
+            cesm[(variable, scenario)] = (
+                years, values - baselines[("cesm", variable, scenario)])
+            print(f"[step 2c] {variable:6s} {scenario:7s} baselines "
+                  f"emulator {baselines[('emulator', variable, scenario)]:8.3f}, "
+                  f"CESM2 {baselines[('cesm', variable, scenario)]:8.3f}")
+
+# =============================================================================
 #  STEP 3 — the offset, and the spread it hides inside
 # =============================================================================
 # Two numbers per panel. The offset is what the figure demonstrates; the ratio
@@ -226,7 +282,8 @@ for variable in VARIABLES:
         if panel_index // 2 == 1:
             axis.set_xlabel("Year")
         if panel_index % 2 == 0:
-            axis.set_ylabel(f"{variable_label} ({unit_axis})")
+            axis.set_ylabel(f"{variable_label} anomaly ({unit_axis})"
+                            if ANOMALY else f"{variable_label} ({unit_axis})")
 
     legend_entries = [
         Line2D([], [], color=CESM_COLOUR, lw=2.2, label="CESM2 ensemble mean"),

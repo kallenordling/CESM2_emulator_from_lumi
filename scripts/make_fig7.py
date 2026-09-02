@@ -59,6 +59,14 @@ MATCH_MEMBER_COUNTS = True
 # Significance level for the per-year test.
 ALPHA = 0.05
 
+# ── ABSOLUTE VALUES OR ANOMALIES ─────────────────────────────────────────────
+# True: every series has its OWN side's 1850-1900 mean subtracted, matching
+# figures 1-6. The comparison is then between WARMING trajectories rather than
+# absolute ones, and the mean-state offset is removed before the running mean is
+# taken. ssp370 has no pre-industrial of its own and inherits hist's baseline.
+ANOMALY = True
+BASELINE = (1850, 1900)
+
 VARIABLES = {"TREFHT": ("Temperature", "$^{\\circ}$C", "degC"),
              "PRECT":  ("Precipitation", "mm day$^{-1}$", "mm/day")}
 
@@ -122,6 +130,33 @@ if MATCH_MEMBER_COUNTS:
                                                             emulator_values[:n_cesm])
                 print(f"[step 2] {variable:6s} {scenario:7s} emulator "
                       f"{emulator_values.shape[0]} -> {n_cesm} members")
+
+# =============================================================================
+#  STEP 2b — anomalies, each side referenced to its own pre-industrial
+# =============================================================================
+# Before smoothing, so the running mean is taken of the anomaly rather than the
+# anomaly of a running mean; the two are equal for a constant baseline, but
+# doing it in this order keeps the intent obvious.
+
+if ANOMALY:
+    for variable in VARIABLES:
+        baseline = {}
+        for side in ("emulator", "cesm"):
+            years, values = series[(side, variable, "hist")]
+            window = (years >= BASELINE[0]) & (years <= BASELINE[1])
+            baseline[(side, "hist")] = float(values[:, window].mean())
+        for scenario in SCENARIOS:
+            for side in ("emulator", "cesm"):
+                years, values = series[(side, variable, scenario)]
+                window = (years >= BASELINE[0]) & (years <= BASELINE[1])
+                # ssp370 begins in 2015 and inherits the historical baseline.
+                base = (float(values[:, window].mean()) if window.any()
+                        else baseline[(side, "hist")])
+                series[(side, variable, scenario)] = (years, values - base)
+                baseline[(side, scenario)] = base
+            print(f"[step 2b] {variable:6s} {scenario:7s} baselines "
+                  f"emulator {baseline[('emulator', scenario)]:8.3f}, "
+                  f"CESM2 {baseline[('cesm', scenario)]:8.3f}")
 
 # =============================================================================
 #  STEP 3 — running mean, per member
@@ -228,7 +263,8 @@ for variable in VARIABLES:
         if panel_index // 2 == 1:
             axis.set_xlabel("Year")
         if panel_index % 2 == 0:
-            axis.set_ylabel(f"{variable_label} ({unit_axis})")
+            axis.set_ylabel(f"{variable_label} anomaly ({unit_axis})"
+                            if ANOMALY else f"{variable_label} ({unit_axis})")
 
     legend_entries = [
         Line2D([], [], color=CESM_COLOUR, lw=2.2, label="CESM2 ensemble mean"),
