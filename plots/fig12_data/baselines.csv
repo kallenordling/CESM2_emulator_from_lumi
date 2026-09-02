@@ -1,0 +1,17 @@
+variable,scenario,side,baseline
+TREFHT,hist,emulator,13.98675
+TREFHT,hist,cesm2,14.104152
+TREFHT,ssp370,emulator,13.98675
+TREFHT,ssp370,cesm2,14.104152
+TREFHT,aaer,emulator,13.903866
+TREFHT,aaer,cesm2,14.032642
+TREFHT,ghg,emulator,14.026456
+TREFHT,ghg,cesm2,14.119903
+PRECT,hist,emulator,2.933605
+PRECT,hist,cesm2,2.945912
+PRECT,ssp370,emulator,2.933605
+PRECT,ssp370,cesm2,2.945912
+PRECT,aaer,emulator,2.929853
+PRECT,aaer,cesm2,2.943026
+PRECT,ghg,emulator,2.935939
+PRECT,ghg,cesm2,2.947689

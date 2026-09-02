@@ -1,8 +1,8 @@
-% Precipitation: global-mean statistics over the FULL record
+% Precipitation: global-mean statistics over the last 30 years
 % of each experiment. Differences are emulator minus CESM2,
 % in mm/day.
 %
-% MEAN columns: Welch's t-test on the MEMBER MEANS (25 emulator
+% MEAN columns: Welch's t-test on the MEMBER MEANS (6-11 emulator
 %   members against 6-11 CESM2 members). Members are independent
 %   realizations, so these are independent samples.
 %
@@ -21,9 +21,9 @@
 \cline{2-7}
  & Difference (mm/day) & $p$ & Same? & SD ratio & $p$ & Same? \\
 \hline
-Historical & -0.013 & $<$0.001 & no & 1.16 & $<$0.001 & no \\
-SSP3-7.0 & -0.005 & $<$0.001 & no & 0.99 & 0.011 & no \\
-Aerosol-only (AAER) & -0.013 & $<$0.001 & no & 0.98 & $<$0.001 & no \\
-Greenhouse-gas-only (GHG) & -0.013 & $<$0.001 & no & 0.98 & $<$0.001 & no \\
+Historical & +0.005 & 0.003 & no & 1.06 & 0.518 & yes \\
+SSP3-7.0 & +0.005 & $<$0.001 & no & 1.02 & 0.012 & no \\
+Aerosol-only (AAER) & +0.009 & $<$0.001 & no & 1.23 & 0.220 & yes \\
+Greenhouse-gas-only (GHG) & -0.008 & 0.003 & no & 1.24 & 0.026 & no \\
 \hline
 \end{tabular}

@@ -18,9 +18,10 @@ WHAT THE FIGURE SHOWS
 TWO figures — fig03 for temperature, fig04 for precipitation — each a 2x2
 grid of the four experiments. Each
 histogram pools EVERY member-year
-of the last 20 years — 25 members x 20 years = 500 values for the emulator, and
-6 to 11 members x 20 years for CESM2 — and asks whether the two samples are
-drawn from the same distribution.
+of the window N_YEARS selects — members x years values per side — and asks
+whether the two samples are drawn from the same distribution. With
+MATCH_MEMBER_COUNTS the two sides carry the same number of members, so the
+sample sizes differ only if the records differ in length.
 
 WHY POOL MEMBER-YEARS
 ---------------------
@@ -78,6 +79,21 @@ TABLE = "plots/{name}_stats.tex"
 # first N members — deterministic, never random.
 MATCH_MEMBER_COUNTS = True
 
+# ── ABSOLUTE VALUES OR ANOMALIES ─────────────────────────────────────────────
+# True  : every series has its OWN side's 1850-1900 mean subtracted, the
+#         convention figures 1 and 2 use. The question becomes "does the
+#         emulator WARM by the same amount", and a difference in mean state is
+#         removed before the comparison rather than measured by it.
+# False : absolute values. The question is "is the emulator's climate the same",
+#         and any offset in mean state is part of the answer.
+#
+# THIS IS NOT A COSMETIC CHOICE FOR THE MEAN TEST. Referencing each side to its
+# own baseline subtracts most of the very offset the mean test exists to detect,
+# so the differences shrink and some stop being significant. The KS test and the
+# sd ratio are unaffected either way: both already remove a per-side constant.
+ANOMALY = True
+BASELINE = (1850, 1900)
+
 # How many years at the END of each experiment go into the statistics.
 # 0 = every year of the record.
 #
@@ -88,7 +104,7 @@ MATCH_MEMBER_COUNTS = True
 # record", not "how noisy is it". The KS test is unaffected: it runs on residuals
 # with each side's ensemble-mean trajectory removed, which subtracts the trend
 # whatever the window length.
-N_YEARS = 0
+N_YEARS = 30
 
 # Variables, with the unit shown on the axis and in the table.
 VARIABLES = {"TREFHT": ("Temperature", "$^{\\circ}$C", "degC"),
@@ -132,15 +148,23 @@ from scipy import stats
 
 emulator = {}            # (variable, scenario) -> 1-D array of member-years
 emulator_by_member = {}  # the same values, still shaped (member, year)
+baseline_of = {}         # (side, variable, scenario) -> 1850-1900 mean of the FULL record
 for variable in VARIABLES:
     for scenario in SCENARIOS:
         path = f"{EVAL_DIR}/{variable}_{scenario}.nc"
         dataset = xr.open_dataset(path)
         field = dataset[f"{variable}_model"]
-        if N_YEARS:
-            field = field.isel(year=slice(-N_YEARS, None))
         weights = np.cos(np.deg2rad(field["lat"]))
-        global_mean = field.weighted(weights).mean(("lat", "lon")).compute()
+        # The FULL series first: the 1850-1900 baseline window lies outside the
+        # last-N-years slice, so computing it after truncation gives NaN.
+        full_mean = field.weighted(weights).mean(("lat", "lon")).compute()
+        full_years = full_mean["year"].values
+        in_baseline = (full_years >= BASELINE[0]) & (full_years <= BASELINE[1])
+        baseline_of[("emulator", variable, scenario)] = (
+            float(full_mean.values[:, in_baseline].mean()) if in_baseline.any()
+            else np.nan)
+        global_mean = (full_mean.isel(year=slice(-N_YEARS, None)) if N_YEARS
+                       else full_mean)
         years = global_mean["year"].values
         # Flatten (member, year) into one sample: every member-year is one draw
         # from the model's climate over this window.
@@ -166,10 +190,17 @@ for variable in VARIABLES:
         path = f"{REFERENCE_DIR}/{variable}_{scenario}.nc"
         dataset = xr.open_dataset(path)
         field = dataset[f"{variable}_cesm"]
-        if N_YEARS:
-            field = field.isel(year=slice(-N_YEARS, None))
         weights = np.cos(np.deg2rad(field["lat"]))
-        global_mean = field.weighted(weights).mean(("lat", "lon")).compute()
+        # The FULL series first: the 1850-1900 baseline window lies outside the
+        # last-N-years slice, so computing it after truncation gives NaN.
+        full_mean = field.weighted(weights).mean(("lat", "lon")).compute()
+        full_years = full_mean["year"].values
+        in_baseline = (full_years >= BASELINE[0]) & (full_years <= BASELINE[1])
+        baseline_of[("cesm", variable, scenario)] = (
+            float(full_mean.values[:, in_baseline].mean()) if in_baseline.any()
+            else np.nan)
+        global_mean = (full_mean.isel(year=slice(-N_YEARS, None)) if N_YEARS
+                       else full_mean)
         years = global_mean["year"].values
         cesm[(variable, scenario)] = global_mean.values.ravel()
         cesm_by_member[(variable, scenario)] = global_mean.values      # (member, year)
@@ -195,6 +226,36 @@ if MATCH_MEMBER_COUNTS:
                 emulator[(variable, scenario)] = series[:n_cesm].ravel()
                 print(f"[step 2b] {variable:6s} {scenario:7s} emulator "
                       f"{series.shape[0]} -> {n_cesm} members")
+
+# =============================================================================
+#  STEP 2c — anomalies, each side referenced to its own pre-industrial
+# =============================================================================
+# hist, aaer and ghg all begin in 1850 and so carry their own baseline period.
+# ssp370 begins in 2015 and has none, so it inherits the historical baseline —
+# the SAME convention applied to both sides, which is what keeps them
+# comparable.
+
+if ANOMALY:
+    # ssp370 begins in 2015 and has no baseline period of its own; it inherits
+    # the historical one, the same convention applied to both sides.
+    for variable in VARIABLES:
+        for side in ("emulator", "cesm"):
+            if not np.isfinite(baseline_of[(side, variable, "ssp370")]):
+                baseline_of[(side, variable, "ssp370")] = baseline_of[(side, variable, "hist")]
+
+    for variable in VARIABLES:
+        for scenario in SCENARIOS:
+            e_base = baseline_of[("emulator", variable, scenario)]
+            c_base = baseline_of[("cesm", variable, scenario)]
+            emulator_by_member[(variable, scenario)] = (
+                emulator_by_member[(variable, scenario)] - e_base)
+            cesm_by_member[(variable, scenario)] = (
+                cesm_by_member[(variable, scenario)] - c_base)
+            emulator[(variable, scenario)] = emulator_by_member[(variable, scenario)].ravel()
+            cesm[(variable, scenario)] = cesm_by_member[(variable, scenario)].ravel()
+            print(f"[step 2c] {variable:6s} {scenario:7s} baselines "
+                  f"emulator {e_base:8.3f}, CESM2 {c_base:8.3f}"
+                  + ("   (inherited from hist)" if scenario == "ssp370" else ""))
 
 # =============================================================================
 #  STEP 3 — describe each distribution
@@ -240,7 +301,7 @@ for variable in VARIABLES:
 #
 # Both sides share one set of bin edges per panel, spanning the combined range:
 # with different edges the two shapes would not be comparable. density=True, not
-# counts — the emulator contributes 500 member-years against CESM2's 120 to 220,
+# counts — the two sides need not contribute the same number of member-years,
 # so raw counts would show the sample sizes rather than the distributions.
 
 EMULATOR_COLOUR = "#D55E00"
@@ -316,19 +377,19 @@ for variable in VARIABLES:
 # =============================================================================
 #  STEP 6 — are the means the same, and are the distributions the same?
 # =============================================================================
-# The obvious thing — a t-test and a KS test on the 500 vs 200 pooled
-# member-years — IS WRONG, and badly. Both assume independent samples, but
-# consecutive years inside one member are strongly correlated: over these
-# windows the lag-1 autocorrelation of the pooled values runs 0.56 to 0.93,
-# because every member carries the same forced trend across the 20 years. The
-# effective sample size is a small fraction of the nominal one, and the tests
-# return absurd confidence — p ~ 1e-26 for aaer, which no honest reading of 500
-# correlated points supports.
+# The obvious thing — a t-test and a KS test on the pooled member-years — IS
+# WRONG, and badly. Both assume independent samples, but consecutive years
+# inside one member are strongly correlated: over these windows the lag-1
+# autocorrelation of the pooled values runs 0.56 to 0.93, because every member
+# carries the same forced trend across the window. The effective sample size is
+# a small fraction of the nominal one, and the tests return absurd confidence —
+# p ~ 1e-26 for aaer, which no honest reading of a few hundred correlated
+# points supports.
 #
 # So each question gets a form of the data that satisfies its test:
 #
 # ARE THE MEANS THE SAME?  Welch's t-test on the MEMBER MEANS — one number per
-#   member, 25 against 6-11. Members are independent realizations, so these are
+#   member. Members are independent realizations, so these are
 #   genuinely independent units. Welch rather than Student because the two sides
 #   need not have equal variance.
 #
@@ -407,6 +468,13 @@ for variable in VARIABLES:
         r"\end{tabular}",
     ])
 
+    # Member counts actually used, so the caption cannot go stale.
+    counts = {}
+    for side, store in (("emulator", emulator_by_member), ("cesm2", cesm_by_member)):
+        sizes = sorted({store[(variable, s)].shape[0] for s in SCENARIOS})
+        counts[side] = (f"{sizes[0]}" if len(sizes) == 1
+                        else f"{sizes[0]}-{sizes[-1]}")
+
     table_path = TABLE.format(name=FIGURE_NAME[variable])
     os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
     with open(table_path, "w") as handle:
@@ -416,8 +484,10 @@ for variable in VARIABLES:
             f"% of each experiment. Differences are emulator minus CESM2,\n"
             f"% in {unit_table}.\n"
             f"%\n"
-            f"% MEAN columns: Welch's t-test on the MEMBER MEANS (25 emulator\n"
-            f"%   members against 6-11 CESM2 members). Members are independent\n"
+            f"% MEAN columns: Welch's t-test on the MEMBER MEANS "
+            f"({counts['emulator']} emulator\n"
+            f"%   members against {counts['cesm2']} CESM2 members). Members are "
+            f"independent\n"
             f"%   realizations, so these are independent samples.\n"
             f"%\n"
             f"% DISTRIBUTION columns: ratio of standard deviations, and a\n"
