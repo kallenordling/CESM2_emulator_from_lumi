@@ -65,8 +65,10 @@ the historical baseline on both sides.
 DATA_DIR = "plots/fig12_data"
 
 FIGURE_NAME = {"TREFHT": "fig03", "PRECT": "fig04"}
-OUT = "plots/{name}.png"                # the .pdf sibling is written alongside
-TABLE = "plots/{name}_stats.tex"
+# Each figure gets its OWN FOLDER, holding the figure and the LaTeX table of
+# its statistics: plots/fig03/{fig03.png, fig03.pdf, fig03_stats.tex}.
+OUT = "plots/{name}/{name}.png"          # the .pdf sibling is written alongside
+TABLE = "plots/{name}/{name}_stats.tex"
 
 # How many years at the END of each experiment go into the figure and the
 # statistics. 0 = every year of the record.
@@ -329,6 +331,14 @@ for variable in VARIABLES:
 # =============================================================================
 #  STEP 6 — the same numbers as a LaTeX table
 # =============================================================================
+# A COMPLETE `table` float — caption, label and tabular — so \\input drops it
+# straight into the paper with no wrapper. The label is \\label{tab:fig03} and
+# so on, matching the figure it belongs to.
+#
+# The caption is built from the same numbers as the table, so it cannot go stale
+# against the settings: the window length and the member counts are read off
+# N_YEARS and the data rather than typed in.
+#
 # Plain LaTeX with borders: \toprule and \cmidrule need \usepackage{booktabs},
 # and without it \cmidrule silently typesets "(lr)2-3" into the table.
 
@@ -338,7 +348,7 @@ def format_p(value):
 
 
 for variable in VARIABLES:
-    variable_label, _, unit_table = VARIABLES[variable]
+    variable_label, unit_axis, unit_table = VARIABLES[variable]
 
     table_rows = []
     for scenario in SCENARIOS:
@@ -351,7 +361,44 @@ for variable in VARIABLES:
             f"{row['sd_ratio']:.2f} & {format_p(test['ks_p'])} & "
             f"{'no' if test['ks_p'] < 0.05 else 'yes'} \\\\")
 
+    # Member counts actually used, so neither the caption nor the comment
+    # header can go stale.
+    counts = {}
+    for side in ("emulator", "cesm2"):
+        sizes = sorted({by_member[(variable, s, side)].shape[0]
+                        for s in SCENARIOS})
+        counts[side] = (f"{sizes[0]}" if len(sizes) == 1
+                        else f"{sizes[0]}--{sizes[-1]}")
+
+    window_text = (f"the last {N_YEARS} years" if N_YEARS
+                   else "the full record")
+
+    caption = (
+        f"Distributions of global-mean {variable_label.lower()} over "
+        f"{window_text} of each experiment, pooling every member and every "
+        f"year, as anomalies relative to each side's own 1850--1900 mean. The "
+        f"MEAN columns give the difference between the emulator's and CESM2's "
+        f"pooled means, in {unit_axis}, and Welch's $t$-test on the member "
+        f"means ({counts['emulator']} emulator members against "
+        f"{counts['cesm2']} CESM2 members), members being independent "
+        f"realizations. The DISTRIBUTION columns give the ratio of standard "
+        f"deviations, emulator over CESM2, and a two-sample "
+        f"Kolmogorov--Smirnov test on values from which each side's own "
+        f"ensemble-mean trajectory has been removed --- that is, on internal "
+        f"variability with the shared forced trend taken out, which is what "
+        f"makes the samples independent enough to test. ``Same?'' is $p>0.05$.")
+
     table_tex = "\n".join([
+        r"\begin{table}[htbp]",
+        r"\centering",
+        # The 6-7 column tables overflow article's text block by 60-100pt at
+        # full size. \footnotesize and tighter column padding bring them inside it
+        # without needing graphicx for \resizebox; both are scoped by the
+        # table environment, so neither leaks into the surrounding document.
+        r"\footnotesize",
+        r"\setlength{\tabcolsep}{3.5pt}",
+        rf"\caption{{{caption}}}",
+        rf"\label{{tab:{FIGURE_NAME[variable]}}}",
         r"\begin{tabular}{|l|r|r|c|r|r|c|}",
         r"\hline",
         r"\textbf{Experiment} & \multicolumn{3}{c|}{\textbf{Mean}} & "
@@ -362,40 +409,17 @@ for variable in VARIABLES:
         *table_rows,
         r"\hline",
         r"\end{tabular}",
+        r"\end{table}",
     ])
-
-    # Member counts actually used, so the caption cannot go stale.
-    counts = {}
-    for side in ("emulator", "cesm2"):
-        sizes = sorted({by_member[(variable, s, side)].shape[0]
-                        for s in SCENARIOS})
-        counts[side] = (f"{sizes[0]}" if len(sizes) == 1
-                        else f"{sizes[0]}-{sizes[-1]}")
 
     table_path = TABLE.format(name=FIGURE_NAME[variable])
     os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
     with open(table_path, "w") as handle:
         handle.write(
-            f"% {variable_label}: global-mean statistics over "
-            f"{('the last %d years' % N_YEARS) if N_YEARS else 'the FULL record'}\n"
-            f"% of each experiment. Differences are emulator minus CESM2,\n"
-            f"% in {unit_table}, as ANOMALIES vs each side's own 1850-1900.\n"
-            f"%\n"
-            f"% MEAN columns: Welch's t-test on the MEMBER MEANS "
-            f"({counts['emulator']} emulator\n"
-            f"%   members against {counts['cesm2']} CESM2 members). Members are "
-            f"independent\n"
-            f"%   realizations, so these are independent samples.\n"
-            f"%\n"
-            f"% DISTRIBUTION columns: ratio of standard deviations, and a\n"
-            f"%   two-sample Kolmogorov-Smirnov test on values with each side's\n"
-            f"%   own ensemble-mean trajectory removed — i.e. on internal\n"
-            f"%   variability, with the shared forced trend taken out. That\n"
-            f"%   removal is what makes the samples independent enough to test:\n"
-            f"%   on the raw pooled member-years the lag-1 autocorrelation is\n"
-            f"%   0.56-0.93 and any test assuming independence is meaningless.\n"
-            f"%\n"
-            f"% 'Same?' is p > 0.05. Built from {DATA_DIR}/ by\n"
-            f"% scripts/make_fig34_from_csv.py — do not edit by hand.\n")
+            f"% {variable_label}: emulated vs held-out CESM2 global means,\n"
+            f"% {('last %d years' % N_YEARS) if N_YEARS else 'full record'}.\n"
+            f"% Built from {DATA_DIR}/ by scripts/make_fig34_from_csv.py\n"
+            "% — do not edit by hand. The caption below says what the numbers\n"
+            "% are; \\input this file directly.\n")
         handle.write(table_tex + "\n")
     print(f"[step 6] wrote {table_path}")

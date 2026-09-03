@@ -1,21 +1,14 @@
-% Temperature: global-mean statistics over the last 20 years
-% of each experiment. Differences are emulator minus CESM2,
-% in degC, as ANOMALIES vs each side's own 1850-1900.
-%
-% MEAN columns: Welch's t-test on the MEMBER MEANS (6-11 emulator
-%   members against 6-11 CESM2 members). Members are independent
-%   realizations, so these are independent samples.
-%
-% DISTRIBUTION columns: ratio of standard deviations, and a
-%   two-sample Kolmogorov-Smirnov test on values with each side's
-%   own ensemble-mean trajectory removed — i.e. on internal
-%   variability, with the shared forced trend taken out. That
-%   removal is what makes the samples independent enough to test:
-%   on the raw pooled member-years the lag-1 autocorrelation is
-%   0.56-0.93 and any test assuming independence is meaningless.
-%
-% 'Same?' is p > 0.05. Built from plots/fig12_data/ by
-% scripts/make_fig34_from_csv.py — do not edit by hand.
+% Temperature: emulated vs held-out CESM2 global means,
+% last 20 years.
+% Built from plots/fig12_data/ by scripts/make_fig34_from_csv.py
+% — do not edit by hand. The caption below says what the numbers
+% are; \input this file directly.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Distributions of global-mean temperature over the last 20 years of each experiment, pooling every member and every year, as anomalies relative to each side's own 1850--1900 mean. The MEAN columns give the difference between the emulator's and CESM2's pooled means, in $^{\circ}$C, and Welch's $t$-test on the member means (6--11 emulator members against 6--11 CESM2 members), members being independent realizations. The DISTRIBUTION columns give the ratio of standard deviations, emulator over CESM2, and a two-sample Kolmogorov--Smirnov test on values from which each side's own ensemble-mean trajectory has been removed --- that is, on internal variability with the shared forced trend taken out, which is what makes the samples independent enough to test. ``Same?'' is $p>0.05$.}
+\label{tab:fig03}
 \begin{tabular}{|l|r|r|c|r|r|c|}
 \hline
 \textbf{Experiment} & \multicolumn{3}{c|}{\textbf{Mean}} & \multicolumn{3}{c|}{\textbf{Distribution}} \\
@@ -28,3 +21,4 @@ Aerosol-only (AAER) & -0.002 & 0.954 & yes & 0.92 & 0.947 & yes \\
 Greenhouse-gas-only (GHG) & -0.066 & 0.046 & no & 1.03 & 0.954 & yes \\
 \hline
 \end{tabular}
+\end{table}
