@@ -175,6 +175,12 @@ if MATCH_MEMBER_COUNTS:
 # =============================================================================
 # The baseline window lies outside the plotted range, so it is taken from the
 # FULL record, read again here rather than from the truncated arrays above.
+#
+# "Truncated" there means truncated in YEARS. The arrays were also capped in
+# MEMBERS by MATCH_MEMBER_COUNTS, and re-reading the file undoes that too — so
+# the cap is reapplied below. Averaging all 25 emulator members here and
+# subtracting the result from the 10 that are plotted would reference the
+# anomaly to an ensemble that is not the one in the figure.
 
 if ANOMALY:
     baselines = {}
@@ -189,9 +195,14 @@ if ANOMALY:
                           & (field["year"] <= BASELINE[1]))
                 if bool(window.any()):
                     weights = np.cos(np.deg2rad(field["lat"]))
-                    baselines[(side, variable, scenario)] = float(
-                        field.isel(year=window.values)
-                             .weighted(weights).mean(("lat", "lon")).mean())
+                    per_member = (field.isel(year=window.values)
+                                       .weighted(weights).mean(("lat", "lon"))
+                                       .mean("year").values)
+                    # Reapply the member cap the re-read undid.
+                    if side == "emulator" and MATCH_MEMBER_COUNTS:
+                        per_member = per_member[
+                            :cesm[(variable, scenario)][1].shape[0]]
+                    baselines[(side, variable, scenario)] = float(per_member.mean())
                 else:
                     baselines[(side, variable, scenario)] = np.nan
                 dataset.close()
