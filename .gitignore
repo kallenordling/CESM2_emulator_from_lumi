@@ -18,3 +18,9 @@ eval_output/
 .DS_Store
 *.swp
 notebook_output/
+
+# Superseded figures and one-off diagnostics, moved aside when plots/ was
+# cleaned. Kept on disk so nothing is lost; the tracked ones among them also
+# remain in git history at their old plots/ paths. Not re-committed here:
+# ~160 MB of mostly regenerable output.
+plots/archive/
