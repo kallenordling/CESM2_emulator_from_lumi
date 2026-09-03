@@ -4,19 +4,19 @@
 % numbers are; \input this file directly.
 \begin{table}[htbp]
 \centering
-\footnotesize
+\scriptsize
 \setlength{\tabcolsep}{2.5pt}
-\caption{Emulated and held-out CESM2 global-mean precipitation, as a percentage change from each side's own 1850--1900 mean, compared over the years both sides cover. $r$ and RMSE are computed on the two ensemble-mean series, and the bias is the emulator's ensemble mean minus CESM2's, averaged over those years, in percentage points. ``In band'' is the percentage of years in which that difference falls inside the range spanned by CESM2's own members --- that is, in which the emulator differs from CESM2 by no more than the most extreme pair of CESM2 realizations differ from each other. Each experiment uses the same number of members on both sides (6--11 per side). The 90\% confidence interval is on the bias, given as a half-width about it, from Welch's $t$-test over the per-member time means, members being independent realizations where consecutive years are not. $\sigma$ is the standard deviation of CESM2's own member means --- one realization's typical departure from the CESM2 ensemble mean, and so the natural margin for what counts as practically zero. A bias whose interval lies entirely within $\pm\sigma$ is equivalent to zero at the 5\% level by two one-sided tests; an interval straddling $\pm\sigma$ is INCONCLUSIVE, not evidence of no bias.}
+\caption{Emulated and held-out CESM2 global-mean precipitation, as a percentage change from each side's own 1850--1900 mean, compared over the years both sides cover. $r$ and RMSE are computed on the two ensemble-mean series, and the bias is the emulator's ensemble mean minus CESM2's, averaged over those years, in percentage points. ``In band'' is the percentage of years in which that difference falls inside the range spanned by CESM2's own members --- that is, in which the emulator differs from CESM2 by no more than the most extreme pair of CESM2 realizations differ from each other. Each experiment uses the same number of members on both sides (6--11 per side). The 90\% confidence interval is on the bias, given as a half-width about it, from Welch's $t$-test over the per-member time means, members being independent realizations where consecutive years are not. $\sigma$ is the standard deviation of CESM2's own member means --- one realization's typical departure from the CESM2 ensemble mean, and so the natural margin for what counts as practically zero. A bias whose interval lies entirely within $\pm\sigma$ is equivalent to zero at the 5\% level by two one-sided tests. The last column states that conclusion: ``yes'' where the interval lies within $\pm\sigma$, ``no'' where it excludes zero and reaches beyond $\pm\sigma$, and ``unresolved'' where neither holds --- too few members to tell the two apart, which is ignorance rather than agreement and must not be read as evidence of no bias.}
 \label{tab:fig02}
-\begin{tabular}{|l|c|r|r|r|c|r|r|}
+\begin{tabular}{|l|c|r|r|r|c|r|r|c|}
 \hline
-\textbf{Experiment} & \textbf{$n$} & \textbf{$r$} & \textbf{RMSE} & \textbf{Bias} & \textbf{90\% CI} & \textbf{$\sigma$} & \textbf{In band} \\
- & emu/CESM2 & & \multicolumn{4}{c|}{(\%-points)} & (\%) \\
+\textbf{Experiment} & \textbf{$n$} & \textbf{$r$} & \textbf{RMSE} & \textbf{Bias} & \textbf{90\% CI} & \textbf{$\sigma$} & \textbf{In band} & \textbf{Same as} \\
+ & emu/CESM2 & & \multicolumn{4}{c|}{(\%-points)} & (\%) & \textbf{CESM2?} \\
 \hline
-Historical & 10/10 & 0.647 & 0.238 & -0.007 & $\pm$0.034 & 0.056 & 97 \\
-SSP3-7.0 & 10/10 & 0.985 & 0.408 & +0.277 & $\pm$0.061 & 0.094 & 92 \\
-Aerosol-only (AAER) & 11/11 & 0.977 & 0.254 & +0.016 & $\pm$0.029 & 0.050 & 97 \\
-Greenhouse-gas-only (GHG) & 6/6 & 0.965 & 0.304 & -0.024 & $\pm$0.069 & 0.084 & 86 \\
+Historical & 10/10 & 0.647 & 0.238 & -0.007 & $\pm$0.034 & 0.056 & 97 & yes \\
+SSP3-7.0 & 10/10 & 0.985 & 0.408 & +0.277 & $\pm$0.061 & 0.094 & 92 & no \\
+Aerosol-only & 11/11 & 0.977 & 0.254 & +0.016 & $\pm$0.029 & 0.050 & 97 & yes \\
+GHG-only & 6/6 & 0.965 & 0.304 & -0.024 & $\pm$0.069 & 0.084 & 86 & unresolved \\
 \hline
 \end{tabular}
 \end{table}
