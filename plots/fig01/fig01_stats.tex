@@ -5,19 +5,18 @@
 \begin{table}[htbp]
 \centering
 \footnotesize
-\setlength{\tabcolsep}{3.5pt}
-\caption{Emulated and held-out CESM2 global-mean temperature, as an anomaly relative to each side's own 1850--1900 mean, compared over the years both sides cover. $r$ and RMSE are computed on the two ensemble-mean series, and the bias is the emulator's ensemble mean minus CESM2's, averaged over those years. ``In band'' is the percentage of years in which that difference falls inside the range spanned by CESM2's own members --- that is, in which the emulator differs from CESM2 by no more than the most extreme pair of CESM2 realizations differ from each other. Each experiment uses the same number of members on both sides (6--11 per side).}
+\setlength{\tabcolsep}{2.5pt}
+\caption{Emulated and held-out CESM2 global-mean temperature, as an anomaly relative to each side's own 1850--1900 mean, compared over the years both sides cover. $r$ and RMSE are computed on the two ensemble-mean series, and the bias is the emulator's ensemble mean minus CESM2's, averaged over those years. ``In band'' is the percentage of years in which that difference falls inside the range spanned by CESM2's own members --- that is, in which the emulator differs from CESM2 by no more than the most extreme pair of CESM2 realizations differ from each other. Each experiment uses the same number of members on both sides (6--11 per side). The 90\% confidence interval is on the bias, given as a half-width about it, from Welch's $t$-test over the per-member time means, members being independent realizations where consecutive years are not. $\sigma$ is the standard deviation of CESM2's own member means --- one realization's typical departure from the CESM2 ensemble mean, and so the natural margin for what counts as practically zero. A bias whose interval lies entirely within $\pm\sigma$ is equivalent to zero at the 5\% level by two one-sided tests; an interval straddling $\pm\sigma$ is INCONCLUSIVE, not evidence of no bias.}
 \label{tab:fig01}
-\begin{tabular}{|l|r|r|r|r|r|r|}
+\begin{tabular}{|l|c|r|r|r|c|r|r|}
 \hline
-\textbf{Experiment} & \multicolumn{2}{c|}{\textbf{Members}} & \textbf{$r$} & \textbf{RMSE} & \textbf{Bias} & \textbf{In band} \\
-\cline{2-3}
- & Emulator & CESM2 & & ($^{\circ}$C) & ($^{\circ}$C) & (\%) \\
+\textbf{Experiment} & \textbf{$n$} & \textbf{$r$} & \textbf{RMSE} & \textbf{Bias} & \textbf{90\% CI} & \textbf{$\sigma$} & \textbf{In band} \\
+ & emu/CESM2 & & \multicolumn{4}{c|}{($^{\circ}$C)} & (\%) \\
 \hline
-Historical & 10 & 10 & 0.966 & 0.082 & +0.036 & 94 \\
-SSP3-7.0 & 10 & 10 & 0.998 & 0.086 & +0.059 & 92 \\
-Aerosol-only (AAER) & 11 & 11 & 0.982 & 0.063 & +0.011 & 98 \\
-Greenhouse-gas-only (GHG) & 6 & 6 & 0.995 & 0.078 & -0.012 & 90 \\
+Historical & 10/10 & 0.966 & 0.082 & +0.036 & $\pm$0.014 & 0.022 & 94 \\
+SSP3-7.0 & 10/10 & 0.998 & 0.086 & +0.059 & $\pm$0.025 & 0.043 & 92 \\
+Aerosol-only (AAER) & 11/11 & 0.982 & 0.063 & +0.011 & $\pm$0.012 & 0.020 & 98 \\
+Greenhouse-gas-only (GHG) & 6/6 & 0.995 & 0.078 & -0.012 & $\pm$0.034 & 0.041 & 90 \\
 \hline
 \end{tabular}
 \end{table}
