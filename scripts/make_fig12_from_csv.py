@@ -58,15 +58,17 @@ panels (b)-(d) are therefore in PERCENTAGE POINTS.
 #     baselines.csv                      each side's own 1850-1900 mean
 DATA_DIR = "plots/fig12_data"
 
-OUT = "plots/{name}.png"          # the .pdf sibling is written alongside
-TABLE = "plots/{name}_skill.tex"  # LaTeX table of the same numbers
+# Each figure gets its OWN FOLDER, holding the figure and the LaTeX table of
+# its statistics: plots/fig01/{fig01.png, fig01.pdf, fig01_stats.tex}.
+OUT = "plots/{name}/{name}.png"          # the .pdf sibling is written alongside
+TABLE = "plots/{name}/{name}_stats.tex"  # LaTeX table of the same numbers
 
 # The two figures. key -> (output name, label, panel (a) y-label, table unit,
 #                          whether the anomaly is a PERCENTAGE of the baseline)
 VARIABLES = {
-    "TREFHT": ("fig1", "Temperature",
+    "TREFHT": ("fig01", "Temperature",
                "GMST anomaly (°C, vs 1850–1900)", r"$^{\circ}$C", False),
-    "PRECT":  ("fig2", "Precipitation",
+    "PRECT":  ("fig02", "Precipitation",
                "Precipitation change (%, vs 1850–1900)", r"\%-points", True),
 }
 
@@ -354,13 +356,19 @@ for variable, (name, label, y_label, unit_tex, as_percent) in VARIABLES.items():
 # =============================================================================
 #  STEP 9 — the same numbers as LaTeX tables
 # =============================================================================
-# Written as a bare `tabular` so it can be \\input inside whatever table
-# environment the paper wants, with its own caption and placement. Plain LaTeX:
-# \hline and | rules, no booktabs. \toprule/\midrule/\cmidrule need
-# \usepackage{booktabs}, and without it \cmidrule(lr){2-3} does not error — it
-# prints "(lr)2-3" into the table as text.
+# A COMPLETE `table` float — caption, label and tabular — so \\input drops it
+# straight into the paper with no wrapper. The label is \\label{tab:fig01} and
+# so on, matching the figure it belongs to.
+#
+# The caption is built from the same numbers as the table, so it cannot go stale
+# against the settings: member counts and the percentage-vs-absolute wording are
+# read off the data rather than typed in.
+#
+# Plain LaTeX: \hline and | rules, no booktabs. \toprule/\midrule/\cmidrule
+# need \usepackage{booktabs}, and without it \cmidrule(lr){2-3} does not error
+# — it prints "(lr)2-3" into the table as text.
 
-for variable, (name, label, _, unit_tex, _) in VARIABLES.items():
+for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
     rows_tex = []
     for scenario in SCENARIOS:
         row = stats[(variable, scenario)]
@@ -369,7 +377,41 @@ for variable, (name, label, _, unit_tex, _) in VARIABLES.items():
             f"{row['corr']:.3f} & {row['rmse']:.3f} & {row['bias']:+.3f} & "
             f"{row['inside']:.0f} \\\\")
 
+    # Member counts actually used, read off the data so the caption cannot
+    # drift from the table above it.
+    member_counts = sorted({stats[(variable, s)]["n_cesm"] for s in SCENARIOS})
+    member_text = (f"{member_counts[0]}" if len(member_counts) == 1
+                   else f"{member_counts[0]}--{member_counts[-1]}")
+
+    quantity = ("precipitation, as a percentage change from each side's own "
+                "1850--1900 mean" if as_percent else
+                "temperature, as an anomaly relative to each side's own "
+                "1850--1900 mean")
+
+    caption = (
+        f"Emulated and held-out CESM2 global-mean {quantity}, compared over "
+        f"the years both sides cover. $r$ and RMSE are computed on the two "
+        f"ensemble-mean series, and the bias is the emulator's ensemble mean "
+        f"minus CESM2's, averaged over those years"
+        + (", in percentage points" if as_percent else "")
+        + ". ``In band'' is the percentage of years in which that difference "
+        f"falls inside the range spanned by CESM2's own members --- that is, "
+        f"in which the emulator differs from CESM2 by no more than the most "
+        f"extreme pair of CESM2 realizations differ from each other. Each "
+        f"experiment uses the same number of members on both sides "
+        f"({member_text} per side).")
+
     table_tex = "\n".join([
+        r"\begin{table}[htbp]",
+        r"\centering",
+        # The 6-7 column tables overflow article's text block by 60-100pt at
+        # full size. \footnotesize and tighter column padding bring them inside it
+        # without needing graphicx for \resizebox; both are scoped by the
+        # table environment, so neither leaks into the surrounding document.
+        r"\footnotesize",
+        r"\setlength{\tabcolsep}{3.5pt}",
+        rf"\caption{{{caption}}}",
+        rf"\label{{tab:{name}}}",
         r"\begin{tabular}{|l|r|r|r|r|r|r|}",
         r"\hline",
         r"\textbf{Experiment} & \multicolumn{2}{c|}{\textbf{Members}} & "
@@ -380,18 +422,16 @@ for variable, (name, label, _, unit_tex, _) in VARIABLES.items():
         *rows_tex,
         r"\hline",
         r"\end{tabular}",
+        r"\end{table}",
     ])
 
     table_path = TABLE.format(name=name)
     os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
     with open(table_path, "w") as handle:
         handle.write(f"% {label}: emulated vs held-out CESM2 global means.\n"
-                     "% r and RMSE compare the two ENSEMBLE-MEAN series over the\n"
-                     "% years both cover; 'in band' is the share of those years\n"
-                     "% where the difference falls inside CESM2's own member\n"
-                     "% range.\n"
-                     f"% Built from {DATA_DIR}/ by\n"
-                     "% scripts/make_fig12_from_csv.py — do not edit by hand.\n")
+                     f"% Built from {DATA_DIR}/ by scripts/make_fig12_from_csv.py\n"
+                     "% — do not edit by hand. The caption below says what the\n"
+                     "% numbers are; \\input this file directly.\n")
         handle.write(table_tex + "\n")
     print(f"[step 9] wrote {table_path}")
 
