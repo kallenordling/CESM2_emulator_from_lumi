@@ -148,7 +148,12 @@ from scipy import stats
 
 emulator = {}            # (variable, scenario) -> 1-D array of member-years
 emulator_by_member = {}  # the same values, still shaped (member, year)
-baseline_of = {}         # (side, variable, scenario) -> 1850-1900 mean of the FULL record
+# PER MEMBER, not a single number: step 2b caps the emulator to CESM2's member
+# count, and the baseline has to be capped with it. Averaging 25 members here and
+# subtracting that from 10 gave an anomaly referenced to a different ensemble
+# than the one being plotted — a ~0.006 degC error that moved a p-value across
+# 0.05. The scalar is taken in step 2c, after the cap.
+baseline_of = {}         # (side, variable, scenario) -> per-member 1850-1900 mean
 for variable in VARIABLES:
     for scenario in SCENARIOS:
         path = f"{EVAL_DIR}/{variable}_{scenario}.nc"
@@ -161,8 +166,8 @@ for variable in VARIABLES:
         full_years = full_mean["year"].values
         in_baseline = (full_years >= BASELINE[0]) & (full_years <= BASELINE[1])
         baseline_of[("emulator", variable, scenario)] = (
-            float(full_mean.values[:, in_baseline].mean()) if in_baseline.any()
-            else np.nan)
+            full_mean.values[:, in_baseline].mean(axis=1) if in_baseline.any()
+            else np.full(full_mean.sizes["member"], np.nan))
         global_mean = (full_mean.isel(year=slice(-N_YEARS, None)) if N_YEARS
                        else full_mean)
         years = global_mean["year"].values
@@ -197,8 +202,8 @@ for variable in VARIABLES:
         full_years = full_mean["year"].values
         in_baseline = (full_years >= BASELINE[0]) & (full_years <= BASELINE[1])
         baseline_of[("cesm", variable, scenario)] = (
-            float(full_mean.values[:, in_baseline].mean()) if in_baseline.any()
-            else np.nan)
+            full_mean.values[:, in_baseline].mean(axis=1) if in_baseline.any()
+            else np.full(full_mean.sizes["member"], np.nan))
         global_mean = (full_mean.isel(year=slice(-N_YEARS, None)) if N_YEARS
                        else full_mean)
         years = global_mean["year"].values
@@ -224,6 +229,9 @@ if MATCH_MEMBER_COUNTS:
             if series.shape[0] > n_cesm:
                 emulator_by_member[(variable, scenario)] = series[:n_cesm]
                 emulator[(variable, scenario)] = series[:n_cesm].ravel()
+                # The baseline is per member, so it caps with the values.
+                baseline_of[("emulator", variable, scenario)] = \
+                    baseline_of[("emulator", variable, scenario)][:n_cesm]
                 print(f"[step 2b] {variable:6s} {scenario:7s} emulator "
                       f"{series.shape[0]} -> {n_cesm} members")
 
@@ -240,13 +248,16 @@ if ANOMALY:
     # the historical one, the same convention applied to both sides.
     for variable in VARIABLES:
         for side in ("emulator", "cesm"):
-            if not np.isfinite(baseline_of[(side, variable, "ssp370")]):
-                baseline_of[(side, variable, "ssp370")] = baseline_of[(side, variable, "hist")]
+            if not np.isfinite(baseline_of[(side, variable, "ssp370")]).any():
+                baseline_of[(side, variable, "ssp370")] = \
+                    baseline_of[(side, variable, "hist")]
 
     for variable in VARIABLES:
         for scenario in SCENARIOS:
-            e_base = baseline_of[("emulator", variable, scenario)]
-            c_base = baseline_of[("cesm", variable, scenario)]
+            # One number per side, now that both are capped to the same
+            # members as the values they are subtracted from.
+            e_base = float(np.mean(baseline_of[("emulator", variable, scenario)]))
+            c_base = float(np.mean(baseline_of[("cesm", variable, scenario)]))
             emulator_by_member[(variable, scenario)] = (
                 emulator_by_member[(variable, scenario)] - e_base)
             cesm_by_member[(variable, scenario)] = (
