@@ -86,6 +86,13 @@ SCENARIOS = {
     "ghg":    ("Greenhouse-gas-only (GHG)", "#009E73"),
 }
 
+# Shorter names for the TABLE rows only. The figures keep the full legend
+# labels, which have room; the tables do not — "Greenhouse-gas-only (GHG)" is
+# the single widest thing in them, and the acronym it spells out is already
+# given in the figure legend and the caption.
+TABLE_LABEL = {"hist": "Historical", "ssp370": "SSP3-7.0",
+               "aaer": "Aerosol-only", "ghg": "GHG-only"}
+
 BASELINE = (1850, 1900)   # the anomaly reference window, for the shaded span
 YEAR_MAX = 2100
 
@@ -267,12 +274,30 @@ for variable in VARIABLES:
             ci_high=float(difference.mean() + half_width),
             sigma=sigma)
         row = stats[(variable, scenario)]
+
+        # THREE outcomes, not two. A test of "bias = 0" can only reject; it can
+        # never accept, so "not significant" is not a finding of sameness. The
+        # equivalence test supplies the missing verdict, and what is left over
+        # is genuine ignorance rather than agreement:
+        #
+        #   yes        the whole interval lies inside +/-sigma, so the bias is
+        #              smaller than one CESM2 realization's own departure --
+        #              equivalent at the 5% level by two one-sided tests
+        #   no         the interval excludes zero, so a bias is detected, and
+        #              (having failed the first branch) it reaches past sigma
+        #   unresolved neither: too few members to tell the two apart
+        #
+        # Order matters. Equivalence is tested first, so a bias that is both
+        # detectable and smaller than sigma reads "yes" -- the practical
+        # question this table asks -- rather than "no".
         equivalent = (abs(row["ci_low"]) < sigma) and (abs(row["ci_high"]) < sigma)
+        detected = (row["ci_low"] > 0) or (row["ci_high"] < 0)
+        row["verdict"] = ("yes" if equivalent else "no" if detected
+                          else "unresolved")
         print(f"[step 4] {variable:6s} {scenario:7s} r {row['corr']:.3f}, "
               f"bias {row['bias']:+.3f} "
               f"[{row['ci_low']:+.3f},{row['ci_high']:+.3f}], "
-              f"sigma {sigma:.3f} -> "
-              f"{'equivalent to 0' if equivalent else 'NOT equivalent'}, "
+              f"sigma {sigma:.3f} -> same as CESM2? {row['verdict']}, "
               f"{row['inside']:.0f}% in band")
 
 # =============================================================================
@@ -445,10 +470,11 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
     for scenario in SCENARIOS:
         row = stats[(variable, scenario)]
         rows_tex.append(
-            f"{SCENARIOS[scenario][0]} & {row['n_emu']}/{row['n_cesm']} & "
+            f"{TABLE_LABEL[scenario]} & {row['n_emu']}/{row['n_cesm']} & "
             f"{row['corr']:.3f} & {row['rmse']:.3f} & {row['bias']:+.3f} & "
             f"$\\pm${(row['ci_high'] - row['ci_low']) / 2:.3f} & "
-            f"{row['sigma']:.3f} & {row['inside']:.0f} \\\\")
+            f"{row['sigma']:.3f} & {row['inside']:.0f} & "
+            f"{row['verdict']} \\\\")
 
     # Member counts actually used, read off the data so the caption cannot
     # drift from the table above it.
@@ -480,18 +506,23 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
         f"one realization's typical departure from the CESM2 ensemble mean, "
         f"and so the natural margin for what counts as practically zero. A "
         f"bias whose interval lies entirely within $\\pm\\sigma$ is "
-        f"equivalent to zero at the 5\\% level by two one-sided tests; an "
-        f"interval straddling $\\pm\\sigma$ is INCONCLUSIVE, not evidence "
-        f"of no bias.")
+        f"equivalent to zero at the 5\\% level by two one-sided tests. The "
+        f"last column states that conclusion: ``yes'' where the interval lies "
+        f"within $\\pm\\sigma$, ``no'' where it excludes zero and reaches "
+        f"beyond $\\pm\\sigma$, and ``unresolved'' where neither holds --- too "
+        f"few members to tell the two apart, which is ignorance rather than "
+        f"agreement and must not be read as evidence of no bias.")
 
     table_tex = "\n".join([
         r"\begin{table}[htbp]",
         r"\centering",
-        # The 6-7 column tables overflow article's text block by 60-100pt at
-        # full size. \footnotesize and tighter column padding bring them inside it
-        # without needing graphicx for \resizebox; both are scoped by the
-        # table environment, so neither leaks into the surrounding document.
-        r"\footnotesize",
+        # These are NINE column tables, and at full size they overflow
+        # article's text block by well over 100pt. \scriptsize and tight column
+        # padding bring them inside it without needing graphicx for
+        # \resizebox; both are scoped by the table environment, so neither
+        # leaks into the surrounding document. article has unusually narrow
+        # margins, so a journal class will have room to spare.
+        r"\scriptsize",
         r"\setlength{\tabcolsep}{2.5pt}",
         rf"\caption{{{caption}}}",
         rf"\label{{tab:{name}}}",
@@ -502,12 +533,13 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
         # bias, which is the same information as its two endpoints in a third
         # of the space; and the unit is stated ONCE over the four columns that
         # share it rather than repeated in each.
-        r"\begin{tabular}{|l|c|r|r|r|c|r|r|}",
+        r"\begin{tabular}{|l|c|r|r|r|c|r|r|c|}",
         r"\hline",
         r"\textbf{Experiment} & \textbf{$n$} & \textbf{$r$} & "
         r"\textbf{RMSE} & \textbf{Bias} & \textbf{90\% CI} & "
-        r"\textbf{$\sigma$} & \textbf{In band} \\",
-        rf" & emu/CESM2 & & \multicolumn{{4}}{{c|}}{{({unit_tex})}} & (\%) \\",
+        r"\textbf{$\sigma$} & \textbf{In band} & \textbf{Same as} \\",
+        rf" & emu/CESM2 & & \multicolumn{{4}}{{c|}}{{({unit_tex})}} & (\%) "
+        rf"& \textbf{{CESM2?}} \\",
         r"\hline",
         *rows_tex,
         r"\hline",

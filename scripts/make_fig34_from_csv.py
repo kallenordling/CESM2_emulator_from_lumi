@@ -114,6 +114,13 @@ SCENARIOS = {
     "ghg":    ("Greenhouse-gas-only (GHG)", "#009E73"),
 }
 
+# Shorter names for the TABLE rows only. The figures keep the full legend
+# labels, which have room; the tables do not — "Greenhouse-gas-only (GHG)" is
+# the single widest thing in them, and the acronym it spells out is already
+# given in the figure legend and the caption.
+TABLE_LABEL = {"hist": "Historical", "ssp370": "SSP3-7.0",
+               "aaer": "Aerosol-only", "ghg": "GHG-only"}
+
 # =============================================================================
 
 import os
@@ -392,7 +399,7 @@ for variable in VARIABLES:
         row = statistics[(variable, scenario)]
         test = tests[(variable, scenario)]
         table_rows.append(
-            f"{SCENARIOS[scenario][0]} & "
+            f"{TABLE_LABEL[scenario]} & "
             f"{row['mean_difference']:+.3f} & {format_p(test['mean_p'])} & "
             f"{'no' if test['mean_p'] < 0.05 else 'yes'} & "
             f"{row['sd_ratio']:.2f} & {format_p(test['ks_p'])} & "
@@ -410,7 +417,7 @@ for variable in VARIABLES:
     # The experiments end in different years, so name the spans rather than
     # leaving "the last 20 years" to be resolved against four different records.
     spans = "; ".join(
-        f"{SCENARIOS[s][0]} {years_used[(variable, s)][0]}--"
+        f"{TABLE_LABEL[s]} {years_used[(variable, s)][0]}--"
         f"{years_used[(variable, s)][1]}" for s in SCENARIOS)
     window_text = f"the last {N_YEARS} years" if N_YEARS else "the full record"
     span_text = f" ({spans})" if N_YEARS else ""
