@@ -442,7 +442,7 @@ for variable in VARIABLES:
         # without needing graphicx for \resizebox; both are scoped by the
         # table environment, so neither leaks into the surrounding document.
         r"\footnotesize",
-        r"\setlength{\tabcolsep}{3.5pt}",
+        r"\setlength{\tabcolsep}{2.5pt}",
         rf"\caption{{{caption}}}",
         rf"\label{{tab:{FIGURE_NAME[variable]}}}",
         r"\begin{tabular}{|l|r|r|c|r|r|c|}",

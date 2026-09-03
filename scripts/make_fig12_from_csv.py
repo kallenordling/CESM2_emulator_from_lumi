@@ -102,6 +102,8 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 import pandas as pd
+# Aliased: `stats` is already the name of this script's results dict.
+from scipy import stats as sstats
 
 print(__doc__.split("WHAT THIS IS")[0])
 
@@ -193,6 +195,19 @@ for variable, (_, _, _, _, as_percent) in VARIABLES.items():
 # against is the full min-to-max range of CESM2's own members about their mean:
 # where the bias sits inside it, the emulator differs from CESM2 by no more than
 # the most extreme pair of CESM2 runs differ from each other.
+#
+# TWO YARDSTICKS, AND THEY ANSWER DIFFERENT QUESTIONS. That min-to-max band, and
+# the "in band" percentage from it, measure the bias against the spread of
+# INDIVIDUAL members. The confidence interval below measures it against the
+# uncertainty of the ENSEMBLE MEAN, which is that spread divided by sqrt(n) and
+# so several times tighter. A bias can sit inside the band in 94% of years and
+# still be a firmly detected offset of the forced response; both statements are
+# true and neither is the other.
+#
+# The interval is a 90% one because that is what pairs with a 5% TOST: the bias
+# is EQUIVALENT to zero when the whole interval lies inside +/-sigma. Reporting
+# "not significant" instead would be claiming the opposite of what a failed test
+# shows.
 
 stats, bias_series = {}, {}
 for variable in VARIABLES:
@@ -206,6 +221,30 @@ for variable in VARIABLES:
         emulator_mean = emulator_frame.loc[years].mean(axis=1)
         cesm_mean = cesm_frame.loc[years].mean(axis=1)
         difference = emulator_mean - cesm_mean
+
+        # One number per MEMBER: its own time mean over these years. Members are
+        # independent realizations, so these are the independent units the
+        # interval below is entitled to assume — the year-by-year values are
+        # not, their lag-1 autocorrelation running 0.56-0.93.
+        #
+        # The grand means agree with `difference.mean()` exactly, since both are
+        # the same double average taken in the opposite order.
+        emulator_members = emulator_frame.loc[years].mean(axis=0).values
+        cesm_members = cesm_frame.loc[years].mean(axis=0).values
+        n_e, n_c = len(emulator_members), len(cesm_members)
+        var_e = emulator_members.var(ddof=1) / n_e
+        var_c = cesm_members.var(ddof=1) / n_c
+
+        # Welch: the two sides need not have equal variance.
+        standard_error = np.sqrt(var_e + var_c)
+        degrees_freedom = (standard_error ** 4
+                           / (var_e ** 2 / (n_e - 1) + var_c ** 2 / (n_c - 1)))
+        half_width = sstats.t.ppf(0.95, degrees_freedom) * standard_error
+
+        # sigma: the spread of CESM2's own member means — one realization's
+        # typical departure from the CESM2 ensemble mean, and the natural
+        # equivalence margin, since it is what CESM2 itself cannot resolve.
+        sigma = float(cesm_members.std(ddof=1))
 
         # CESM2's members as deviations from their own mean, per year.
         deviation = cesm_frame.loc[years].sub(cesm_mean, axis=0)
@@ -223,11 +262,18 @@ for variable in VARIABLES:
             # rather than on its own.
             corr=float(np.corrcoef(emulator_mean, cesm_mean)[0, 1]),
             inside=float(((difference >= spread_low)
-                          & (difference <= spread_high)).mean()) * 100)
+                          & (difference <= spread_high)).mean()) * 100,
+            ci_low=float(difference.mean() - half_width),
+            ci_high=float(difference.mean() + half_width),
+            sigma=sigma)
         row = stats[(variable, scenario)]
+        equivalent = (abs(row["ci_low"]) < sigma) and (abs(row["ci_high"]) < sigma)
         print(f"[step 4] {variable:6s} {scenario:7s} r {row['corr']:.3f}, "
-              f"bias {row['bias']:+.3f}, rmse {row['rmse']:.3f}, "
-              f"{row['inside']:.0f}% of years within CESM2's own spread")
+              f"bias {row['bias']:+.3f} "
+              f"[{row['ci_low']:+.3f},{row['ci_high']:+.3f}], "
+              f"sigma {sigma:.3f} -> "
+              f"{'equivalent to 0' if equivalent else 'NOT equivalent'}, "
+              f"{row['inside']:.0f}% in band")
 
 # =============================================================================
 #  STEP 5 — one figure per variable
@@ -399,9 +445,10 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
     for scenario in SCENARIOS:
         row = stats[(variable, scenario)]
         rows_tex.append(
-            f"{SCENARIOS[scenario][0]} & {row['n_emu']} & {row['n_cesm']} & "
+            f"{SCENARIOS[scenario][0]} & {row['n_emu']}/{row['n_cesm']} & "
             f"{row['corr']:.3f} & {row['rmse']:.3f} & {row['bias']:+.3f} & "
-            f"{row['inside']:.0f} \\\\")
+            f"$\\pm${(row['ci_high'] - row['ci_low']) / 2:.3f} & "
+            f"{row['sigma']:.3f} & {row['inside']:.0f} \\\\")
 
     # Member counts actually used, read off the data so the caption cannot
     # drift from the table above it.
@@ -425,7 +472,17 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
         f"in which the emulator differs from CESM2 by no more than the most "
         f"extreme pair of CESM2 realizations differ from each other. Each "
         f"experiment uses the same number of members on both sides "
-        f"({member_text} per side).")
+        f"({member_text} per side). The 90\\% confidence interval is on the "
+        f"bias, given as a half-width about it, from Welch's $t$-test over "
+        f"the per-member time means, members "
+        f"being independent realizations where consecutive years are not. "
+        f"$\\sigma$ is the standard deviation of CESM2's own member means --- "
+        f"one realization's typical departure from the CESM2 ensemble mean, "
+        f"and so the natural margin for what counts as practically zero. A "
+        f"bias whose interval lies entirely within $\\pm\\sigma$ is "
+        f"equivalent to zero at the 5\\% level by two one-sided tests; an "
+        f"interval straddling $\\pm\\sigma$ is INCONCLUSIVE, not evidence "
+        f"of no bias.")
 
     table_tex = "\n".join([
         r"\begin{table}[htbp]",
@@ -435,15 +492,22 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
         # without needing graphicx for \resizebox; both are scoped by the
         # table environment, so neither leaks into the surrounding document.
         r"\footnotesize",
-        r"\setlength{\tabcolsep}{3.5pt}",
+        r"\setlength{\tabcolsep}{2.5pt}",
         rf"\caption{{{caption}}}",
         rf"\label{{tab:{name}}}",
-        r"\begin{tabular}{|l|r|r|r|r|r|r|}",
+        # Members collapse to one "10/10" column: at eight columns the table
+        # needs the width more than it needs a \multicolumn header.
+        # Two compactions, because eight columns overflow the text block by
+        # ~100pt otherwise. The interval is given as a half-width about the
+        # bias, which is the same information as its two endpoints in a third
+        # of the space; and the unit is stated ONCE over the four columns that
+        # share it rather than repeated in each.
+        r"\begin{tabular}{|l|c|r|r|r|c|r|r|}",
         r"\hline",
-        r"\textbf{Experiment} & \multicolumn{2}{c|}{\textbf{Members}} & "
-        r"\textbf{$r$} & \textbf{RMSE} & \textbf{Bias} & \textbf{In band} \\",
-        r"\cline{2-3}",
-        rf" & Emulator & CESM2 & & ({unit_tex}) & ({unit_tex}) & (\%) \\",
+        r"\textbf{Experiment} & \textbf{$n$} & \textbf{$r$} & "
+        r"\textbf{RMSE} & \textbf{Bias} & \textbf{90\% CI} & "
+        r"\textbf{$\sigma$} & \textbf{In band} \\",
+        rf" & emu/CESM2 & & \multicolumn{{4}}{{c|}}{{({unit_tex})}} & (\%) \\",
         r"\hline",
         *rows_tex,
         r"\hline",
