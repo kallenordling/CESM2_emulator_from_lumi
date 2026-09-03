@@ -84,9 +84,26 @@ N_YEARS = 20
 
 N_BINS = 24
 
-# Variables, with the unit shown on the axis and in the table.
-VARIABLES = {"TREFHT": ("Temperature", "$^{\\circ}$C", "degC"),
-             "PRECT":  ("Precipitation", "mm day$^{-1}$", "mm/day")}
+# Variables:
+#   label       -> the noun used in captions
+#   axis_label  -> the full x-axis label, units included. MATPLOTLIB text, not
+#                  LaTeX: mathtext handles $^{\\circ}$, but a percent sign is
+#                  written bare, since \\% would print the backslash
+#   unit_tex    -> unit for the table header and caption (typeset)
+#   unit_plain  -> the same unit for the % comment header (not typeset)
+#   as_percent  -> express the anomaly as a PERCENTAGE of that side's own
+#                  baseline rather than as an absolute difference
+#
+# PRECIPITATION IS SHOWN AS A PERCENTAGE, matching figure 2. A few hundredths of
+# a mm/day means nothing without the ~2.9 mm/day it is relative to, and dividing
+# each side by its OWN baseline stops a small difference in the mean state from
+# masquerading as a difference in variability.
+VARIABLES = {
+    "TREFHT": ("Temperature", "Temperature anomaly ($^{\\circ}$C)",
+               "$^{\\circ}$C", "degC", False),
+    "PRECT":  ("Precipitation", "Precipitation change (%)",
+               "\\%-points", "%-points", True),
+}
 
 # The experiments, in plotting order: key -> (label, colour).
 # Okabe-Ito colours, distinguishable in greyscale and to colour-blind readers.
@@ -134,11 +151,17 @@ baseline = {(row.variable, row.scenario, row.side): row.baseline
 by_member = {}   # (variable, scenario, side) -> array (member, year)
 pooled = {}      # (variable, scenario, side) -> flat array of member-years
 for variable in VARIABLES:
+    as_percent = VARIABLES[variable][4]
     for scenario in SCENARIOS:
         for side in ("emulator", "cesm2"):
             frame = pd.read_csv(f"{DATA_DIR}/{variable}_{scenario}_{side}.csv",
                                 index_col="year")
-            anomaly = frame - baseline[(variable, scenario, side)]
+            base = baseline[(variable, scenario, side)]
+            anomaly = frame - base
+            if as_percent:
+                # Percentage of that side's OWN baseline, so the two sides stay
+                # comparable even though their mean states differ slightly.
+                anomaly = 100.0 * anomaly / base
 
             # Truncate to the window AFTER the baseline has been applied.
             window = anomaly.iloc[-N_YEARS:] if N_YEARS else anomaly
@@ -209,7 +232,7 @@ plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9.5,
                      "axes.grid": True, "grid.alpha": 0.25})
 
 for variable in VARIABLES:
-    variable_label, unit_axis, _ = VARIABLES[variable]
+    variable_label, axis_label, _, _, _ = VARIABLES[variable]
     figure, axes = plt.subplots(2, 2, figsize=(9.0, 6.6))
 
     for panel_index, scenario in enumerate(SCENARIOS):
@@ -242,7 +265,7 @@ for variable in VARIABLES:
                   fontsize=9)
         # Axis labels only on the outside, so the panels are not repetitive.
         if panel_index // 2 == 1:
-            axis.set_xlabel(f"{variable_label} ({unit_axis})")
+            axis.set_xlabel(axis_label)
         if panel_index % 2 == 0:
             axis.set_ylabel("Probability density")
 
@@ -348,7 +371,7 @@ def format_p(value):
 
 
 for variable in VARIABLES:
-    variable_label, unit_axis, unit_table = VARIABLES[variable]
+    variable_label, _, unit_tex, unit_plain, as_percent = VARIABLES[variable]
 
     table_rows = []
     for scenario in SCENARIOS:
@@ -373,12 +396,16 @@ for variable in VARIABLES:
     window_text = (f"the last {N_YEARS} years" if N_YEARS
                    else "the full record")
 
+    referenced = ("as a percentage change from each side's own 1850--1900 "
+                  "mean" if as_percent else
+                  "as anomalies relative to each side's own 1850--1900 mean")
+
     caption = (
         f"Distributions of global-mean {variable_label.lower()} over "
         f"{window_text} of each experiment, pooling every member and every "
-        f"year, as anomalies relative to each side's own 1850--1900 mean. The "
+        f"year, {referenced}. The "
         f"MEAN columns give the difference between the emulator's and CESM2's "
-        f"pooled means, in {unit_axis}, and Welch's $t$-test on the member "
+        f"pooled means, in {unit_tex}, and Welch's $t$-test on the member "
         f"means ({counts['emulator']} emulator members against "
         f"{counts['cesm2']} CESM2 members), members being independent "
         f"realizations. The DISTRIBUTION columns give the ratio of standard "
@@ -404,7 +431,7 @@ for variable in VARIABLES:
         r"\textbf{Experiment} & \multicolumn{3}{c|}{\textbf{Mean}} & "
         r"\multicolumn{3}{c|}{\textbf{Distribution}} \\",
         r"\cline{2-7}",
-        r" & Difference (%s) & $p$ & Same? & SD ratio & $p$ & Same? \\" % unit_table,
+        r" & Difference (%s) & $p$ & Same? & SD ratio & $p$ & Same? \\" % unit_tex,
         r"\hline",
         *table_rows,
         r"\hline",
@@ -416,7 +443,7 @@ for variable in VARIABLES:
     os.makedirs(os.path.dirname(table_path) or ".", exist_ok=True)
     with open(table_path, "w") as handle:
         handle.write(
-            f"% {variable_label}: emulated vs held-out CESM2 global means,\n"
+            f"% {variable_label} ({unit_plain}): emulated vs held-out CESM2.\n"
             f"% {('last %d years' % N_YEARS) if N_YEARS else 'full record'}.\n"
             f"% Built from {DATA_DIR}/ by scripts/make_fig34_from_csv.py\n"
             "% — do not edit by hand. The caption below says what the numbers\n"
