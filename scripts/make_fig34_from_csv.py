@@ -150,6 +150,12 @@ baseline = {(row.variable, row.scenario, row.side): row.baseline
 
 by_member = {}   # (variable, scenario, side) -> array (member, year)
 pooled = {}      # (variable, scenario, side) -> flat array of member-years
+# The window is the LAST N_YEARS of each record, and the records end at
+# different times — hist in 2014, ssp370 in 2100, aaer and ghg in 2050 — so
+# "the last 20 years" is a different span in every panel. The actual years are
+# kept here and shown in the panel titles and the table caption, because a
+# reader cannot otherwise tell which decades a panel covers.
+years_used = {}  # (variable, scenario) -> (first_year, last_year)
 for variable in VARIABLES:
     as_percent = VARIABLES[variable][4]
     for scenario in SCENARIOS:
@@ -168,6 +174,13 @@ for variable in VARIABLES:
 
             by_member[(variable, scenario, side)] = window.values.T
             pooled[(variable, scenario, side)] = window.values.T.ravel()
+
+            span = (int(window.index[0]), int(window.index[-1]))
+            # Both sides must cover the same years, or the histograms would be
+            # comparing different decades to each other.
+            assert years_used.setdefault((variable, scenario), span) == span, (
+                f"{variable} {scenario}: {side} covers {span}, the other side "
+                f"covers {years_used[(variable, scenario)]}")
 
         emulator_shape = by_member[(variable, scenario, "emulator")].shape
         cesm_shape = by_member[(variable, scenario, "cesm2")].shape
@@ -256,7 +269,8 @@ for variable in VARIABLES:
                      lw=1.4, ls="--")
 
         row = statistics[(variable, scenario)]
-        axis.set_title(f"{SCENARIOS[scenario][0]}\n"
+        first_year, last_year = years_used[(variable, scenario)]
+        axis.set_title(f"{SCENARIOS[scenario][0]} ({first_year}\u2013{last_year})\n"
                        f"$\\Delta$mean {row['mean_difference']:+.3f}, "
                        f"sd ratio {row['sd_ratio']:.2f}",
                        fontsize=9.5, loc="left")
@@ -393,8 +407,13 @@ for variable in VARIABLES:
         counts[side] = (f"{sizes[0]}" if len(sizes) == 1
                         else f"{sizes[0]}--{sizes[-1]}")
 
-    window_text = (f"the last {N_YEARS} years" if N_YEARS
-                   else "the full record")
+    # The experiments end in different years, so name the spans rather than
+    # leaving "the last 20 years" to be resolved against four different records.
+    spans = "; ".join(
+        f"{SCENARIOS[s][0]} {years_used[(variable, s)][0]}--"
+        f"{years_used[(variable, s)][1]}" for s in SCENARIOS)
+    window_text = f"the last {N_YEARS} years" if N_YEARS else "the full record"
+    span_text = f" ({spans})" if N_YEARS else ""
 
     referenced = ("as a percentage change from each side's own 1850--1900 "
                   "mean" if as_percent else
@@ -402,8 +421,8 @@ for variable in VARIABLES:
 
     caption = (
         f"Distributions of global-mean {variable_label.lower()} over "
-        f"{window_text} of each experiment, pooling every member and every "
-        f"year, {referenced}. The "
+        f"{window_text} of each experiment{span_text}, pooling every member "
+        f"and every year, {referenced}. The "
         f"MEAN columns give the difference between the emulator's and CESM2's "
         f"pooled means, in {unit_tex}, and Welch's $t$-test on the member "
         f"means ({counts['emulator']} emulator members against "
