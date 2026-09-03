@@ -9,7 +9,7 @@ Run it with no arguments:
     /home/nordling/miniconda3/envs/plotting/bin/python scripts/make_fig12_from_csv.py
 
 Everything configurable is in the SETTINGS block below. No command-line options
-and no helper functions: the script runs top to bottom in nine numbered steps.
+and no helper functions: the script runs top to bottom in ten numbered steps.
 
 WHAT THIS IS, AND WHY IT EXISTS
 -------------------------------
@@ -55,7 +55,11 @@ panels (b)-(d) are therefore in PERCENTAGE POINTS.
 
 # Where scripts/make_fig12_csv.py wrote its output. Expected inside:
 #     <variable>_<scenario>_<side>.csv   years as rows, members as columns
-#     baselines.csv                      each side's own 1850-1900 mean
+#
+# Only those sixteen files are read. The baselines are computed from them in
+# step 2 rather than taken from the baselines.csv sitting alongside, so the
+# figure depends on ONE source and the anomaly cannot silently disagree with
+# the absolute values it is derived from.
 DATA_DIR = "plots/fig12_data"
 
 # Each figure gets its OWN FOLDER, holding the figure and the LaTeX table of
@@ -124,18 +128,40 @@ for variable in VARIABLES:
               f"CESM2 {series[(variable, scenario, 'cesm2')].shape}  "
               f"(year x member)")
 
-# baselines.csv carries each side's own 1850-1900 mean, which is what turns the
-# absolute values above into the anomalies the figures plot. It is read rather
-# than recomputed because ssp370 begins in 2015 and has no baseline period of
-# its own: the export gave it the historical one, on both sides, and that
-# convention has to survive the round trip.
-baseline_frame = pd.read_csv(f"{DATA_DIR}/baselines.csv")
-baseline = {(row.variable, row.scenario, row.side): row.baseline
-            for row in baseline_frame.itertuples()}
-print(f"[step 1] {len(baseline)} baselines from {DATA_DIR}/baselines.csv")
+# =============================================================================
+#  STEP 2 — each side's 1850-1900 baseline, from the same files
+# =============================================================================
+# Computed from the frames just read, not taken from baselines.csv. The two
+# agree — the export computed them exactly this way — but reading a second file
+# would let the anomaly drift from the absolute values it is derived from if the
+# CSVs were ever re-exported without it, and there is nothing here that file
+# knows and these do not.
+#
+# ssp370 is the one exception, and the reason a baseline file existed at all: it
+# begins in 2015, so its own record contains no part of 1850-1900. It inherits
+# the historical baseline, on BOTH sides, which is what keeps the two
+# comparable.
+
+baseline = {}
+for variable in VARIABLES:
+    for side in ("emulator", "cesm2"):
+        for scenario in SCENARIOS:
+            frame = series[(variable, scenario, side)]
+            window = frame.loc[BASELINE[0]:BASELINE[1]]
+            baseline[(variable, scenario, side)] = (
+                float(window.values.mean()) if len(window) else np.nan)
+        if not np.isfinite(baseline[(variable, "ssp370", side)]):
+            baseline[(variable, "ssp370", side)] = baseline[(variable, "hist", side)]
+
+for variable in VARIABLES:
+    for scenario in SCENARIOS:
+        print(f"[step 2] {variable:6s} {scenario:7s} baselines "
+              f"emulator {baseline[(variable, scenario, 'emulator')]:8.3f}, "
+              f"CESM2 {baseline[(variable, scenario, 'cesm2')]:8.3f}"
+              + ("   (inherited from hist)" if scenario == "ssp370" else ""))
 
 # =============================================================================
-#  STEP 2 — absolute values become anomalies
+#  STEP 3 — absolute values become anomalies
 # =============================================================================
 # Each side is referenced to ITS OWN pre-industrial. The emulator's absolute
 # climate is close to CESM2's but not identical, and a constant offset between
@@ -158,7 +184,7 @@ for variable, (_, _, _, _, as_percent) in VARIABLES.items():
             anomaly[(variable, scenario, side)] = values
 
 # =============================================================================
-#  STEP 3 — the numbers, on the years both sides cover
+#  STEP 4 — the numbers, on the years both sides cover
 # =============================================================================
 # The ranges differ — CESM2's aaer and ghg trees stop in 2050 while the emulator
 # runs to 2100 — so every statistic below is computed on the intersection.
@@ -199,12 +225,12 @@ for variable in VARIABLES:
             inside=float(((difference >= spread_low)
                           & (difference <= spread_high)).mean()) * 100)
         row = stats[(variable, scenario)]
-        print(f"[step 3] {variable:6s} {scenario:7s} r {row['corr']:.3f}, "
+        print(f"[step 4] {variable:6s} {scenario:7s} r {row['corr']:.3f}, "
               f"bias {row['bias']:+.3f}, rmse {row['rmse']:.3f}, "
               f"{row['inside']:.0f}% of years within CESM2's own spread")
 
 # =============================================================================
-#  STEP 4 — one figure per variable
+#  STEP 5 — one figure per variable
 # =============================================================================
 # One wide overview panel on top, and beneath it one bias panel per experiment.
 # hist and ssp370 share a bias panel because they are one continuous
@@ -226,7 +252,7 @@ for variable, (name, label, y_label, unit_tex, as_percent) in VARIABLES.items():
     ax_bias = [fig.add_subplot(grid[1, i]) for i in range(len(bias_panels))]
 
     # -------------------------------------------------------------------------
-    #  STEP 5 — draw panel (a), one experiment at a time
+    #  STEP 6 — draw panel (a), one experiment at a time
     # -------------------------------------------------------------------------
     # Per experiment: CESM2's member range as shading, CESM2's mean as a dashed
     # line with open circles, and the emulator's mean as a thick solid line.
@@ -259,7 +285,7 @@ for variable, (name, label, y_label, unit_tex, as_percent) in VARIABLES.items():
                      color=colour, lw=2.6, zorder=4, label=scenario_label)
 
     # -------------------------------------------------------------------------
-    #  STEP 6 — draw the bias panels
+    #  STEP 7 — draw the bias panels
     # -------------------------------------------------------------------------
     # The grey band is the min-to-max range of CESM2's members about their own
     # mean, per year. Where the coloured bias line sits inside it, the emulator
@@ -310,7 +336,7 @@ for variable, (name, label, y_label, unit_tex, as_percent) in VARIABLES.items():
                                                steps=[1, 5, 10]))
 
     # -------------------------------------------------------------------------
-    #  STEP 7 — legends, and finish panel (a)
+    #  STEP 8 — legends, and finish panel (a)
     # -------------------------------------------------------------------------
     # Two legends, stacked above the panel so they cover no data: the scenario
     # colours, and what the line styles and shadings mean.
@@ -340,7 +366,7 @@ for variable, (name, label, y_label, unit_tex, as_percent) in VARIABLES.items():
                  fontweight="bold", va="top")
 
     # -------------------------------------------------------------------------
-    #  STEP 8 — save
+    #  STEP 9 — save
     # -------------------------------------------------------------------------
     # bbox_extra_artists keeps the legends inside the tight bounding box;
     # without it the top row gets cropped, because they sit outside the axes.
@@ -350,11 +376,11 @@ for variable, (name, label, y_label, unit_tex, as_percent) in VARIABLES.items():
     for path in (out_path, os.path.splitext(out_path)[0] + ".pdf"):
         fig.savefig(path, bbox_inches="tight",
                     bbox_extra_artists=[legend_scenarios, legend_style])
-        print(f"[step 8] wrote {path}")
+        print(f"[step 9] wrote {path}")
     plt.close(fig)
 
 # =============================================================================
-#  STEP 9 — the same numbers as LaTeX tables
+#  STEP 10 — the same numbers as LaTeX tables
 # =============================================================================
 # A COMPLETE `table` float — caption, label and tabular — so \\input drops it
 # straight into the paper with no wrapper. The label is \\label{tab:fig01} and
@@ -433,7 +459,7 @@ for variable, (name, label, _, unit_tex, as_percent) in VARIABLES.items():
                      "% — do not edit by hand. The caption below says what the\n"
                      "% numbers are; \\input this file directly.\n")
         handle.write(table_tex + "\n")
-    print(f"[step 9] wrote {table_path}")
+    print(f"[step 10] wrote {table_path}")
 
     print(f"\n{label}: emulator vs held-out CESM2 "
           f"({'percentage points' if VARIABLES[variable][4] else 'degC'}, "
