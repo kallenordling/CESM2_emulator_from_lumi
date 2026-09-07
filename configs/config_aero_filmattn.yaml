@@ -25,12 +25,22 @@ model:
     attn_heads: 8
     init_kernel_size: 7
     model_dim: 96
-    # Declared here so `model.film_attention=true` and
-    # `model.cond_global_levels=N` are legal Hydra overrides; without the key
-    # present the override fails with "Key ... is not in struct".
-    # Both defaults reproduce the original architecture exactly.
-    film_attention: false      # also condition the attention blocks
-    cond_global_levels: 0      # extra encoder stages down to a global mean
+    # ── New in the film-attention-global arm ────────────────────────────────
+    # Condition the attention blocks. Previously the forcing reached only
+    # ResnetBlock via `spatial_film`; SpatialLinearAttention and the temporal
+    # attention saw none of it, so a forcing signal could influence distant
+    # cells only by being carried there through the convolutional path.
+    # NOTE: this restructures the attention submodules, so 24 attention weight
+    # tensors from an older checkpoint will NOT load. This arm starts fresh.
+    film_attention: true
+    # Extra conditioning-encoder stages that keep halving past the UNet's own
+    # depth and end in a global average, giving a whole-globe receptive field.
+    # The coarsest encoder level is H/8 = 24x36, so three stride-2 stages plus
+    # the adaptive pool reach a single cell. Broadcast back as an additive FiLM
+    # term at every level; zero-initialised, so it starts as a no-op.
+    # Motivation: CO2 is well mixed, but the measured point sensitivity showed
+    # its influence staying regional around the response cell.
+    cond_global_levels: 3
 
 scheduler:
     _target_: custom_diffusers.continuous_ddpm.ContinuousDDPM
@@ -59,7 +69,7 @@ trainer:
     mse_only: false
     batch_size: 8        # must match batch_size in config_data.yaml
     save_dir: runs/
-    save_name: run_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
+    save_name: run_filmattn.pt   # FRESH: film_attention restructures the attention submodules, so older checkpoints cannot load
     load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
     # ── LR decay (pure function of global_step → resume-invariant; default off) ─

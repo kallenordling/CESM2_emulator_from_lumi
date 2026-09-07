@@ -590,6 +590,53 @@ class PseudoConv3D(nn.Module):
         return x
 
 
+class FiLMAttention(nn.Module):
+    """Wraps an attention block so the conditioning can modulate it.
+
+    The attention blocks were the one place in this UNet that never saw the
+    forcing: conditioning reached only ResnetBlock, through its `spatial_film`
+    argument. Attention is where long-range spatial structure is formed, so a
+    forcing signal that cannot enter it can only influence distant cells by
+    being carried there through the convolutional path.
+
+    Modulation is applied to the attention block's OUTPUT, as a residual gate:
+
+        y = x + gate * attn(norm(x)) * (1 + scale) + shift
+
+    `gate` is a learned scalar initialised to ONE and the projection is
+    zero-initialised, so at initialisation scale = shift = 0 and the block is
+    exactly Residual(PreNorm(attn)). Only the conditioning has to be learned.
+    """
+
+    def __init__(self, dim, attn_module, cond_dim=None):
+        super().__init__()
+        self.norm = LayerNorm(dim)
+        self.attn = attn_module
+        self.proj = nn.Conv3d(cond_dim, dim * 2, 1) if cond_dim else None
+        if self.proj is not None:
+            nn.init.zeros_(self.proj.weight)
+            nn.init.zeros_(self.proj.bias)
+        # ONE, not zero. The baseline block is x + attn(norm(x)); a zero gate
+        # would return x and silently switch the attention off. With gate = 1
+        # and the zero-initialised projection (scale = shift = 0) this reduces
+        # to exactly Residual(PreNorm(attn)), so an existing checkpoint keeps
+        # its behaviour and only the conditioning has to be learned.
+        self.gate = nn.Parameter(torch.ones(1))
+
+    def forward(self, x, cond_feat=None, **kwargs):
+        y = self.attn(self.norm(x), **kwargs)
+        if self.proj is not None and cond_feat is not None:
+            # cond_feat is [B, C, T, h, w]; interpolate only if it disagrees
+            # with x spatially, which happens on the up path where the encoder
+            # feature is coarser than the activation.
+            if cond_feat.shape[-2:] != x.shape[-2:]:
+                cond_feat = F.interpolate(cond_feat, size=x.shape[-3:],
+                                          mode="nearest")
+            scale, shift = self.proj(cond_feat).chunk(2, dim=1)
+            y = y * (1 + scale) + shift
+        return x + self.gate * y
+
+
 class SpatialCondEncoder(nn.Module):
     """
     Multi-scale conditioning encoder that preserves spatial structure.
@@ -605,10 +652,26 @@ class SpatialCondEncoder(nn.Module):
     to the conditioning encoder.
     """
 
-    def __init__(self, cond_channels: int, dims: list, resnet_groups: int = 8):
+    def __init__(self, cond_channels: int, dims: list, resnet_groups: int = 8,
+                 global_levels: int = 0):
+        """
+        global_levels > 0 adds a pyramid that continues halving BEYOND the
+        UNet's own depth until the field is a single cell, then keeps a global
+        average. The result is a per-scenario global vector that is broadcast
+        back to every level as an additive FiLM term.
+
+        Why: the encoder's coarsest level is still H/8 x W/8, so nothing in the
+        conditioning path has a whole-globe receptive field. A well-mixed gas
+        like CO2 has the same effect wherever it is emitted, and without a
+        global term the network can only learn that by propagating information
+        through the UNet itself — which the measured sensitivity maps suggest it
+        does not do (CO2 influence stayed regional around the response cell).
+        0 keeps the original architecture exactly, so old checkpoints load.
+        """
         super().__init__()
         level_dims        = dims[1:]
         n_levels          = len(level_dims)
+        self.global_levels = int(global_levels)
         self.levels       = nn.ModuleList()
         self.downsamplers = nn.ModuleList()
         self.residual_projs = nn.ModuleList()
@@ -644,8 +707,31 @@ class SpatialCondEncoder(nn.Module):
 
             in_ch = out_ch
 
-    def forward(self, x: torch.Tensor) -> list:
-        """Returns list of feature maps BEFORE downsampling, one per level."""
+        # ── Global pyramid: keep halving to a single cell, then mean ─────────
+        # Each stage is a strided conv so the reduction is learned rather than a
+        # plain average; the final adaptive pool guarantees 1x1 whatever the
+        # input size, so this does not hard-code the 192x288 grid.
+        self.global_stages = nn.ModuleList()
+        if self.global_levels > 0:
+            g_ch = level_dims[-1]
+            for _ in range(self.global_levels):
+                self.global_stages.append(nn.Sequential(
+                    LonCircularConv3d(g_ch, g_ch, (1, 4, 4), stride=(1, 2, 2),
+                                      padding=(0, 1, 1)),
+                    nn.GroupNorm(min(resnet_groups, g_ch), g_ch),
+                    nn.SiLU(),
+                ))
+            self.global_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
+        else:
+            self.global_pool = None
+
+    def forward(self, x: torch.Tensor):
+        """Returns (per-level features, global feature or None).
+
+        The global feature has shape [B, C, T, 1, 1] and is meant to be
+        broadcast: it carries no spatial information by construction, which is
+        exactly the point.
+        """
         features     = []
         prev_feat_ds = None
         for level, ds, res_proj in zip(self.levels, self.downsamplers, self.residual_projs):
@@ -655,7 +741,14 @@ class SpatialCondEncoder(nn.Module):
             features.append(feat)
             prev_feat_ds = ds(feat)
             x = prev_feat_ds
-        return features
+
+        global_feat = None
+        if self.global_pool is not None:
+            g = features[-1]
+            for stage in self.global_stages:
+                g = stage(g)
+            global_feat = self.global_pool(g)          # [B, C, T, 1, 1]
+        return features, global_feat
 
 
 class UNetModel3D(nn.Module):
@@ -704,6 +797,10 @@ class UNetModel3D(nn.Module):
             year_cond=False,
             cond_map=True,
             cond_channels=0,
+            # Both default OFF so this file still builds the architecture every
+            # existing checkpoint was trained with.
+            film_attention=False,      # condition the attention blocks too
+            cond_global_levels=0,      # extra encoder stages down to a global mean
     ):
         super().__init__()
 
@@ -711,6 +808,8 @@ class UNetModel3D(nn.Module):
         self.year_cond = year_cond
         self.day_cond = day_cond
         self.cond_channels = cond_channels
+        self.film_attention = bool(film_attention)
+        self.cond_global_levels = int(cond_global_levels)
 
         # Input and output size to the model will be how many variables we are predicting
         # in_channels = n_vars
@@ -796,7 +895,29 @@ class UNetModel3D(nn.Module):
                 cond_channels=cond_channels,
                 dims=dims,
                 resnet_groups=resnet_groups,
+                global_levels=self.cond_global_levels,
             )
+            # The global vector is broadcast into every ResnetBlock FiLM term.
+            # Zero-init: starts as a no-op and the model learns to use it.
+            if self.cond_global_levels > 0:
+                def _zero_proj(out_ch):
+                    proj = nn.Conv3d(dims[-1], out_ch * 2, 1)
+                    nn.init.zeros_(proj.weight); nn.init.zeros_(proj.bias)
+                    return proj
+                # Down blocks are dim_out wide, up blocks dim_in wide, and the
+                # bottleneck dims[-1]. Three separate lists; sharing one was a
+                # channel-count bug.
+                self.cond_global_down = nn.ModuleList(
+                    [_zero_proj(dim_out) for (_, dim_out) in in_out])
+                self.cond_global_up = nn.ModuleList(
+                    [_zero_proj(dim_in) for (dim_in, _) in reversed(in_out)])
+                self.cond_global_mid = _zero_proj(dims[-1])
+                self.cond_global_projs = True      # feature flag for forward
+            else:
+                self.cond_global_down = None
+                self.cond_global_up = None
+                self.cond_global_mid = None
+                self.cond_global_projs = None
 
             # Down projections (block1 and block2 at each level)
             self.cond_down_projs = nn.ModuleList([
@@ -854,6 +975,10 @@ class UNetModel3D(nn.Module):
             self.cond_shift   = None
         else:
             self.spatial_cond_encoder   = None
+            self.cond_global_projs      = None
+            self.cond_global_down       = None
+            self.cond_global_up         = None
+            self.cond_global_mid        = None
             self.cond_input_proj        = None   # no direct injection without cond
             self.cond_down_projs        = None
             self.cond_down_block1_projs = None
@@ -894,14 +1019,25 @@ class UNetModel3D(nn.Module):
                         block_klass_cond(dim_in, dim_out),
                         block_klass_cond(dim_out, dim_out),
                         (
-                            Residual(
-                                PreNorm(
+                            (
+                                FiLMAttention(
                                     dim_out,
                                     SpatialLinearAttention(
-                                        dim_out,
-                                        heads=attn_heads,
+                                        dim_out, heads=attn_heads,
                                         use_checkpoint=use_checkpoint,
                                     ),
+                                    cond_dim=(dim_out if (cond_channels > 0
+                                              and film_attention) else None),
+                                )
+                                if film_attention else
+                                Residual(
+                                    PreNorm(
+                                        dim_out,
+                                        SpatialLinearAttention(
+                                            dim_out, heads=attn_heads,
+                                            use_checkpoint=use_checkpoint,
+                                        ),
+                                    )
                                 )
                             )
                             if use_sparse_linear_attn or has_attn
@@ -947,14 +1083,27 @@ class UNetModel3D(nn.Module):
                         ),  # dim_out * 2 to account for incoming residual connection
                         block_klass_cond(dim_in, dim_in),
                         (
-                            Residual(
-                                PreNorm(
+                            (
+                                FiLMAttention(
                                     dim_in,
                                     SpatialLinearAttention(
-                                        dim_in,
-                                        heads=attn_heads,
+                                        dim_in, heads=attn_heads,
                                         use_checkpoint=use_checkpoint,
                                     ),
+                                    # The encoder feature at this level has
+                                    # dim_out channels, not dim_in.
+                                    cond_dim=(dim_out if (cond_channels > 0
+                                              and film_attention) else None),
+                                )
+                                if film_attention else
+                                Residual(
+                                    PreNorm(
+                                        dim_in,
+                                        SpatialLinearAttention(
+                                            dim_in, heads=attn_heads,
+                                            use_checkpoint=use_checkpoint,
+                                        ),
+                                    )
                                 )
                             )
                             if use_sparse_linear_attn or has_attn
@@ -1025,6 +1174,7 @@ class UNetModel3D(nn.Module):
         # teaching the model a wrong null conditioning value.
         NULL_COND_VALUE = -1.0
         cond_spatial_feats = None
+        cond_global_feat = None
         if self.spatial_cond_encoder is not None:
             if exists(cond_map):
                 cond_map_input = cond_map
@@ -1037,7 +1187,8 @@ class UNetModel3D(nn.Module):
                     NULL_COND_VALUE,
                     device=x.device, dtype=x.dtype,
                 )
-            cond_spatial_feats = self.spatial_cond_encoder(cond_map_input)
+            cond_spatial_feats, cond_global_feat = self.spatial_cond_encoder(
+                cond_map_input)
 
         if exists(lowres_cond):
             x = torch.cat([x, lowres_cond], dim=1)
@@ -1064,6 +1215,18 @@ class UNetModel3D(nn.Module):
         if self.year_cond:
             t += self.year_emb(years)
 
+        def _add_global(film, proj):
+            """Add the broadcast global-mean term to a per-level FiLM tensor.
+
+            The global feature is [B, C, T, 1, 1] and carries no spatial
+            information by construction, so it adds the same scale/shift to
+            every cell — which is exactly what a well-mixed forcing should do.
+            """
+            if cond_global_feat is None or proj is None:
+                return film
+            g = proj(cond_global_feat)
+            return g if film is None else film + g
+
         # Store skip connections
         h = []
 
@@ -1071,16 +1234,21 @@ class UNetModel3D(nn.Module):
         for level_idx, (block1, block2, spatial_attn, temporal_attn, downsample) in enumerate(self.downs):
             sp_film_b1 = None
             sp_film_b2 = None
+            feat = None
             if cond_spatial_feats is not None:
                 feat = cond_spatial_feats[level_idx]
                 if self.cond_down_block1_projs is not None:
                     sp_film_b1 = self.cond_down_block1_projs[level_idx](feat)
                 if self.cond_down_projs is not None:
                     sp_film_b2 = self.cond_down_projs[level_idx](feat)
+            _gp = None if self.cond_global_down is None else self.cond_global_down[level_idx]
+            sp_film_b1 = _add_global(sp_film_b1, _gp)
+            sp_film_b2 = _add_global(sp_film_b2, _gp)
 
             x = block1(x, t, spatial_film=sp_film_b1)
             x = block2(x, t, spatial_film=sp_film_b2)
-            x = spatial_attn(x)
+            x = (spatial_attn(x, cond_feat=feat)
+                 if isinstance(spatial_attn, FiLMAttention) else spatial_attn(x))
             x = temporal_attn(
                 x, pos_bias=time_rel_pos_bias, focus_present_mask=focus_present_mask
             )
@@ -1096,6 +1264,8 @@ class UNetModel3D(nn.Module):
                 sp_film_mid_b1 = self.cond_mid_block1_proj(feat)
             if self.cond_mid_proj is not None:
                 sp_film_mid_b2 = self.cond_mid_proj(feat)
+        sp_film_mid_b1 = _add_global(sp_film_mid_b1, self.cond_global_mid)
+        sp_film_mid_b2 = _add_global(sp_film_mid_b2, self.cond_global_mid)
 
         x = self.mid_block1(x, t, spatial_film=sp_film_mid_b1)
         x = self.mid_spatial_attn(x)
@@ -1111,18 +1281,25 @@ class UNetModel3D(nn.Module):
 
             sp_film_b1 = None
             sp_film_b2 = None
+            feat = None
+            # Defined unconditionally: it indexes the global projections below,
+            # which run even when there are no per-level spatial features.
+            down_level_idx = num_down_levels - 1 - up_idx
             if cond_spatial_feats is not None:
                 # Mirror down path: up_idx=0 -> deepest down level
-                down_level_idx = num_down_levels - 1 - up_idx
                 feat = cond_spatial_feats[down_level_idx]
                 if self.cond_up_block1_projs is not None:
                     sp_film_b1 = self.cond_up_block1_projs[up_idx](feat)
                 if self.cond_up_projs is not None:
                     sp_film_b2 = self.cond_up_projs[up_idx](feat)
+            _gp = None if self.cond_global_up is None else self.cond_global_up[up_idx]
+            sp_film_b1 = _add_global(sp_film_b1, _gp)
+            sp_film_b2 = _add_global(sp_film_b2, _gp)
 
             x = block1(x, t, spatial_film=sp_film_b1)
             x = block2(x, t, spatial_film=sp_film_b2)
-            x = spatial_attn(x)
+            x = (spatial_attn(x, cond_feat=feat)
+                 if isinstance(spatial_attn, FiLMAttention) else spatial_attn(x))
             x = temporal_attn(
                 x, pos_bias=time_rel_pos_bias, focus_present_mask=focus_present_mask
             )
