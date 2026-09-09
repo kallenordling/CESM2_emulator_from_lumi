@@ -183,10 +183,16 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/AAER    ${LOCAL_DATA_ROOT}/training_data/\${var}/
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/GHG     ${LOCAL_DATA_ROOT}/training_data/\${var}/
     done
-    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc.nc  ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc.nc     ${LOCAL_DATA_ROOT}/
+    # The _co2fix set. The plain *_bc.nc files these lines used to name were
+    # DELETED 2026-09-07, and every launcher in the repo still names them: the
+    # copy only survives where SRC_DATA_ROOT resolves to a scratch that still
+    # holds them, which is why run_filmattn.sh (LUMI_PROJECT=462001112) does not
+    # trip on it and this one (462001328, the config's own project) died in
+    # staging on its first launch under set -euo pipefail.
+    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed_bc_co2fix.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc_co2fix.nc  ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc_co2fix.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc_co2fix.nc     ${LOCAL_DATA_ROOT}/
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 
