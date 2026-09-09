@@ -25,6 +25,7 @@ comparable in width between experiments. The band is min-max across members.
         analysis/nonlinear_emission_interaction/plot_city_series.py
 """
 
+import argparse
 import os
 import sys
 
@@ -35,13 +36,32 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-RESULT = os.path.join(HERE, "results", "city_series.npz")
+# TREFHT -> figs 05/06, PRECT -> figs 07/08. Both slots were free; the
+# previous occupants of all four are in plots/archive.
+VARS = {
+    "TREFHT": dict(unit="°C", label="TREFHT  [°C]", npz="city_series.npz",
+                   figs=("fig05", "fig06"), stem=("figure_15_city_timeseries",
+                                                  "figure_16_city_histograms"),
+                   long="Near-surface temperature"),
+    "PRECT":  dict(unit="mm/day", label="PRECT  [mm/day]",
+                   npz="city_series_PRECT.npz",
+                   figs=("fig07", "fig08"), stem=("figure_17_city_timeseries_PRECT",
+                                                  "figure_18_city_histograms_PRECT"),
+                   long="Precipitation"),
+}
+_ap = argparse.ArgumentParser(description=__doc__)
+_ap.add_argument("--var", default="TREFHT", choices=sorted(VARS))
+_args = _ap.parse_args()
+VAR = _args.var
+CFG = VARS[VAR]
+
+RESULT = os.path.join(HERE, "results", CFG["npz"])
 FIGDIR = os.path.join(HERE, "figures")
 # Paper figures follow the repo convention plots/figNN/figNN.{png,pdf}. The
 # previous occupants of 05/06 were moved to plots/archive, so these slots are
 # free; scripts/make_fig5.py still NAMES its outputs fig05/fig06 though, so
 # re-running it would overwrite these.
-PAPER = {"timeseries": "fig05", "histograms": "fig06"}
+PAPER = {"timeseries": CFG["figs"][0], "histograms": CFG["figs"][1]}
 
 
 def outputs(kind, local_stem):
@@ -115,6 +135,16 @@ def skill(e):
 
 SKILL = {e: skill(e) for e in exps}
 
+# Member counts differ by VARIABLE as well as by experiment -- TREFHT has 11
+# CESM2 hist members, PRECT only 5 -- so read them off the data rather than
+# stating them in the caption, which is how the TREFHT counts ended up on the
+# PRECT figure the first time.
+NMEM = {e: (d[f"model_{e}"].shape[0],
+            d[f"cesm_{e}"].shape[0] if f"cesm_{e}" in d.files else 0)
+        for e in exps}
+MEMTXT = ", ".join(f"{e} {c}" for e, (_, c) in NMEM.items())
+NMOD = sorted({m for m, _ in NMEM.values()})
+
 plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9})
 os.makedirs(FIGDIR, exist_ok=True)
 
@@ -135,7 +165,7 @@ for ci, city in enumerate(cities):
     ax.set_title(f"({PANEL[ci]})  {city}   (cell {la:+.2f}, {lo:+.2f})",
                  fontsize=11, loc="left", pad=5, fontweight="bold")
     ax.grid(alpha=0.25, lw=0.5)
-    ax.set_ylabel("TREFHT  [°C]")
+    ax.set_ylabel(CFG["label"])
     rows = [f"{'':>10s} {'r':>6s} {'r10':>6s} {'RMSE':>6s}"]
     for e in exps:
         sk = SKILL.get(e)
@@ -155,17 +185,17 @@ h, l = axes[0][0].get_legend_handles_labels()
 fig.legend(h, l, loc="lower center", ncol=4, frameon=False, fontsize=8.2,
            bbox_to_anchor=(0.5, -0.045))
 fig.suptitle(
-    "Near-surface temperature at four cities, every TRAINING experiment — "
-    "solid = emulator (5 members), dashed = CESM2\n"
-    "band = min-max across members. Member counts differ (CESM2: 11 hist, "
-    "10 aaer, 10 ghg, only 3 ssp370), so band widths\nare not comparable "
-    "between experiments. Nearest gridpoint on the 192x288 grid.\n"
-    "Inset: r and RMSE [°C] between the two ENSEMBLE MEANS. Members are "
+    f"{CFG['long']} at four cities, every TRAINING experiment — solid = "
+    f"emulator ({'/'.join(str(n) for n in NMOD)} members), dashed = CESM2\n"
+    f"band = min-max across members. CESM2 members: {MEMTXT} — so band widths "
+    "are NOT comparable between experiments.\nNearest gridpoint on the "
+    "192x288 grid.\n"
+    f"Inset: r and RMSE [{CFG['unit']}] between the two ENSEMBLE MEANS. Members are "
     "different realisations, so internal variability cannot correlate — "
     "r is the forced-signal agreement, r10 the same on 10-year means.",
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0.035, 1, 0.93))
-for p in outputs("timeseries", "figure_15_city_timeseries"):
+for p in outputs("timeseries", CFG["stem"][0]):
     fig.savefig(p, bbox_inches="tight"); print(f"[plot] wrote {p}")
 plt.close(fig)
 
@@ -199,7 +229,7 @@ for ci, city in enumerate(cities):
     la, lo = cells[ci]
     ax.set_title(f"({PANEL[ci]})  {city}   (cell {la:+.2f}, {lo:+.2f})",
                  fontsize=11, loc="left", pad=5, fontweight="bold")
-    ax.set_xlabel("TREFHT  [°C]")
+    ax.set_xlabel(CFG["label"])
     ax.set_ylabel("density")
     ax.grid(alpha=0.25, lw=0.5)
     rows = [f"{'':>10s} {'bias':>6s} {'sd/sd':>6s} {'QQ':>5s}"]
@@ -220,18 +250,19 @@ fig.suptitle(
     "step = emulator, filled/dashed = CESM2\n"
     "hist ends 2014, ssp370 and the single-forcing runs end 2100, so the "
     "panels compare different periods per experiment.\n"
-    "All members pooled; the emulator contributes 5 x 20 samples, CESM2 up to "
-    "11 x 20.\n"
-    "Inset: mean bias [°C], the sd ratio emulator/CESM2, and the Q-Q RMSE — "
+    f"All members pooled: emulator {'/'.join(str(n) for n in NMOD)} x "
+    f"{NLAST} samples, CESM2 {MEMTXT} x {NLAST}.\n"
+    f"Inset: mean bias [{CFG['unit']}], the sd ratio emulator/CESM2, and the Q-Q RMSE — "
     "the RMS gap between matched quantiles, which is a\nproper distance for "
     "unpaired samples where a pointwise RMSE would not be.",
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0.035, 1, 0.93))
-for p in outputs("histograms", "figure_16_city_histograms"):
+for p in outputs("histograms", CFG["stem"][1]):
     fig.savefig(p, bbox_inches="tight"); print(f"[plot] wrote {p}")
 plt.close(fig)
 
-print(f"\n[plot] last-{NLAST}-year mean and sd, emulator vs CESM2 [°C]:")
+print(f"\n[plot] {VAR}: last-{NLAST}-year stats, emulator vs CESM2 "
+      f"[{CFG['unit']}]:")
 print(f"{'city':>11s} {'exp':>7s} | {'bias':>6s} {'sd/sd':>6s} {'QQ':>5s} | "
       f"{'r':>6s} {'r10':>6s} {'RMSE':>6s}")
 for ci_, city in enumerate(cities):
