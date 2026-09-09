@@ -66,6 +66,7 @@ COL = {"hist": "#2F5D7C", "ssp370": "#B4451F",
 LBL = {"hist": "hist", "ssp370": "ssp370",
        "aaer": "aaer (GHG fixed at 1850)", "ghg": "ghg (aerosol fixed at 1850)"}
 
+PANEL = "abcd"
 SMOOTH_N = 10
 
 
@@ -131,8 +132,8 @@ for ci, city in enumerate(cities):
             ax.plot(cyr, cm.mean(0), color=c, lw=1.4, ls="--", zorder=3,
                     label=f"{LBL[e]} — CESM2")
     la, lo = cells[ci]
-    ax.set_title(f"{city}   (cell {la:+.2f}, {lo:+.2f})", fontsize=11,
-                 loc="left", pad=5, fontweight="bold")
+    ax.set_title(f"({PANEL[ci]})  {city}   (cell {la:+.2f}, {lo:+.2f})",
+                 fontsize=11, loc="left", pad=5, fontweight="bold")
     ax.grid(alpha=0.25, lw=0.5)
     ax.set_ylabel("TREFHT  [°C]")
     rows = [f"{'':>10s} {'r':>6s} {'r10':>6s} {'RMSE':>6s}"]
@@ -196,8 +197,8 @@ for ci, city in enumerate(cities):
                 (np.quantile(m, q) - np.quantile(cm, q)) ** 2)))
             stats[(city, e)] = (m.mean(), cm.mean(), m.std(), cm.std(), qq)
     la, lo = cells[ci]
-    ax.set_title(f"{city}   (cell {la:+.2f}, {lo:+.2f})", fontsize=11,
-                 loc="left", pad=5, fontweight="bold")
+    ax.set_title(f"({PANEL[ci]})  {city}   (cell {la:+.2f}, {lo:+.2f})",
+                 fontsize=11, loc="left", pad=5, fontweight="bold")
     ax.set_xlabel("TREFHT  [°C]")
     ax.set_ylabel("density")
     ax.grid(alpha=0.25, lw=0.5)
