@@ -131,10 +131,15 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     # EMISSIONS_PATHS (percentile reference, see data/climate_dataset.py) and
     # the per-scenario config_data.yaml inputs. ssp126 is the OOD test and is
     # not staged here.
-    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc.nc  ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc.nc    ${LOCAL_DATA_ROOT}/
-    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc.nc     ${LOCAL_DATA_ROOT}/
+    # The _co2fix set. The plain *_bc.nc files these lines used to name were
+    # DELETED 2026-09-07; every launcher still named them, and the copy only
+    # survives where SRC_DATA_ROOT happens to resolve to a scratch that still
+    # holds them. Under set -euo pipefail the miss kills the job in staging
+    # (seen on run_asinh.sh job 21837444, LUMI_PROJECT matching its config).
+    cp ${SRC_DATA_ROOT}/emissions_hist_only_timefixed_bc_co2fix.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc_co2fix.nc  ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc_co2fix.nc    ${LOCAL_DATA_ROOT}/
+    cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc_co2fix.nc     ${LOCAL_DATA_ROOT}/
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 
