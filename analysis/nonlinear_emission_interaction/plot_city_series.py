@@ -34,8 +34,25 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 RESULT = os.path.join(HERE, "results", "city_series.npz")
 FIGDIR = os.path.join(HERE, "figures")
+# Paper figures follow the repo convention plots/figNN/figNN.{png,pdf}. The
+# previous occupants of 05/06 were moved to plots/archive, so these slots are
+# free; scripts/make_fig5.py still NAMES its outputs fig05/fig06 though, so
+# re-running it would overwrite these.
+PAPER = {"timeseries": "fig05", "histograms": "fig06"}
+
+
+def outputs(kind, local_stem):
+    """Both the working copy and the numbered paper copy."""
+    paths = [os.path.join(FIGDIR, local_stem + ext) for ext in (".png", ".pdf")]
+    n = PAPER.get(kind)
+    if n:
+        d = os.path.join(REPO, "plots", n)
+        os.makedirs(d, exist_ok=True)
+        paths += [os.path.join(d, n + ext) for ext in (".png", ".pdf")]
+    return paths
 if not os.path.exists(RESULT):
     sys.exit(f"[error] {RESULT} not found — run dump_city_series.py on LUMI")
 
@@ -82,8 +99,7 @@ fig.suptitle(
     "between experiments. Nearest gridpoint on the 192x288 grid.",
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0, 1, 0.93))
-for p in (os.path.join(FIGDIR, "figure_15_city_timeseries.png"),
-          os.path.join(FIGDIR, "figure_15_city_timeseries.pdf")):
+for p in outputs("timeseries", "figure_15_city_timeseries"):
     fig.savefig(p, bbox_inches="tight"); print(f"[plot] wrote {p}")
 plt.close(fig)
 
@@ -122,8 +138,7 @@ fig.suptitle(
     "11 x 20.",
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0, 1, 0.93))
-for p in (os.path.join(FIGDIR, "figure_16_city_histograms.png"),
-          os.path.join(FIGDIR, "figure_16_city_histograms.pdf")):
+for p in outputs("histograms", "figure_16_city_histograms"):
     fig.savefig(p, bbox_inches="tight"); print(f"[plot] wrote {p}")
 plt.close(fig)
 
