@@ -66,6 +66,43 @@ COL = {"hist": "#2F5D7C", "ssp370": "#B4451F",
 LBL = {"hist": "hist", "ssp370": "ssp370",
        "aaer": "aaer (GHG fixed at 1850)", "ghg": "ghg (aerosol fixed at 1850)"}
 
+def _smooth(x, n=10):
+    """Running mean, same length, edges shortened rather than padded."""
+    return np.convolve(x, np.ones(n) / n, mode="same")
+
+
+def skill(e):
+    """r and RMSE between the two ENSEMBLE MEANS on their overlapping years.
+
+    The emulator's members are different realisations from CESM2's, so
+    internal variability is unsynchronised and CANNOT correlate. r on the
+    annual series therefore measures agreement on the FORCED signal only, and
+    is diluted by noise that no model could match; r10 (both series smoothed
+    with a 10-year running mean) isolates that forced part. RMSE is on the
+    annual ensemble means, so it carries both the forced error and the
+    residual noise of a 5-member vs 3-to-11-member mean.
+    """
+    if f"cesm_{e}" not in d.files:
+        return None
+    my, cy = d[f"years_{e}"], d[f"cesm_years_{e}"]
+    common = np.intersect1d(my, cy)
+    if len(common) < 10:
+        return None
+    mi = np.searchsorted(my, common)
+    ci_ = np.searchsorted(cy, common)
+    out = {}
+    for k in range(len(cities)):
+        m = d[f"model_{e}"][:, k, :].mean(0)[mi]
+        c = d[f"cesm_{e}"][:, k, :].mean(0)[ci_]
+        r = float(np.corrcoef(m, c)[0, 1])
+        ms, cs_ = _smooth(m)[5:-5], _smooth(c)[5:-5]
+        r10 = float(np.corrcoef(ms, cs_)[0, 1]) if len(ms) > 3 else np.nan
+        out[k] = (r, r10, float(np.sqrt(np.mean((m - c) ** 2))), len(common))
+    return out
+
+
+SKILL = {e: skill(e) for e in exps}
+
 plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9})
 os.makedirs(FIGDIR, exist_ok=True)
 
@@ -87,6 +124,16 @@ for ci, city in enumerate(cities):
                  loc="left", pad=5, fontweight="bold")
     ax.grid(alpha=0.25, lw=0.5)
     ax.set_ylabel("TREFHT  [°C]")
+    rows = [f"{'':>10s} {'r':>6s} {'r10':>6s} {'RMSE':>6s}"]
+    for e in exps:
+        sk = SKILL.get(e)
+        if sk is None:
+            continue
+        r, r10, rmse, _ = sk[ci]
+        rows.append(f"{e:>10s} {r:>6.2f} {r10:>6.2f} {rmse:>6.2f}")
+    ax.text(0.985, 0.03, "\n".join(rows), transform=ax.transAxes, ha="right",
+            va="bottom", fontsize=6.9, family="monospace",
+            bbox=dict(fc="white", ec="0.75", lw=0.6, alpha=0.9, pad=3))
     if ci == 0:
         ax.legend(frameon=False, fontsize=7.2, ncol=2, loc="upper left")
 for ax in axes[1]:
@@ -96,7 +143,10 @@ fig.suptitle(
     "solid = emulator (5 members), dashed = CESM2\n"
     "band = min-max across members. Member counts differ (CESM2: 11 hist, "
     "10 aaer, 10 ghg, only 3 ssp370), so band widths\nare not comparable "
-    "between experiments. Nearest gridpoint on the 192x288 grid.",
+    "between experiments. Nearest gridpoint on the 192x288 grid.\n"
+    "Inset: r and RMSE [°C] between the two ENSEMBLE MEANS. Members are "
+    "different realisations, so internal variability cannot correlate — "
+    "r is the forced-signal agreement, r10 the same on 10-year means.",
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0, 1, 0.93))
 for p in outputs("timeseries", "figure_15_city_timeseries"):
@@ -120,13 +170,32 @@ for ci, city in enumerate(cities):
                     color=c, alpha=0.17, zorder=2)
             ax.hist(cm, bins=18, density=True, histtype="step", lw=1.1, ls="--",
                     color=c, zorder=3, label=f"{LBL[e]} — CESM2")
-            stats[(city, e)] = (m.mean(), cm.mean(), m.std(), cm.std())
+            # A pointwise RMSE between two unpaired sample sets is
+            # meaningless -- the members are different realisations and the
+            # sample counts differ (5x20 vs up to 11x20). The Q-Q RMSE, the
+            # RMS gap between matched quantiles, is a proper distance between
+            # the two distributions and reduces to |mean bias| when they
+            # differ only by a shift.
+            q = np.linspace(0.02, 0.98, 49)
+            qq = float(np.sqrt(np.mean(
+                (np.quantile(m, q) - np.quantile(cm, q)) ** 2)))
+            stats[(city, e)] = (m.mean(), cm.mean(), m.std(), cm.std(), qq)
     la, lo = cells[ci]
     ax.set_title(f"{city}   (cell {la:+.2f}, {lo:+.2f})", fontsize=11,
                  loc="left", pad=5, fontweight="bold")
     ax.set_xlabel("TREFHT  [°C]")
     ax.set_ylabel("density")
     ax.grid(alpha=0.25, lw=0.5)
+    rows = [f"{'':>10s} {'bias':>6s} {'sd/sd':>6s} {'QQ':>5s}"]
+    for e in exps:
+        st = stats.get((city, e))
+        if st is None:
+            continue
+        mm, cc, ms_, cs_, qq = st
+        rows.append(f"{e:>10s} {mm - cc:>+6.2f} {ms_ / cs_:>6.2f} {qq:>5.2f}")
+    ax.text(0.985, 0.97, "\n".join(rows), transform=ax.transAxes, ha="right",
+            va="top", fontsize=6.9, family="monospace",
+            bbox=dict(fc="white", ec="0.75", lw=0.6, alpha=0.9, pad=3))
     if ci == 0:
         ax.legend(frameon=False, fontsize=7.2, ncol=2, loc="upper left")
 fig.suptitle(
@@ -135,7 +204,10 @@ fig.suptitle(
     "hist ends 2014, ssp370 and the single-forcing runs end 2100, so the "
     "panels compare different periods per experiment.\n"
     "All members pooled; the emulator contributes 5 x 20 samples, CESM2 up to "
-    "11 x 20.",
+    "11 x 20.\n"
+    "Inset: mean bias [°C], the sd ratio emulator/CESM2, and the Q-Q RMSE — "
+    "the RMS gap between matched quantiles, which is a\nproper distance for "
+    "unpaired samples where a pointwise RMSE would not be.",
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0, 1, 0.93))
 for p in outputs("histograms", "figure_16_city_histograms"):
@@ -143,8 +215,15 @@ for p in outputs("histograms", "figure_16_city_histograms"):
 plt.close(fig)
 
 print(f"\n[plot] last-{NLAST}-year mean and sd, emulator vs CESM2 [°C]:")
-print(f"{'city':>11s} {'experiment':>8s} | {'emu mean':>9s} {'cesm':>8s} "
-      f"{'bias':>7s} | {'emu sd':>7s} {'cesm sd':>8s}")
-for (city, e), (mm, cc, ms, cs) in stats.items():
-    print(f"{city:>11s} {e:>8s} | {mm:>9.2f} {cc:>8.2f} {mm - cc:>+7.2f} | "
-          f"{ms:>7.2f} {cs:>8.2f}")
+print(f"{'city':>11s} {'exp':>7s} | {'bias':>6s} {'sd/sd':>6s} {'QQ':>5s} | "
+      f"{'r':>6s} {'r10':>6s} {'RMSE':>6s}")
+for ci_, city in enumerate(cities):
+    for e in exps:
+        st = stats.get((city, e))
+        sk = SKILL.get(e)
+        if st is None or sk is None:
+            continue
+        mm, cc, ms_, cs_, qq = st
+        r, r10, rmse, _ = sk[ci_]
+        print(f"{city:>11s} {e:>7s} | {mm - cc:>+6.2f} {ms_ / cs_:>6.2f} "
+              f"{qq:>5.2f} | {r:>6.2f} {r10:>6.2f} {rmse:>6.2f}")
