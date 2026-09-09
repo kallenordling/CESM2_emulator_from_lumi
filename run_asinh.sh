@@ -263,13 +263,25 @@ else
 fi
 
 # ── Self-chaining ──────────────────────────────────────────────────────────────
+# Under sbatch, $0 is the spool copy, so take the name from the job itself and
+# fall back to the literal only if that lookup fails.
+SCRIPT_NAME="$(scontrol show job "${SLURM_JOB_ID}" 2>/dev/null \
+                | sed -n "s|.*Command=.*/\([^/ ]*\.sh\).*|\1|p" | head -1)"
+SCRIPT_NAME="${SCRIPT_NAME:-run_asinh.sh}"
+echo "[chain] this script: ${SCRIPT_NAME}"
+
 CHAIN_REMAINING="${CHAIN_REMAINING:-6}"
 if [[ "${CHAIN_REMAINING}" -gt 1 ]]; then
     NEXT_JOB=$(sbatch --parsable \
            --dependency="afterany:${SLURM_JOB_ID}" \
            --export="ALL,CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )),FRESH=0,CO2FIX=${CO2FIX:-0}" \
            --chdir="${SLURM_SUBMIT_DIR}" \
-           "${SLURM_SUBMIT_DIR}/run_mseyb_BCprect.sh" 2>/dev/null) || NEXT_JOB=""
+           # THIS script, not the one it was copied from. The inherited
+           # literal sent link 2 of the asinh chain into the BASELINE launcher
+           # (job 21844722), which then ran run_mseyb_BCprect with 5 more links
+           # queued behind it. Derive it instead so a future copy cannot repeat
+           # the mistake.
+           "${SLURM_SUBMIT_DIR}/${SCRIPT_NAME}" 2>/dev/null) || NEXT_JOB=""
     echo "[chain] queued next link ${NEXT_JOB:-FAILED} (afterany:${SLURM_JOB_ID}, CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )))"
 else
     echo "[chain] CHAIN_REMAINING=${CHAIN_REMAINING} — final link, not resubmitting"

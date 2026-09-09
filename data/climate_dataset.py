@@ -67,11 +67,18 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 # `_only_timefixed.nc` files contain scenario emissions only (no historical
 # baseline), matching what config_data.yaml feeds to training/eval.
 # ssp126 is intentionally excluded: it's the OOD test scenario.
+# The _co2fix set. These four are opened by _get_emissions_minmax() to derive
+# the clip range, so they must exist on any path that does NOT get a range
+# injected from a checkpoint. A FRESH run is exactly that path, which is why
+# naming the pre-co2fix files -- deleted 2026-09-07 -- killed the first asinh
+# launch at the first batch with FileNotFoundError while every RESUMED run kept
+# working, the persisted COND_NORM short-circuiting the lookup before it opened
+# anything.
 EMISSIONS_PATHS = [
-    f"{L.DATA}/emissions_hist_only_timefixed_bc.nc",
-    f"{L.DATA}/emissions_ssp370_only_timefixed_bc.nc",
-    f"{L.DATA}/emissions_aaer_only_timefixed_bc.nc",
-    f"{L.DATA}/emissions_ghg_only_timefixed_bc.nc",
+    f"{L.DATA}/emissions_hist_only_timefixed_bc_co2fix.nc",
+    f"{L.DATA}/emissions_ssp370_only_timefixed_bc_co2fix.nc",
+    f"{L.DATA}/emissions_aaer_only_timefixed_bc_co2fix.nc",
+    f"{L.DATA}/emissions_ghg_only_timefixed_bc_co2fix.nc",
 ]
 
 
