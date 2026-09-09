@@ -222,9 +222,12 @@ class UNetTrainer:
         # recomputing with possibly-different module defaults (bc_clip_mode).
         try:
             self._cond_norm_state = get_active_minmax()
+            from data.climate_dataset import get_active_cond_transform
+            self._cond_transform_state = get_active_cond_transform()
         except Exception as e:
             print(f"[TRAINER] WARNING: could not capture cond-norm state: {e}")
             self._cond_norm_state = None
+            self._cond_transform_state = None
 
     # ── __init__ helpers ─────────────────────────────────────────────────────
 
@@ -1840,6 +1843,9 @@ class UNetTrainer:
             # eval re-injects them (set_minmax_override) so cond normalisation
             # always matches training, regardless of bc_clip_mode defaults.
             "COND_NORM":   self._cond_norm_state,
+            # Without this a checkpoint trained with asinh would be evaluated
+            # with the v1 affine map and silently produce nonsense.
+            "COND_TRANSFORM": getattr(self, "_cond_transform_state", None),
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
             sd[ckpt_key] = getattr(self, attr)

@@ -155,6 +155,11 @@ trainer:
     # string here (or via CLI override, as run2_gainfix.sh does) to force a
     # mode; a non-null value here WINS over the data config.
     bc_clip_mode: null
+    # null = defer to the data config's cond_transform key (default "v1").
+    # "asinh" replaces the affine clip, which pins E China/India BC at +1 for
+    # 100% of years. Changing it changes every cond channel -> FRESH run only;
+    # the value is persisted per checkpoint as COND_TRANSFORM.
+    cond_transform: null
 
     reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.
     eval_script: run_eval_aero.sh

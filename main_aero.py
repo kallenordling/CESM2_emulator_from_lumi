@@ -74,6 +74,22 @@ def main(cfg: DictConfig) -> None:
         or data_cfg.get("bc_clip_mode", None)
         or "v1"
     )
+    # Conditioning transform, same read order and same "set before the
+    # datasets are built" requirement as bc_clip_mode. Changing it changes the
+    # meaning of every cond channel, so it demands a fresh run; the value in
+    # force is persisted per checkpoint as COND_TRANSFORM.
+    cond_transform = str(
+        OmegaConf.select(cfg, "trainer.hyperparameters.cond_transform")
+        or data_cfg.get("cond_transform", None)
+        or "v1"
+    )
+    if cond_transform != "v1":
+        from data import climate_dataset as _cdt
+        _cdt.set_cond_transform(cond_transform)
+        if accelerator.is_main_process:
+            logger.info(f"[COND] transform = {cond_transform} "
+                        f"(v1 clips whole countries at +1; see climate_dataset)")
+
     if bc_clip_mode != "v1":
         from data import climate_dataset as _cds
         _cds.set_bc_clip_mode(bc_clip_mode)

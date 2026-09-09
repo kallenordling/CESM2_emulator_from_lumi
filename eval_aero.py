@@ -377,7 +377,14 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
     # exactly the (lo, hi) the checkpoint trained on — required for checkpoints
     # trained with bc_clip_mode != v1. Old checkpoints lack the key and fall
     # back to recomputing the module-default (v1) percentiles, as before.
-    from data.climate_dataset import set_minmax_override
+    from data.climate_dataset import set_minmax_override, set_cond_transform
+    # Order matters: the transform decides what the (a, b) pair in COND_NORM
+    # MEANS -- (lo, hi) under v1, (scale, top) under asinh -- so select it
+    # first, then inject the numbers.
+    ct = ckpt.get("COND_TRANSFORM") or "v1"
+    set_cond_transform(ct)
+    if ct != "v1":
+        print(f"[COND-TRANSFORM] checkpoint trained with '{ct}'")
     cond_norm = ckpt.get("COND_NORM")
     if cond_norm:
         set_minmax_override(cond_norm)

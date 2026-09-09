@@ -333,9 +333,64 @@ _CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95),
 # checkpoint under "COND_NORM" and re-injected at eval via
 # set_minmax_override(), so old checkpoints keep evaluating with v1 no matter
 # what this module's default is. Select via `bc_clip_mode` in the data config.
+# ── Conditioning transform ───────────────────────────────────────────────────
+# "v1"    — the affine map below: (2v/hi - 1), clipped. hi is a percentile of
+#           the field. MEASURED 2026-09-08 on the raw field, at the point where
+#           the clip actually happens (normalize runs BEFORE the gaussian
+#           smoothing, which then hides the plateau):
+#
+#             BC   E China 100.0% of years pinned at +1, India 100.0%,
+#                  E US 96.8%, Europe 85.7%
+#             SUL  E US 99.2%, Europe 82.5%, E China 74.1%
+#             CO2  Europe 54.6%, E US 50.6%, E China 42.2%
+#
+#           So the industrial history of the largest BC sources is not
+#           compressed, it is destroyed before the model sees it. No LINEAR
+#           anchor fixes this: a full sweep over the record showed lowering hi
+#           raises global span and global spatial contrast together while
+#           pushing Europe from 55% to 88% pinned -- the gain comes from
+#           Central Africa, which barely emits.
+#
+# "asinh" — v -> asinh(v/s), rescaled so p99.5 of the POSITIVE cells maps to
+#           +1. Linear for v << s and logarithmic above, so the heavy tail is
+#           compressed instead of clipped, and 0 still maps to -1. Measured on
+#           the same record: BC worst-site pinning 100% -> 51% and span
+#           13.5% -> 24%; CO2 55% -> 30% and 11.9% -> 47%.
+#
+#           NOT log. Log-scaling the cond was tried and made the model worse
+#           (see the feedback note); it compresses the top of the tail, which
+#           is where these emitters live, and it has no linear region so the
+#           near-zero majority of cells is stretched instead.
+#
+#           A rank/quantile transform scores better on every static metric
+#           (0% pinned, span 33-70%) but uniformises by frequency, so shipping
+#           lanes end up as prominent as industrial regions and the amplitude
+#           ordering the physics depends on is erased. Rejected for that reason,
+#           not for the numbers.
+#
+# Changing this changes the meaning of every cond channel -> FRESH TRAINING.
+# The mode in force is persisted per checkpoint as COND_TRANSFORM and
+# re-injected at eval, exactly as COND_NORM is.
+_COND_TRANSFORM = "v1"
+_ASINH_TOP_PCTL = 99.5      # positive-cell percentile that maps to +1
+_ASINH_SCALE_FRAC = 0.10    # s = this fraction of the positive-cell median
+
 _BC_CLIP_MODE = "v1"
 _BC_POPULATED_PCTL = (5, 90)
 _MINMAX_OVERRIDE = None
+
+
+def set_cond_transform(mode: str) -> None:
+    """Select the conditioning transform ("v1" | "asinh") BEFORE datasets build."""
+    global _COND_TRANSFORM
+    if mode not in ("v1", "asinh"):
+        raise ValueError(f"unknown cond_transform {mode!r} (expected 'v1' or 'asinh')")
+    _COND_TRANSFORM = mode
+    _get_emissions_minmax.cache_clear()
+
+
+def get_active_cond_transform() -> str:
+    return _COND_TRANSFORM
 
 
 def set_bc_clip_mode(mode: str) -> None:
@@ -393,6 +448,16 @@ def _get_emissions_minmax():
     combined = {}
     for var, arrays in all_vals.items():
         flat = np.concatenate(arrays)
+        if _COND_TRANSFORM == "asinh":
+            # (s, top). Both from the POSITIVE cells: the field is majority
+            # zero (ocean), so an all-cell percentile lands far below the
+            # emitting distribution -- the original defect.
+            posv = flat[flat > 0]
+            if posv.size == 0:
+                raise ValueError(f"cond_transform=asinh: {var} is all zero/NaN")
+            combined[var] = (float(np.percentile(posv, 50)) * _ASINH_SCALE_FRAC,
+                             float(np.percentile(posv, _ASINH_TOP_PCTL)))
+            continue
         if var == "BC" and _BC_CLIP_MODE == "populated":
             flat = flat[flat > 0]
             if flat.size == 0:
@@ -421,6 +486,20 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
     """
     if ds.name in ["CO2", "SUL", "BC"]:
         minmax = _get_emissions_minmax()
+
+        if _COND_TRANSFORM == "asinh":
+            # asinh(v/s) / asinh(top/s), mapped to [-1, 1]. Linear while
+            # v << s, logarithmic above, 0 -> -1 as in v1. The clip still
+            # exists but now bites only above p99.5 of the emitting cells
+            # instead of across whole countries.
+            s_, top = minmax[ds.name]
+            if s_ <= 0 or top <= 0:
+                return xr.zeros_like(ds).clip(-1, 1).fillna(-1)
+            denom = float(np.arcsinh(top / s_))
+            z = xr.apply_ufunc(np.arcsinh, ds / s_, dask="parallelized",
+                               output_dtypes=[ds.dtype])
+            return (2.0 * z / denom - 1.0).clip(-1, 1).fillna(-1)
+
         min_val, max_val = minmax[ds.name]
 
         range_val = max_val - min_val
