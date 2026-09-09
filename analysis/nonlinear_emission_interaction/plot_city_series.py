@@ -66,9 +66,18 @@ COL = {"hist": "#2F5D7C", "ssp370": "#B4451F",
 LBL = {"hist": "hist", "ssp370": "ssp370",
        "aaer": "aaer (GHG fixed at 1850)", "ghg": "ghg (aerosol fixed at 1850)"}
 
-def _smooth(x, n=10):
-    """Running mean, same length, edges shortened rather than padded."""
-    return np.convolve(x, np.ones(n) / n, mode="same")
+SMOOTH_N = 10
+
+
+def _smooth(x, n=SMOOTH_N):
+    """Centred n-year running mean, FULLY COVERED windows only.
+
+    mode="valid" rather than "same": with "same" the edge windows are divided
+    by the full width even though they are only partly filled, which biases the
+    first and last n/2 points toward zero and would show up as a spurious
+    trend at both ends of the correlation.
+    """
+    return np.convolve(x, np.ones(n) / n, mode="valid")
 
 
 def skill(e):
@@ -95,7 +104,9 @@ def skill(e):
         m = d[f"model_{e}"][:, k, :].mean(0)[mi]
         c = d[f"cesm_{e}"][:, k, :].mean(0)[ci_]
         r = float(np.corrcoef(m, c)[0, 1])
-        ms, cs_ = _smooth(m)[5:-5], _smooth(c)[5:-5]
+        # "valid" already drops the partial windows, so both series shorten
+        # by n-1 identically and stay aligned -- no trimming needed.
+        ms, cs_ = _smooth(m), _smooth(c)
         r10 = float(np.corrcoef(ms, cs_)[0, 1]) if len(ms) > 3 else np.nan
         out[k] = (r, r10, float(np.sqrt(np.mean((m - c) ** 2))), len(common))
     return out
