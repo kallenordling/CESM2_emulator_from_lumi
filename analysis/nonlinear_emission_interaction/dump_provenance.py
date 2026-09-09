@@ -75,6 +75,19 @@ ap = argparse.ArgumentParser(description=__doc__)
 # queueing on LUMI. The SEEN level needs torch for the checkpoint's COND_NORM
 # and is skipped when it is unavailable; the figure does not use it.
 ap.add_argument("checkpoint", nargs="?", default=None)
+ap.add_argument("--raw-root", default=None,
+                help="where the input4MIPs files live, if not under "
+                     "<data-root>/emission_data/inputs4mips. The matched "
+                     "CEDS-2017 pair for BOTH species is in "
+                     "/home/nordling/data_staging/inputs4mips; the LUMI copy "
+                     "the cond files were built from has BC 2025 against SO2 "
+                     "2017, which confounds the BC comparison.")
+ap.add_argument("--bc-vintage", default="CMIP_CEDS-CMIP-2025-04-18",
+                help="historical BC vintage to compare against. The builder "
+                     "(make_aerosol_files.py:69) asks for CMIP_CEDS-2017-05-18, "
+                     "which is absent on LUMI -- hence the default reflecting "
+                     "what is actually there, and this switch for when the "
+                     "matched pair is available.")
 ap.add_argument("--data-root", default=None,
                 help="override the emulator_data root, e.g. the sshfs mount "
                      "/home/nordling/mnt/lumi_sc2/emulator_data")
@@ -89,6 +102,14 @@ if args.data_root:
         SCEN[k]["cond"] = os.path.join(
             COND, os.path.basename(SCEN[k]["cond"]))
     print(f"[prov] data root overridden -> {COND}")
+if args.raw_root:
+    RAW = args.raw_root
+    print(f"[prov] raw root overridden  -> {RAW}")
+RAW_VINTAGE[("hist", "BC")] = args.bc_vintage
+print(f"[prov] hist BC vintage: {args.bc_vintage}   "
+      f"hist SO2 vintage: {RAW_VINTAGE[('hist', 'SO2')]}"
+      + ("   MATCHED" if "2017" in args.bc_vintage else
+         "   MISMATCHED -- BC comparison is confounded"))
 
 WANT_SEEN = args.checkpoint is not None
 n_comp = None

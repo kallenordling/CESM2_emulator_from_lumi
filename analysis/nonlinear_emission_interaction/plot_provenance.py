@@ -32,6 +32,7 @@ i.e. aviation only, which is not what the CO2 cond channel is built from.
         analysis/nonlinear_emission_interaction/plot_provenance.py
 """
 
+import argparse
 import os
 import sys
 
@@ -42,9 +43,19 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-RESULT = os.path.join(HERE, "results", "provenance.npz")
+_ap = argparse.ArgumentParser(description=__doc__)
+_ap.add_argument("--npz", default="provenance.npz",
+                 help="provenance.npz (BC compared against CEDS-2025, the only "
+                      "vintage on LUMI) or provenance_matched.npz (BC against "
+                      "CEDS-2017, the vintage the builder actually asks for, "
+                      "taken from ~/data_staging)")
+_ap.add_argument("--paper", default=None, help="plots/<name>/ slot; default "
+                 "fig19 for the LUMI-vintage run, fig20 for the matched one")
+_a = _ap.parse_args()
+RESULT = os.path.join(HERE, "results", _a.npz)
 FIGDIR = os.path.join(HERE, "figures")
-PAPER = "fig19"
+MATCHED = "matched" in _a.npz
+PAPER = _a.paper or ("fig20" if MATCHED else "fig19")
 
 if not os.path.exists(RESULT):
     sys.exit(f"[error] {RESULT} not found — run dump_provenance.py on LUMI")
@@ -53,7 +64,7 @@ d = np.load(RESULT, allow_pickle=True)
 CHANS = [c for c in ("BC", "SUL") if f"raw_tg_hist_{c}" in d.files]
 SCEN = [s for s in ("hist", "ssp370") if f"cond_years_{s}" in d.files]
 COL = {"hist": "#2F5D7C", "ssp370": "#B4451F"}
-VINT = {"BC": "CEDS-2025", "SUL": "CEDS-2017"}
+VINT = {"BC": "CEDS-2017" if MATCHED else "CEDS-2025", "SUL": "CEDS-2017"}
 
 plt.rcParams.update({"figure.dpi": 150, "savefig.dpi": 300, "font.size": 9})
 os.makedirs(FIGDIR, exist_ok=True)
@@ -107,9 +118,12 @@ for c, ch in enumerate(CHANS):
                     bbox=dict(fc="white", ec="0.75", lw=0.6, alpha=0.9, pad=3))
 
 fig.suptitle(
-    "Provenance check: raw input4MIPs against the conditioning the emulator "
-    "reads\n"
-    "The RATIO row is the test. Constant = the cond files are a faithfully "
+    ("Provenance check: raw input4MIPs against the conditioning the emulator "
+     "reads — BC on the MATCHED CEDS-2017 vintage the builder asks for\n"
+     if MATCHED else
+     "Provenance check: raw input4MIPs against the conditioning the emulator "
+     "reads — BC on CEDS-2025, the only vintage staged on LUMI\n")
+    + "The RATIO row is the test. Constant = the cond files are a faithfully "
     "rescaled copy and the emulator is self-consistent in its own units.\n"
     "Drifting or scenario-dependent = the cond files misrepresent the shape of "
     "the forcing, which internal consistency would not excuse.\n"
@@ -118,7 +132,8 @@ fig.suptitle(
     fontsize=10.5, y=0.995)
 fig.tight_layout(rect=(0, 0, 1, 0.93))
 
-paths = [os.path.join(FIGDIR, f"figure_19_provenance{e}") for e in (".png", ".pdf")]
+stem = "figure_20_provenance_matched" if MATCHED else "figure_19_provenance"
+paths = [os.path.join(FIGDIR, stem + e) for e in (".png", ".pdf")]
 pd = os.path.join(REPO, "plots", PAPER)
 os.makedirs(pd, exist_ok=True)
 paths += [os.path.join(pd, PAPER + e) for e in (".png", ".pdf")]
