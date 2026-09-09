@@ -131,13 +131,17 @@ for ci, city in enumerate(cities):
             continue
         r, r10, rmse, _ = sk[ci]
         rows.append(f"{e:>10s} {r:>6.2f} {r10:>6.2f} {rmse:>6.2f}")
-    ax.text(0.985, 0.03, "\n".join(rows), transform=ax.transAxes, ha="right",
-            va="bottom", fontsize=6.9, family="monospace",
+    ax.text(0.015, 0.975, "\n".join(rows), transform=ax.transAxes, ha="left",
+            va="top", fontsize=6.9, family="monospace",
             bbox=dict(fc="white", ec="0.75", lw=0.6, alpha=0.9, pad=3))
-    if ci == 0:
-        ax.legend(frameon=False, fontsize=7.2, ncol=2, loc="upper left")
 for ax in axes[1]:
     ax.set_xlabel("year")
+# One shared legend under the panels rather than inside the top-left one: the
+# entries are identical in all four, and inside it covered the 1850-1950 part
+# of the Helsinki series.
+h, l = axes[0][0].get_legend_handles_labels()
+fig.legend(h, l, loc="lower center", ncol=4, frameon=False, fontsize=8.2,
+           bbox_to_anchor=(0.5, -0.045))
 fig.suptitle(
     "Near-surface temperature at four cities, every TRAINING experiment — "
     "solid = emulator (5 members), dashed = CESM2\n"
@@ -148,7 +152,7 @@ fig.suptitle(
     "different realisations, so internal variability cannot correlate — "
     "r is the forced-signal agreement, r10 the same on 10-year means.",
     fontsize=10.5, y=0.995)
-fig.tight_layout(rect=(0, 0, 1, 0.93))
+fig.tight_layout(rect=(0, 0.035, 1, 0.93))
 for p in outputs("timeseries", "figure_15_city_timeseries"):
     fig.savefig(p, bbox_inches="tight"); print(f"[plot] wrote {p}")
 plt.close(fig)
@@ -196,8 +200,9 @@ for ci, city in enumerate(cities):
     ax.text(0.985, 0.97, "\n".join(rows), transform=ax.transAxes, ha="right",
             va="top", fontsize=6.9, family="monospace",
             bbox=dict(fc="white", ec="0.75", lw=0.6, alpha=0.9, pad=3))
-    if ci == 0:
-        ax.legend(frameon=False, fontsize=7.2, ncol=2, loc="upper left")
+h, l = axes[0][0].get_legend_handles_labels()
+fig.legend(h, l, loc="lower center", ncol=4, frameon=False, fontsize=8.2,
+           bbox_to_anchor=(0.5, -0.045))
 fig.suptitle(
     f"Distribution over the LAST {NLAST} YEARS of each training experiment — "
     "step = emulator, filled/dashed = CESM2\n"
@@ -209,7 +214,7 @@ fig.suptitle(
     "the RMS gap between matched quantiles, which is a\nproper distance for "
     "unpaired samples where a pointwise RMSE would not be.",
     fontsize=10.5, y=0.995)
-fig.tight_layout(rect=(0, 0, 1, 0.93))
+fig.tight_layout(rect=(0, 0.035, 1, 0.93))
 for p in outputs("histograms", "figure_16_city_histograms"):
     fig.savefig(p, bbox_inches="tight"); print(f"[plot] wrote {p}")
 plt.close(fig)
