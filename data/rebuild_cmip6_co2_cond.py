@@ -63,6 +63,9 @@ import numpy as np
 import xarray as xr
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data.provenance import stamp  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 Y0, HIST_END, Y1 = 1850, 2014, 2100
 
@@ -249,6 +252,27 @@ def main():
         cd["CO2"] = xr.DataArray(sel, dims=cd["CO2"].dims, coords=cd["CO2"].coords)
         new = float(cd["CO2"].sum(dim=("lat", "lon")).isel({c: 1})
                     - cd["CO2"].sum(dim=("lat", "lon")).isel({c: 0}))
+        # Record how this file was made. Without it the shipped co2fix files
+        # carried NO global attributes at all, and tracing them back to a
+        # source meant reading mtimes and script text -- which still could not
+        # settle which BC vintage was used, a ~37% question.
+        stamp(cd, __file__,
+              sources=[(os.path.join(args.data_dir,
+                                     f"CO2_cumulative_Gt_per_gridpoint_{e}.nc"),
+                        None) for e in ("hist", sc)] + [(src, None)],
+              extra={"cond_channel_rebuilt": "CO2 only",
+                     "cond_channels_untouched": "SUL, BC (copied verbatim "
+                                                "from the input cond file)",
+                     "splice_hist_end_year": HIST_END,
+                     "cumsum": "after the splice, over the full 1850- record",
+                     "scenario_interp": "decadal -> annual BEFORE cumsum",
+                     "first_annual_step_before": f"{old:.6g}",
+                     "first_annual_step_after": f"{new:.6g}",
+                     "first_annual_step_factor": f"{new / old:.4f}"},
+              note="Cumulative CO2 conditioning rebuilt because the shipped "
+                   "ssp370 file accumulated at ~1.95x the correct rate. SUL "
+                   "and BC are NOT rebuilt here: they are inherited from the "
+                   "input cond file and carry its provenance, not this one.")
         cd.to_netcdf(dst)
         cd.close()
         print(f"  first annual step: {old:.4g} -> {new:.4g}  "

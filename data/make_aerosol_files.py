@@ -20,6 +20,10 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 
 import lumi_paths as L
 import xarray as xr
+
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from data.provenance import stamp
 import numpy as np
 import glob
 import os
@@ -248,6 +252,19 @@ if SPECIES == "SO2":
 else:
     out_path = os.path.join(OUTPUT_DIR, "BC_per_gridpoint_" + exp + ".nc")
 print(ds_total)
+# Record the vintage from the SOURCE FILES' own metadata. The BC/SO2 vintage
+# could not be recovered from the shipped cond files at all -- this script asks
+# for CEDS-2017-05-18 for both species, only CEDS-CMIP-2025-04-18 is present on
+# LUMI, and nothing downstream recorded which was actually read. That gap is
+# worth ~37% of the historical BC signal.
+stamp(ds_total, __file__,
+      sources=[(f, xr.open_dataset(f)) for f in sorted(anthro_files)[:8]],
+      # anthro_files is what this script actually globs; there is no `files`.
+      extra={"species": SPECIES, "experiment": exp,
+             "n_source_files": len(anthro_files),
+             "source_pattern": _ANTHRO_PATTERNS.get((SPECIES, exp), "?")},
+      note=f"{SPECIES} conditioning input for experiment {exp}, summed over "
+           f"sectors and area-integrated to the native grid.")
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
 print("Done!")

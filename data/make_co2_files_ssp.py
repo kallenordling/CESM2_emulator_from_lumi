@@ -9,6 +9,10 @@ Process CO2 emission input files from CEDS/input4MIPs:
 """
 
 import xarray as xr
+
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from data.provenance import stamp
 import numpy as np
 import glob
 import os
@@ -184,7 +188,17 @@ ds_total = ds_total.compute()
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 out_path = os.path.join(OUTPUT_DIR, "CO2_cumulative_Gt_per_gridpoint.nc")
-print(ds_totla)
+stamp(ds_total, __file__,
+      sources=([(f, xr.open_dataset(f)) for f in sorted(air_files)[:4]]
+               + [(f, xr.open_dataset(f)) for f in sorted(anthro_files)[:4]]),
+      extra={"n_air_files": len(air_files),
+             "n_anthro_files": len(anthro_files),
+             "air_pattern": AIR_PATTERN, "anthro_pattern": ANTHRO_PATTERN,
+             "cumsum_applied": "NO -- these hold ANNUAL rates despite the "
+                               "filename saying cumulative"},
+      note="CO2 conditioning input: surface anthro + aircraft, area-integrated "
+           "on the native grid. The cumsum happens downstream, in "
+           "rebuild_cmip6_co2_cond.py, AFTER the hist/scenario splice.")
 ds_total.to_netcdf(out_path)
 print(f"\nSaved: {out_path}")
 print("Done!")
