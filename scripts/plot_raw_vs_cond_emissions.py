@@ -69,6 +69,9 @@ RAW = {
 CUMULATIVE = {"CO2": True, "BC": False, "SUL": False}
 # Divisor from kg to the unit each row is plotted in, and that unit's name.
 UNIT = {"CO2": (1e12, "Gt CO$_2$"), "BC": (1e9, "Tg BC"), "SUL": (1e9, "Tg SO$_2$")}
+# The cond channels are stored as "Gt per gridpoint", so summing the grid already
+# gives Gt. Only the aerosol rows need Gt -> Tg to match the left column's unit.
+COND_TO_UNIT = {"CO2": 1.0, "BC": 1e3, "SUL": 1e3}
 
 
 def cell_area(lat, lon):
@@ -176,12 +179,29 @@ def main():
         axL.plot(hy, np.cumsum(hv) if CUMULATIVE[sp] else hv,
                  color=COLOR["hist"], lw=1.8, label="historical", zorder=4)
 
-        # RIGHT: the cond channel exactly as stored.
+        # RIGHT: the cond channel in the SAME physical unit as the left column,
+        # with the published curve behind it. Both are Gt/Tg, so the vertical gap
+        # between the pale and solid lines IS the regrid's mass loss.
+        k = COND_TO_UNIT[sp]
+        for s in SCEN:
+            fy, fv, _ = to_annual(raw[(sp, s)])
+            keep = fy > 2014
+            yy = np.concatenate([hy, fy[keep]])
+            vv = np.concatenate([hv, fv[keep]])
+            if CUMULATIVE[sp]:
+                vv = np.cumsum(vv)
+            # Draw only the scenario leg per colour; the shared historical leg is
+            # drawn once below, or three overlapping pale colours muddy it.
+            axR.plot(yy[yy > 2014], vv[yy > 2014], color=COLOR[s], lw=1.0,
+                     alpha=0.3, zorder=1)
+        axR.plot(hy, np.cumsum(hv) if CUMULATIVE[sp] else hv,
+                 color=COLOR["hist"], lw=1.0, alpha=0.3, zorder=1,
+                 label="as published")
         for s in SCEN:
             y, v = cond[(sp, s)]
-            axR.plot(y, v, color=COLOR[s], lw=1.4, label=s)
+            axR.plot(y, v * k, color=COLOR[s], lw=1.4, label=s, zorder=2)
         y, v = cond[(sp, "hist")]
-        axR.plot(y, v, color=COLOR["hist"], lw=1.8, label="historical")
+        axR.plot(y, v * k, color=COLOR["hist"], lw=1.8, label="historical", zorder=3)
 
         # Retained fraction, stated not implied, at both ends of the scenario so
         # its DRIFT is visible: the bilinear regrid of an extensive field keeps
@@ -213,10 +233,11 @@ def main():
             ax.set_xlim(1850, 2100)
         kind = "cumulative" if CUMULATIVE[sp] else "annual"
         axL.set_ylabel(f"{uname}  ({kind})")
-        axR.set_ylabel("cond units (sum over grid)")
+        axR.set_ylabel(f"{uname}  ({kind})")
         axL.set_title(f"{sp} — raw input4MIPs" + ("" if row else "   (dots = decadal anchors)"),
                       fontsize=10)
-        axR.set_title(f"{sp} — conditioning file fed to the emulator", fontsize=10)
+        axR.set_title(f"{sp} — conditioning file fed to the emulator "
+                      f"(pale = as published)", fontsize=10)
     axes[0][0].legend(fontsize=8, loc="upper left")
     axes[2][0].set_xlabel("Year")
     axes[2][1].set_xlabel("Year")
