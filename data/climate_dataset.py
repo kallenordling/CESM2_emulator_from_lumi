@@ -379,7 +379,16 @@ _CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95),
 # The mode in force is persisted per checkpoint as COND_TRANSFORM and
 # re-injected at eval, exactly as COND_NORM is.
 _COND_TRANSFORM = "v1"
-_ASINH_TOP_PCTL = 99.5      # positive-cell percentile that maps to +1
+_ASINH_TOP_PCTL = 99.9      # positive-cell percentile that maps to +1
+# 99.5 -> 99.9 on 2026-09-10, measured by scripts/sweep_asinh_cond_params.py
+# as the share of a region's emission MASS the ceiling flattens (ssp370, 2100).
+# At p99.5:  SUL E China 77%, India 81%, Arabia 19%;  BC India 63%, Arabia 32%.
+# At p99.9:  SUL E China 28%, India 50%, Arabia  0%;  BC India  6%, Arabia  5%.
+# Costs ~8% of global spatial contrast and ~9% of temporal span. The Arabian
+# Peninsula is the reason to care beyond the top emitters: under v1 it sits on
+# the same +1 plateau as E China (98% of its mass pinned) despite emitting far
+# less, which is a candidate explanation for it showing up as a source in the
+# nonlinear-term attribution.
 _ASINH_SCALE_FRAC = 0.10    # s = this fraction of the positive-cell median
 
 _BC_CLIP_MODE = "v1"
@@ -387,16 +396,59 @@ _BC_POPULATED_PCTL = (5, 90)
 _MINMAX_OVERRIDE = None
 
 
+# A PER-CHANNEL spec is also accepted, e.g. "CO2=v1,SUL=asinh,BC=asinh".
+# The channels do not have the same defect: CO2 is CUMULATIVE, so its field
+# grows monotonically and asinh's ceiling saturates it harder every decade,
+# while SUL and BC are per-year and their saturation FALLS through the century.
+# Keeping CO2 on v1 therefore leaves the channel exactly as the precip-bc
+# branch (and every shipped checkpoint) had it, and confines the new transform
+# to the two channels it helps.
+_TRANSFORM_MODES = ("v1", "asinh")
+
+
+def _parse_cond_transform(spec: str) -> "str | dict":
+    """"v1" | "asinh" | "CO2=v1,SUL=asinh,BC=asinh" -> mode or per-var dict."""
+    spec = str(spec).strip()
+    if spec in _TRANSFORM_MODES:
+        return spec
+    if "=" not in spec:
+        raise ValueError(
+            f"unknown cond_transform {spec!r} (expected 'v1', 'asinh', or a "
+            "per-channel spec like 'CO2=v1,SUL=asinh,BC=asinh')")
+    out = {}
+    for item in spec.split(","):
+        var, _, mode = item.partition("=")
+        var, mode = var.strip(), mode.strip()
+        if mode not in _TRANSFORM_MODES:
+            raise ValueError(
+                f"cond_transform {spec!r}: channel {var!r} has unknown mode "
+                f"{mode!r} (expected one of {_TRANSFORM_MODES})")
+        out[var] = mode
+    return out
+
+
 def set_cond_transform(mode: str) -> None:
-    """Select the conditioning transform ("v1" | "asinh") BEFORE datasets build."""
+    """Select the conditioning transform BEFORE datasets build.
+
+    Accepts "v1", "asinh", or a per-channel spec ("CO2=v1,SUL=asinh,BC=asinh").
+    A channel the spec does not name falls back to "v1".
+    """
     global _COND_TRANSFORM
-    if mode not in ("v1", "asinh"):
-        raise ValueError(f"unknown cond_transform {mode!r} (expected 'v1' or 'asinh')")
-    _COND_TRANSFORM = mode
+    _parse_cond_transform(mode)          # validate before mutating
+    _COND_TRANSFORM = str(mode).strip()
     _get_emissions_minmax.cache_clear()
 
 
+def transform_for(var: str) -> str:
+    """The transform in force for one cond channel."""
+    parsed = _parse_cond_transform(_COND_TRANSFORM)
+    if isinstance(parsed, str):
+        return parsed
+    return parsed.get(var, "v1")
+
+
 def get_active_cond_transform() -> str:
+    """The spec string, as persisted to checkpoints under COND_TRANSFORM."""
     return _COND_TRANSFORM
 
 
@@ -455,7 +507,7 @@ def _get_emissions_minmax():
     combined = {}
     for var, arrays in all_vals.items():
         flat = np.concatenate(arrays)
-        if _COND_TRANSFORM == "asinh":
+        if transform_for(var) == "asinh":
             # (s, top). Both from the POSITIVE cells: the field is majority
             # zero (ocean), so an all-cell percentile lands far below the
             # emitting distribution -- the original defect.
@@ -494,7 +546,7 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
     if ds.name in ["CO2", "SUL", "BC"]:
         minmax = _get_emissions_minmax()
 
-        if _COND_TRANSFORM == "asinh":
+        if transform_for(ds.name) == "asinh":
             # asinh(v/s) / asinh(top/s), mapped to [-1, 1]. Linear while
             # v << s, logarithmic above, 0 -> -1 as in v1. The clip still
             # exists but now bites only above p99.5 of the emitting cells

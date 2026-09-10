@@ -43,7 +43,16 @@
 # MUST BE FRESH: the transform changes the meaning of every cond channel, so a
 # warm start would feed old weights a differently-scaled input. The mode is
 # persisted per checkpoint as COND_TRANSFORM and re-injected at eval.
+# PER-CHANNEL: cond_transform also takes a spec, e.g.
+#   COND_TRANSFORM="CO2=v1,SUL=asinh,BC=asinh"
+# CO2 is CUMULATIVE, so its field only grows and asinh's ceiling saturates it
+# harder every decade (93.7% of E China's carbon mass pinned by 2100, up from
+# 52.6% at 2014), while SUL and BC are per-year and improve through the century.
+# That spec leaves CO2 exactly as the precip-bc branch had it and confines the
+# new transform to the two channels it helps.
+#
 # Fire:  FRESH=1 CHAIN_REMAINING=6 sbatch run_asinh.sh
+#        FRESH=1 COND_TRANSFORM="CO2=v1,SUL=asinh,BC=asinh" sbatch run_asinh.sh
 # -----------------------------------------------------------------------------
 #SBATCH --job-name=asinh
 #
@@ -300,7 +309,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         --main_process_ip=${MAIN_PROCESS_IP} \
         main_aero.py \
         data_config=config_data_ybias_BCprect.yaml \
-        trainer.hyperparameters.cond_transform=asinh \
+        trainer.hyperparameters.cond_transform="${COND_TRANSFORM:-asinh}" \
         model.in_channels=2 \
         model.out_channels=2 \
         model.cond_channels=3 \
