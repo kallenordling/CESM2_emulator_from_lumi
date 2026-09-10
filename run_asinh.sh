@@ -52,7 +52,10 @@
 # new transform to the two channels it helps.
 #
 # Fire:  FRESH=1 CHAIN_REMAINING=6 sbatch run_asinh.sh
-#        FRESH=1 COND_TRANSFORM="CO2=v1,SUL=asinh,BC=asinh" sbatch run_asinh.sh
+#        FRESH=1 RUN_TAG=asinh99 COND_TRANSFORM="CO2=v1,SUL=asinh,BC=asinh" \
+#            sbatch run_asinh.sh
+# RUN_TAG keeps a new arm off the previous one's checkpoints; it is sticky down
+# the chain, so set it on the first submit only.
 # -----------------------------------------------------------------------------
 #SBATCH --job-name=asinh
 #
@@ -205,10 +208,17 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 
+# RUN_TAG names the arm: checkpoints run_${RUN_TAG}_co2fix_*.pt and the eval
+# watcher's PROD_RUN both derive from it, so they can never drift apart the way
+# filmattn's did. Keep it out of a resume and the chain resumes the wrong arm --
+# --export=ALL carries it, so only the FIRST submit needs to set it.
+RUN_TAG="${RUN_TAG:-asinh}"
+export RUN_TAG
+
 # ── Launch eval watcher as a background SLURM job ────────────────────────────
 WATCHER_TIME=$(squeue -h -j "${SLURM_JOB_ID}" -o '%l' 2>/dev/null | tr -d '[:space:]' || true)
 [[ -z "${WATCHER_TIME}" || "${WATCHER_TIME}" == "UNLIMITED" ]] && WATCHER_TIME="06:00:00"
-EXISTING_WATCHER=$(squeue -u "$(whoami)" --name=eval_watcher_mseyb_BCprect -t PENDING,RUNNING \
+EXISTING_WATCHER=$(squeue -u "$(whoami)" --name="eval_watcher_${RUN_TAG:-asinh}" -t PENDING,RUNNING \
                    --noheader -o '%i' 2>/dev/null | head -1 || true)
 if [[ -n "${EXISTING_WATCHER}" ]]; then
     WATCHER_JOB=""
@@ -218,14 +228,14 @@ else
     # variable DOES expand here (unlike an #SBATCH directive, which SLURM never
     # expands — see lumi_env.sh). Hardcoding 462001112 sent the watcher to a
     # different project from the training job.
-    WATCHER_JOB=$(sbatch --job-name=eval_watcher_asinh \
+    WATCHER_JOB=$(sbatch --job-name="eval_watcher_${RUN_TAG:-asinh}" \
            --account="${LUMI_ACCOUNT}" \
            --partition=small \
            --time="${WATCHER_TIME}" \
            --ntasks=1 --cpus-per-task=1 --mem=256M \
-           --export="ALL,PROD_RUN=run_asinh" \
+           --export="ALL,PROD_RUN=run_${RUN_TAG:-asinh}" \
            --chdir="${SLURM_SUBMIT_DIR}" \
-           --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_asinh_%j.out" \
+           --output="${SLURM_SUBMIT_DIR}/logs/eval_watcher_${RUN_TAG:-asinh}_%j.out" \
            "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" 2>/dev/null | awk '{print $NF}') || WATCHER_JOB=""
     echo "[watcher] Submitted eval watcher job ${WATCHER_JOB:-FAILED} (time=${WATCHER_TIME})"
 fi
@@ -259,9 +269,9 @@ CO2FIX="${CO2FIX:-0}"
 export CO2FIX
 
 if [[ "${CO2FIX}" == "1" ]]; then
-    SAVE_NAME="run_asinh_co2fix.pt"
+    SAVE_NAME="run_${RUN_TAG}_co2fix.pt"
 else
-    SAVE_NAME="run_asinh.pt"
+    SAVE_NAME="run_${RUN_TAG}.pt"
 fi
 if [[ "${FRESH}" == "1" ]]; then
     LOAD_OVERRIDE="trainer.hyperparameters.load_path=0"
