@@ -1,39 +1,47 @@
 Figure manifest - CESM2 diffusion emulator, checkpoint ep0860
 Source: eval_output/manual/ep0860_ens25 (25-member eval, emulator capped to the CESM2 reference count per scenario)
 Generated 2026-08-27 with --match-members and --n-ref-members 0.
-fig09/fig10 added 2026-09-11 by scripts/make_ensemble_mean_maps.py from
-eval_output/manual/ep0860_ens25_absolute; everything from the old fig09
-onward shifted down by two. Skill numbers for those two figures are in
-plots/ensmean_maps/ensmean_skill_{TREFHT,PRECT}.tex.
 
-OVERLEAF    SOURCE FILE                                           CONTENT
-fig01.pdf   paper_fig_timeseries_TREFHT_ep0860.pdf                Global-mean temperature, trained scenarios (hist/ssp370/aaer/ghg)
-fig02.pdf   paper_fig_timeseries_PRECT_ep0860.pdf                 Global-mean precipitation, trained scenarios
-fig03.pdf   paper_fig_maps_ep0860.pdf                             Spatial pattern, emulator vs CESM2, TREFHT+PRECT, four trained scenarios
-fig04.pdf   paper_fig_hist_TREFHT_ep0860.pdf                      Distribution of decadal-mean temperature, emulator vs CESM2
-fig05.pdf   paper_fig_hist_PRECT_ep0860.pdf                       Distribution of decadal-mean precipitation, emulator vs CESM2
-fig06.pdf   paper_fig_timeseries_TREFHT_unseen_ep0860.pdf         Out-of-training scenarios, temperature (hist/ssp126/ssp245)
-fig07.pdf   paper_fig_timeseries_PRECT_unseen_ep0860.pdf          Out-of-training scenarios, precipitation
-fig08.pdf   paper_fig_ramip_signal_ep0860.pdf                     RAMIP aerosol-removal signal, ssp370-126aer minus ssp370, both variables
-fig09.pdf   ensmean_map_TREFHT_anomaly.pdf                        Ensemble-mean TEMPERATURE map, final decade, anomaly vs 1850-1900: emulator, held-out CESM2, difference
-fig10.pdf   ensmean_map_PRECT_anomaly.pdf                         Ensemble-mean PRECIPITATION map, final decade, anomaly vs 1850-1900: emulator, held-out CESM2, difference
-fig11.pdf   paper_fig_ramip_signal_ep0860_maps_TREFHT.pdf         RAMIP final-decade temperature pattern: emulator, CESM2, difference
-fig12.pdf   paper_fig_ramip_signal_ep0860_maps_PRECT.pdf          RAMIP final-decade precipitation pattern: emulator, CESM2, difference
-fig13.pdf   paper_fig_ramip_anomaly_ep0860.pdf                    RAMIP ssp370-126aer vs 1850-1900, with ssp370 control and GHG-only, both variables
-fig14.pdf   paper_fig_attribution_ep0860.pdf                      Additivity test: All forcing vs GHG+Aerosol, CESM2 and emulator, both variables
-fig15.pdf   paper_fig_attribution_ep0860_maps_TREFHT.pdf          Temperature residual R = All-(GHG+Aerosol), 2041-2050: CESM2, emulator, difference
-fig16.pdf   paper_fig_attribution_ep0860_maps_PRECT.pdf           Precipitation residual R, 2041-2050: CESM2, emulator, difference
-fig17.pdf   paper_fig_attribution_ep0860_decompose.pdf            Origin of the non-additivity: additive conditioning, Arctic waterfall, R vs All / vs Aerosol
-fig18.pdf   paper_fig_tp_scatter_ep0860.pdf                       Precipitation vs temperature, one dot per year, per scenario (hydrological sensitivity)
+Reordered 2026-09-11: global means, then their distributions, then the
+ensemble-mean anomaly MAPS, then the city series and their distributions,
+before the out-of-training scenarios and the RAMIP/attribution sequence.
+The ensemble-mean maps (fig05/fig06) SUPERSEDE the old spatial-pattern
+figure, which is kept in archive/ rather than deleted. Skill numbers for
+fig05/fig06 are in plots/ensmean_maps/ensmean_skill_{TREFHT,PRECT}.tex.
+City figures come from analysis/nonlinear_emission_interaction/figures/.
 
-SUPPLEMENT (figures_overleaf/supplement/) — the ABSOLUTE counterparts. The main text shows anomalies,
-which remove any constant offset between emulator and CESM2 by
-construction; these keep it, so a bias here that is absent in the main
-text is a mean-state offset rather than an error in the response.
+OVERLEAF                SOURCE FILE                                           CONTENT
+fig01.pdf               paper_fig_timeseries_TREFHT_ep0860.pdf                Global-mean temperature, trained scenarios (hist/ssp370/aaer/ghg)
+fig02.pdf               paper_fig_timeseries_PRECT_ep0860.pdf                 Global-mean precipitation, trained scenarios
+fig03.pdf               paper_fig_hist_TREFHT_ep0860.pdf                      Distribution of decadal-mean temperature anomaly, emulator vs CESM2
+fig04.pdf               paper_fig_hist_PRECT_ep0860.pdf                       Distribution of decadal-mean precipitation anomaly, emulator vs CESM2
+fig05.pdf               ensmean_map_TREFHT_anomaly.pdf                        Ensemble-mean TEMPERATURE map, final decade, anomaly vs 1850-1900: emulator, CESM2, difference
+fig06.pdf               ensmean_map_PRECT_anomaly.pdf                         Ensemble-mean PRECIPITATION map, final decade, anomaly vs 1850-1900: emulator, CESM2, difference
+fig07.pdf               figure_15_city_timeseries.pdf                         City temperature timeseries, emulator vs CESM2
+fig08.pdf               figure_17_city_timeseries_PRECT.pdf                   City precipitation timeseries, emulator vs CESM2
+fig09.pdf               figure_16_city_histograms.pdf                         City temperature distributions, emulator vs CESM2
+fig10.pdf               figure_18_city_histograms_PRECT.pdf                   City precipitation distributions, emulator vs CESM2
+fig11.pdf               paper_fig_timeseries_TREFHT_unseen_ep0860.pdf         Out-of-training scenarios, temperature (hist/ssp126/ssp245)
+fig12.pdf               paper_fig_timeseries_PRECT_unseen_ep0860.pdf          Out-of-training scenarios, precipitation
+fig13.pdf               paper_fig_ramip_signal_ep0860.pdf                     RAMIP aerosol-removal signal, ssp370-126aer minus ssp370, both variables
+fig14.pdf               paper_fig_ramip_signal_ep0860_maps_TREFHT.pdf         RAMIP final-decade temperature pattern: emulator, CESM2, difference
+fig15.pdf               paper_fig_ramip_signal_ep0860_maps_PRECT.pdf          RAMIP final-decade precipitation pattern: emulator, CESM2, difference
+fig16.pdf               paper_fig_ramip_anomaly_ep0860.pdf                    RAMIP ssp370-126aer vs 1850-1900, with ssp370 control and GHG-only, both variables
+fig17.pdf               paper_fig_attribution_ep0860.pdf                      Additivity test: All forcing vs GHG+Aerosol, CESM2 and emulator, both variables
+fig18.pdf               paper_fig_attribution_ep0860_maps_TREFHT.pdf          Temperature residual R = All-(GHG+Aerosol), 2041-2050: CESM2, emulator, difference
+fig19.pdf               paper_fig_attribution_ep0860_maps_PRECT.pdf           Precipitation residual R, 2041-2050: CESM2, emulator, difference
+fig20.pdf               paper_fig_attribution_ep0860_decompose.pdf            Origin of the non-additivity: additive conditioning, Arctic waterfall, R vs All / vs Aerosol
+fig21.pdf               paper_fig_tp_scatter_ep0860.pdf                       Precipitation vs temperature, one dot per year, per scenario (hydrological sensitivity)
+
+SUPPLEMENT (figures_overleaf/supplement/) - the ABSOLUTE counterparts. The
+main text shows anomalies, which remove any constant offset between emulator
+and CESM2 by construction; these keep it, so a bias here that is absent in the
+main text is a mean-state offset rather than an error in the response.
 
 supplement/figS01.pdf   absolute_series_TREFHT.pdf                            ABSOLUTE global-mean temperature, emulator vs CESM2, all scenarios
 supplement/figS02.pdf   absolute_series_PRECT.pdf                             ABSOLUTE global-mean precipitation, emulator vs CESM2, all scenarios
 supplement/figS03.pdf   absolute_maps_TREFHT.pdf                              ABSOLUTE temperature maps: emulator, CESM2, difference
 supplement/figS04.pdf   absolute_maps_PRECT.pdf                               ABSOLUTE precipitation maps: emulator, CESM2, difference
 
-(source)    attribution_equations.tex / .pdf                      Derivation of R and the fig17(a) waterfall decomposition, with numbers
+(source)                attribution_equations.tex / .pdf                       Derivation of R and the fig20(a) waterfall decomposition, with numbers
+(archive)               fig03_spatial_pattern_superseded.pdf                   Old fig03, replaced by the ensemble-mean anomaly maps

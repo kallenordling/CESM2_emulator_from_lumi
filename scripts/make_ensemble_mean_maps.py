@@ -64,8 +64,8 @@ PROJECTION = "Robinson"      # any ccrs class name taking no required arguments
 # plots/ under these names so the paper set and the working outputs cannot drift
 # apart, and figures_overleaf/ takes the PDF of the same name.
 PAPER_NAME = {
-    ("TREFHT", "anomaly"): "fig09",
-    ("PRECT", "anomaly"): "fig10",
+    ("TREFHT", "anomaly"): "fig05",     # reordered 2026-09-11, was fig09
+    ("PRECT", "anomaly"): "fig06",      # reordered 2026-09-11, was fig10
     ("TREFHT", "absolute"): "figS03",
     ("PRECT", "absolute"): "figS04",
 }
