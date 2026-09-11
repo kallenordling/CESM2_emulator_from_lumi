@@ -58,6 +58,18 @@ except ImportError:                                   # pragma: no cover
 
 PROJECTION = "Robinson"      # any ccrs class name taking no required arguments
 
+# Where each figure lands in the paper. The anomaly pair is the main text; the
+# absolute pair is the supplement, because an absolute map keeps the mean-state
+# offset that the anomaly form removes by construction. Copies are written into
+# plots/ under these names so the paper set and the working outputs cannot drift
+# apart, and figures_overleaf/ takes the PDF of the same name.
+PAPER_NAME = {
+    ("TREFHT", "anomaly"): "fig09",
+    ("PRECT", "anomaly"): "fig10",
+    ("TREFHT", "absolute"): "figS03",
+    ("PRECT", "absolute"): "figS04",
+}
+
 EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_absolute"
 TREE_ROOT = "/home/nordling/mnt/lumi_sc/emulator_data/training_data"
 DATA_CONFIG = "configs/config_data_ybias_BCprect.yaml"
@@ -304,10 +316,16 @@ def draw(var, mode, emu, ref, outdir):
                  f"{proj_note}", fontsize=12)
     # PNG to look at, PDF to \includegraphics — the paper set is vector.
     path = os.path.join(outdir, f"ensmean_map_{var}_{mode}.png")
-    for out in (path, os.path.splitext(path)[0] + ".pdf"):
+    outs = [path, os.path.splitext(path)[0] + ".pdf"]
+    paper = PAPER_NAME.get((var, mode))
+    if paper:
+        parent = os.path.dirname(outdir.rstrip("/")) or "plots"
+        outs += [os.path.join(parent, f"{paper}.png"),
+                 os.path.join(parent, f"{paper}.pdf")]
+    for out in outs:
         fig.savefig(out, dpi=160, bbox_inches="tight")
     plt.close(fig)
-    return path
+    return ", ".join(outs)
 
 
 def weighted_stats(e, c, lat):
