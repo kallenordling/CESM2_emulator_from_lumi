@@ -45,6 +45,19 @@ import numpy as np
 import xarray as xr
 import yaml
 
+# Cartopy is optional: it lives in the plotting env, not the base one, and the
+# Natural Earth shapefiles it draws from are cached locally (no network at draw
+# time). Without it the maps still render, on a plain lat/lon grid.
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    HAVE_CARTOPY = True
+except ImportError:                                   # pragma: no cover
+    HAVE_CARTOPY = False
+    print("[maps] cartopy not importable — falling back to plain axes")
+
+PROJECTION = "Robinson"      # any ccrs class name taking no required arguments
+
 EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_absolute"
 TREE_ROOT = "/home/nordling/mnt/lumi_sc/emulator_data/training_data"
 DATA_CONFIG = "configs/config_data_ybias_BCprect.yaml"
@@ -175,65 +188,120 @@ def apply_baselines(side):
     return side
 
 
+def to_pm180(field, lon):
+    """Roll a 0-360 field onto -180..180, which is what PlateCarree expects."""
+    lon = np.asarray(lon)
+    if lon.max() <= 180.0:
+        return field, lon
+    shift = int((lon >= 180.0).sum())
+    return np.roll(field, shift, axis=-1), np.roll(((lon + 180) % 360) - 180, shift)
+
+
+def make_axes(fig, nrows, ncols):
+    """A grid of map axes, projected when cartopy is available."""
+    if not HAVE_CARTOPY:
+        return fig.subplots(nrows, ncols, squeeze=False)
+    proj = getattr(ccrs, PROJECTION)()
+    axes = np.empty((nrows, ncols), dtype=object)
+    for i in range(nrows):
+        for j in range(ncols):
+            axes[i, j] = fig.add_subplot(nrows, ncols, i * ncols + j + 1,
+                                         projection=proj)
+    return axes
+
+
+# Panel letters, assigned row-major across the whole figure. A Robinson frame
+# is elliptical, so the top-left corner of the axes box is off the globe and a
+# letter there sits in white space rather than over data.
+PANEL_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def panel_label(ax, index):
+    ax.text(0.0, 1.0, f"({PANEL_LETTERS[index]})", transform=ax.transAxes,
+            fontweight="bold", fontsize=9, va="top", ha="left")
+
+
+def draw_map(ax, data, outline="0.15", **kw):
+    """One panel: the field, then coastlines and country borders over it.
+
+    `outline` is the line colour. Dark colourmaps need a light one, or the
+    borders vanish into the field they are drawn over.
+    """
+    if not HAVE_CARTOPY:
+        return ax.imshow(data, origin="lower", extent=[0, 360, -90, 90],
+                         aspect="auto", **kw)
+    im = ax.imshow(data, origin="lower", extent=[-180, 180, -90, 90],
+                   transform=ccrs.PlateCarree(), **kw)
+    ax.coastlines(resolution="110m", linewidth=0.35, color=outline)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.22, edgecolor=outline,
+                   alpha=0.8)
+    ax.set_global()
+    return im
+
+
 def draw(var, mode, emu, ref, outdir):
     unit = META[var]["unit"]
     lat, lon = emu["hist"]["lat"], emu["hist"]["lon"]
-    ext = [float(lon.min()), float(lon.max()), float(lat.min()), float(lat.max())]
 
     fields = {}
     for key in SCENARIOS:
         e = emu[key]["final"] - (emu[key]["base"] if mode == "anomaly" else 0)
         c = ref[key]["final"] - (ref[key]["base"] if mode == "anomaly" else 0)
-        fields[key] = (e, c, e - c)
+        fields[key] = tuple(to_pm180(f, lon)[0] for f in (e, c, e - c))
 
     # One scale for the top two rows so emulator and CESM2 are comparable, and
     # a separate symmetric scale for the difference row.
     top = np.concatenate([np.ravel(v[:2]) for v in fields.values()])
     diff = np.concatenate([np.ravel(v[2]) for v in fields.values()])
-    if mode == "anomaly" or var == "TREFHT":
+    if mode == "anomaly":
         tmax = np.nanpercentile(np.abs(top), 99)
-        tlim = (-tmax, tmax) if mode == "anomaly" else (np.nanpercentile(top, 1),
-                                                        np.nanpercentile(top, 99))
+        tlim = (-tmax, tmax)
+    elif var == "TREFHT":
+        tlim = (np.nanpercentile(top, 1), np.nanpercentile(top, 99))
     else:
         tlim = (0, np.nanpercentile(top, 99))
     dmax = np.nanpercentile(np.abs(diff), 99)
     tcmap = META[var]["anom_cmap"] if mode == "anomaly" else META[var]["cmap"]
 
     rows = ["Emulator", "CESM2 held-out", "Emulator - CESM2"]
-    fig, axes = plt.subplots(3, len(SCENARIOS), figsize=(3.5 * len(SCENARIOS), 7.2),
-                             constrained_layout=True, squeeze=False)
+    fig = plt.figure(figsize=(3.5 * len(SCENARIOS), 6.6), constrained_layout=True)
+    axes = make_axes(fig, 3, len(SCENARIOS))
+    weights = np.broadcast_to(np.cos(np.deg2rad(lat))[:, None],
+                              fields["hist"][0].shape)
+    ncols = len(SCENARIOS)
     for j, (key, (label, _)) in enumerate(SCENARIOS.items()):
         for i in range(3):
             ax = axes[i][j]
+            panel_label(ax, i * ncols + j)
             data = fields[key][i]
             if i < 2:
-                im_top = ax.imshow(data, origin="lower", extent=ext, cmap=tcmap,
-                                   vmin=tlim[0], vmax=tlim[1], aspect="auto")
+                im_top = draw_map(ax, data, cmap=tcmap, vmin=tlim[0], vmax=tlim[1])
             else:
-                im_diff = ax.imshow(data, origin="lower", extent=ext,
-                                    cmap=META[var]["dcmap"], vmin=-dmax, vmax=dmax,
-                                    aspect="auto")
-            ax.set_xticks([]); ax.set_yticks([])
+                im_diff = draw_map(ax, data, cmap=META[var]["dcmap"],
+                                   vmin=-dmax, vmax=dmax)
             if i == 0:
                 w = emu[key]["window"]
                 ax.set_title(f"{label}\n{w[0]}-{w[1]}  "
                              f"(n = {emu[key]['n']} / {ref[key]['n']})", fontsize=9)
             if j == 0:
-                ax.set_ylabel(rows[i], fontsize=10)
-            gm = np.average(data, weights=np.broadcast_to(
-                np.cos(np.deg2rad(lat))[:, None], data.shape))
-            ax.text(0.02, 0.05, f"{gm:+.2f} {unit}" if i == 2 else f"{gm:.2f} {unit}",
-                    transform=ax.transAxes, fontsize=8,
-                    bbox=dict(fc="white", ec="none", alpha=0.6, pad=1.4))
-    # Flat lists: matplotlib wants axes, and axes[:2].tolist() is a list OF
-    # lists, which it silently mis-handles into an AttributeError.
-    fig.colorbar(im_top, ax=list(axes[:2].ravel()), shrink=0.7,
+                # A projected axis has no meaningful y-label, so the row name
+                # goes beside it as text instead.
+                ax.text(-0.04, 0.5, rows[i], transform=ax.transAxes, rotation=90,
+                        va="center", ha="right", fontsize=10)
+            # Below the panel, not inside it: a Robinson frame is elliptical,
+            # so the corners of the axes box are off the globe and text there
+            # gets clipped by the neighbouring panel.
+            gm = np.average(data, weights=weights)
+            ax.text(0.5, -0.06, f"{gm:+.2f} {unit}" if i == 2 else f"{gm:.2f} {unit}",
+                    transform=ax.transAxes, fontsize=8, ha="center", va="top")
+    fig.colorbar(im_top, ax=list(axes[:2].ravel()), shrink=0.62,
                  label=f"{var} {'anomaly ' if mode == 'anomaly' else ''}({unit})")
-    fig.colorbar(im_diff, ax=list(axes[2].ravel()), shrink=0.85,
+    fig.colorbar(im_diff, ax=list(axes[2].ravel()), shrink=0.8,
                  label=f"difference ({unit})")
-    title = (f"{var} ensemble mean, final decade — "
-             f"{'anomaly vs 1850-1900' if mode == 'anomaly' else 'absolute'}")
-    fig.suptitle(title, fontsize=12)
+    proj_note = f" ({PROJECTION})" if HAVE_CARTOPY else ""
+    fig.suptitle(f"{var} ensemble mean, final decade — "
+                 f"{'anomaly vs 1850-1900' if mode == 'anomaly' else 'absolute'}"
+                 f"{proj_note}", fontsize=12)
     path = os.path.join(outdir, f"ensmean_map_{var}_{mode}.png")
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)

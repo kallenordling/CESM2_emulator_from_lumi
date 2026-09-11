@@ -39,6 +39,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Projection, coastlines and country borders, shared with the ensemble-mean map
+# figure so both look the same and there is one place to change them. Cartopy
+# is optional there, so this import cannot fail for want of it.
+from make_ensemble_mean_maps import (
+    HAVE_CARTOPY, PROJECTION, draw_map, make_axes, panel_label, to_pm180,
+)
+
 # --- copied from data/climate_dataset.py -------------------------------------
 CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "BC": (5, 95)}
 ASINH_TOP_PCTL = 99.5     # positive-cell percentile that maps to +1
@@ -129,11 +136,10 @@ def load_year(data_dir: str, scenario: str, year: int, species) -> dict:
 
 def draw(species, years, frames, params, scenario, outdir):
     lat, lon = frames[years[0]]["_lat"], frames[years[0]]["_lon"]
-    ext = [lon.min(), lon.max(), lat.min(), lat.max()]
     written = []
     for v in species:
-        fig, axes = plt.subplots(2, len(years), figsize=(3.1 * len(years), 5.0),
-                                 constrained_layout=True, squeeze=False)
+        fig = plt.figure(figsize=(3.1 * len(years), 4.6), constrained_layout=True)
+        axes = make_axes(fig, 2, len(years))
         for j, yr in enumerate(years):
             raw = frames[yr][v]
             for i, (mode, fn, p) in enumerate((
@@ -142,24 +148,27 @@ def draw(species, years, frames, params, scenario, outdir):
             )):
                 z = fn(raw, *p)
                 ax = axes[i][j]
-                im = ax.imshow(z, origin="lower", extent=ext, vmin=-1, vmax=1,
-                               cmap="magma", aspect="auto", interpolation="nearest")
-                ax.set_xticks([]); ax.set_yticks([])
+                panel_label(ax, i * len(years) + j)
+                im = draw_map(ax, to_pm180(z, lon)[0], vmin=-1, vmax=1,
+                              cmap="magma", interpolation="nearest",
+                              outline="0.85")   # light: magma is near-black
                 if i == 0:
                     ax.set_title(f"{yr}  ({frames[yr]['_file']})", fontsize=10)
                 if j == 0:
-                    ax.set_ylabel(mode, fontsize=11)
-                ax.text(0.02, 0.04, f"pinned {pinned_pct(raw, z):.0f}%",
-                        transform=ax.transAxes, fontsize=8, color="w")
-        cb = fig.colorbar(im, ax=axes, shrink=0.85)
+                    ax.text(-0.04, 0.5, mode, transform=ax.transAxes, rotation=90,
+                            va="center", ha="right", fontsize=11)
+                ax.text(0.5, -0.05, f"pinned {pinned_pct(raw, z):.0f}%",
+                        transform=ax.transAxes, fontsize=8, ha="center", va="top")
+        cb = fig.colorbar(im, ax=list(axes.ravel()), shrink=0.8)
         cb.set_label("normalised conditioning value")
-        s, top = params[v]["asinh"]
+        s_, top = params[v]["asinh"]
         lo, hi = params[v]["v1"]
+        proj_note = f"   [{PROJECTION}]" if HAVE_CARTOPY else ""
         fig.suptitle(f"{v} conditioning channel as the model sees it — {scenario}\n"
-                     f"v1 hi={hi:.3g}   asinh s={s:.3g}, top={top:.3g}",
+                     f"v1 hi={hi:.3g}   asinh s={s_:.3g}, top={top:.3g}{proj_note}",
                      fontsize=11)
         path = os.path.join(outdir, f"asinh_cond_map_{scenario}_{v}.png")
-        fig.savefig(path, dpi=160)
+        fig.savefig(path, dpi=160, bbox_inches="tight")
         plt.close(fig)
         written.append(path)
     return written
