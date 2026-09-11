@@ -50,12 +50,12 @@ _ap.add_argument("--npz", default="provenance.npz",
                       "CEDS-2017, the vintage the builder actually asks for, "
                       "taken from ~/data_staging)")
 _ap.add_argument("--paper", default=None, help="plots/<name>/ slot; default "
-                 "fig19 for the LUMI-vintage run, fig20 for the matched one")
+                 "fig21 for the LUMI-vintage run, fig22 for the matched one")
 _a = _ap.parse_args()
 RESULT = os.path.join(HERE, "results", _a.npz)
 FIGDIR = os.path.join(HERE, "figures")
 MATCHED = "matched" in _a.npz
-PAPER = _a.paper or ("fig20" if MATCHED else "fig19")
+PAPER = _a.paper or ("fig22" if MATCHED else "fig21")
 
 if not os.path.exists(RESULT):
     sys.exit(f"[error] {RESULT} not found — run dump_provenance.py on LUMI")

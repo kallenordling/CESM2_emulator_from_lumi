@@ -62,7 +62,7 @@ EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_absolute"
 REFERENCE_DIR = "/home/nordling/mnt/lumi_sc/emulator_data/cesm2_reference"
 
 # One figure per variable, each a 2x2 grid of experiments.
-FIGURE_NAME = {"TREFHT": "fig05", "PRECT": "fig06"}
+FIGURE_NAME = {"TREFHT": "aux05", "PRECT": "aux06"}   # not in the paper set; aux* keeps it off figNN
 
 OUT = "plots/{name}.png"               # the .pdf sibling is written alongside
 

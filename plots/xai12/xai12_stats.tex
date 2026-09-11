@@ -1,0 +1,29 @@
+% Precipitation: the nonlinearity N = ALL - GHG - AAER as a map, 2031-2050.
+% Built from the gridded NetCDFs by scripts/make_fig1112_maps.py
+% — do not edit by hand. The caption below says what the numbers
+% are; \input this file directly.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{The nonlinearity $N = \Delta(\mathrm{ALL}) - \Delta(\mathrm{GHG}) - \Delta(\mathrm{AAER})$ in precipitation, averaged over 2031--2050 --- the last 20 years the single-forcing runs cover --- as area-weighted means over named regions. $\Delta$ is the anomaly relative to each side's own 1850--1900 mean, and $N$ is computed separately on each side, so neither is a reference for the other. Units are mm\,day$^{-1}$; precipitation is left in mm\,day$^{-1}$ rather than converted to a percentage because a percentage residual divides by a near-zero climatology over the subtropical deserts. The area-weighted pattern correlation between the two maps is $r = 0.681$: the emulator reproduces where the nonlinearity is, and the ``difference'' column says by how much it overstates it. ``Significant'' is the percentage of the region's area where the two differ at $p < 0.05$, point-wise, with the false-discovery rate controlled at $q = 0.1$ across the whole map --- so MORE of it means a stronger detection of disagreement, not a better emulator. NOTE THAT $N$ IS NOT A PURE INTERACTION TERM: the single-forcing runs hold ozone, land use, biomass burning, solar and volcanic forcing at 1850 levels, so $N$ = (those forcings) + (nonlinearity), and the Amazon and Congo signals in particular are land use and biomass burning.}
+\label{tab:fig12}
+\begin{tabular}{|l|r|r|r|r|}
+\hline
+\textbf{Region} & \textbf{CESM2} & \textbf{Emulator} & \textbf{Difference} & \textbf{Significant} \\
+ & \multicolumn{3}{c|}{(mm\,day$^{-1}$)} & (\%) \\
+\hline
+Global & +0.030 & +0.042 & +0.012 & 7 \\
+\hline
+Arctic & +0.044 & +0.096 & +0.052 & 27 \\
+N. Atlantic & +0.130 & +0.190 & +0.060 & 3 \\
+N. America & +0.074 & +0.028 & -0.046 & 8 \\
+Europe & +0.108 & +0.104 & -0.004 & 2 \\
+East Asia & +0.119 & +0.087 & -0.032 & 9 \\
+South Asia & +0.326 & +0.387 & +0.061 & 1 \\
+Sahel & +0.176 & +0.208 & +0.031 & 1 \\
+Tropics & +0.035 & +0.041 & +0.006 & 8 \\
+Antarctic & -0.001 & +0.014 & +0.015 & 3 \\
+\hline
+\end{tabular}
+\end{table}

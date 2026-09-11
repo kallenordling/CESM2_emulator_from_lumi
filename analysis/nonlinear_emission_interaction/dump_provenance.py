@@ -55,10 +55,23 @@ RAW = f"{COND}/emission_data/inputs4mips"
 # Which vintage is CORRECT differs by species, and matches how the cond files
 # were built: historical BC is CEDS-2025, SO2 is CEDS-2017. That asymmetry is
 # the recorded BC vintage mismatch, not a mistake here.
-PAIRS = [("BC", "BC"), ("SO2", "SUL")]
+PAIRS = [("BC", "BC"), ("SO2", "SUL"), ("CO2", "CO2")]
+
+# CO2 needs three things the aerosols do not:
+#   * it is surface anthro PLUS aircraft (make_co2_files_ssp.py:20-21),
+#   * the cond channel is CUMULATIVE, so the raw annual rate must be cumsummed
+#     before it can be compared at all,
+#   * the vintage the builder asks for, CEDS-2017-05-18, DOES NOT EXIST
+#     anywhere -- not on either mount, not in local staging. The closest
+#     available surface vintage is CEDS-CMIP-2024-11-25, so CO2 is compared
+#     against a DIFFERENT vintage than was used to build the cond, and its
+#     ratio must be read with that caveat.
+CO2_AIR_VINTAGE = "CMIP_CEDS-CMIP-2024-10-21"
+CUMULATIVE = {"CO2"}
 RAW_VINTAGE = {
     ("hist", "BC"):  "CMIP_CEDS-CMIP-2025-04-18",
     ("hist", "SO2"): "CMIP_CEDS-2017-05-18",
+    ("hist", "CO2"): "CMIP_CEDS-CMIP-2024-11-25",   # 2017 does not exist
 }
 SCEN = {
     "hist":   dict(cond=f"{COND}/emissions_hist_only_timefixed_bc_co2fix.nc",
@@ -162,26 +175,45 @@ for scen, cfg in SCEN.items():
         if not files:
             print(f"[prov] {scen} {sp}: no raw files matching {os.path.basename(pat)}")
             continue
-        yrs, tot = [], []
+        if sp == "CO2":
+            air_tag = (CO2_AIR_VINTAGE if scen == "hist" else cfg["raw"])
+            files = files + sorted(glob.glob(
+                f"{RAW}/CO2-em-AIR-anthro_input4MIPs_emissions_{air_tag}_gn_*.nc"))
+            print(f"[prov] {scen} CO2: {len(files)} files incl. aircraft")
+        acc = {}
         for f in files:
             d = xr.open_dataset(f, decode_times=True)
-            v = [k for k in d.data_vars if k.endswith("_em_anthro")]
+            v = [k for k in d.data_vars
+                 if k.endswith("_em_anthro") or k.endswith("_em_AIR_anthro")]
             if not v:
                 d.close(); continue
             a = d[v[0]]
             if "sector" in a.dims:
                 a = a.sum("sector")               # all sectors, kg m-2 s-1
+            for extra_dim in ("level", "lev", "plev"):
+                if extra_dim in a.dims:           # aircraft is 3-D
+                    a = a.sum(extra_dim)
             area = cell_area(d["lat"].values, d["lon"].values)
             # kg m-2 s-1 -> Tg/yr : * area * seconds, /1e9
             g = (a * xr.DataArray(area, dims=("lat", "lon"))).sum(("lat", "lon"))
             g = g * SEC_PER_YR / 1e9
             y = a["time"].dt.year.values
             for yy in np.unique(y):
-                yrs.append(int(yy)); tot.append(float(g.values[y == yy].mean()))
+                val = float(g.values[y == yy].mean())
+                if int(yy) in acc:
+                    acc[int(yy)] += val           # surface + aircraft
+                else:
+                    acc[int(yy)] = val
             d.close()
+        yrs = sorted(acc); tot = [acc[k] for k in yrs]
         o = np.argsort(yrs)
-        payload[f"raw_years_{scen}_{chan}"] = np.array(yrs)[o]
-        payload[f"raw_tg_{scen}_{chan}"] = np.array(tot)[o]
+        yy_, tt_ = np.array(yrs)[o], np.array(tot)[o]
+        if chan in CUMULATIVE:
+            # The cond CO2 channel is CUMULATIVE from 1850, so the raw ANNUAL
+            # rate has to be integrated before the two are the same quantity.
+            tt_ = np.cumsum(tt_)
+        payload[f"raw_years_{scen}_{chan}"] = yy_
+        payload[f"raw_tg_{scen}_{chan}"] = tt_
         uy = np.unique(np.array(yrs))
         if len(uy) != len(yrs):
             sys.exit(f"[error] {scen} {sp}: {len(yrs)} entries for {len(uy)} "

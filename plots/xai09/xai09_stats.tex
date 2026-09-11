@@ -1,0 +1,22 @@
+% Temperature: the nonlinearity N = ALL - GHG - AAER, 2041-2050.
+% Built from plots/fig12_data/ by scripts/make_fig910_from_csv.py
+% — do not edit by hand. The caption below says what the numbers
+% are; \input this file directly.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{The nonlinearity $N(t) = \Delta(\mathrm{ALL}) - \Delta(\mathrm{GHG}) - \Delta(\mathrm{AAER})$ in the global-mean temperature anomaly, in $^{\circ}$C, averaged over 2041--2050. $\Delta$ is the anomaly relative to each side's own 1850--1900 mean, and ALL is the historical run spliced per member to SSP3-7.0 at 2015. $N$ is computed separately on each side, so neither is a reference for the other: CESM2's $N$ is a property of the climate model, and the emulator's is what the emulator reproduces. Were the response additive, $N$ would be zero; it is not, in CESM2 itself. The ``share'' column gives $N$ as a percentage of that side's own all-forcing response, and on the last row the emulator's $N$ as a percentage of CESM2's. Intervals are 90\% confidence intervals, given as half-widths, over the per-member time means (all-forcing 10, greenhouse-gas-only 6, aerosol-only 11 members per side); $N$ combines three ensemble means, so three sampling errors add, and the last row combines six. ``Resolved'' says whether the interval excludes zero --- ``unresolved'' is too few members to tell, not evidence of additivity. NOTE THAT $N$ IS NOT A PURE INTERACTION TERM: the single-forcing runs hold ozone, land use, biomass burning, solar and volcanic forcing at 1850 levels, so $N$ = (those forcings) + (nonlinearity). The window is post-2015 for that reason --- before 2015 the volcanic eruptions dominate $N$ outright, as the spikes in figure~\ref{fig:fig09}(b) show.}
+\label{tab:fig09}
+\begin{tabular}{|l|r|r|r|r|c|r|c|}
+\hline
+\textbf{Side} & \textbf{ALL} & \textbf{GHG} & \textbf{AAER} & \textbf{$N$} & \textbf{90\% CI} & \textbf{Share} & \textbf{Resolved?} \\
+ & \multicolumn{5}{c|}{($^{\circ}$C)} & (\%) & \\
+\hline
+CESM2 & +2.090 & +2.420 & -0.814 & +0.484 & $\pm$0.077 & 23.1 & yes \\
+Emulator & +2.146 & +2.353 & -0.844 & +0.637 & $\pm$0.030 & 29.7 & yes \\
+\hline
+Emulator $-$ CESM2 & & & & +0.154 & $\pm$0.082 & 132 & yes \\
+\hline
+\end{tabular}
+\end{table}

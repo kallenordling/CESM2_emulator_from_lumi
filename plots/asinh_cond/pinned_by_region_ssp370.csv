@@ -1,0 +1,121 @@
+species,year,transform,region,pinned_pct
+CO2,1850,v1,E China,nan
+CO2,1850,v1,India,nan
+CO2,1850,v1,E US,0.0
+CO2,1850,v1,Europe,0.0
+CO2,1850,asinh,E China,nan
+CO2,1850,asinh,India,nan
+CO2,1850,asinh,E US,0.0
+CO2,1850,asinh,Europe,0.0
+CO2,2014,v1,E China,30.6
+CO2,2014,v1,India,8.8
+CO2,2014,v1,E US,57.2
+CO2,2014,v1,Europe,41.7
+CO2,2014,asinh,E China,7.6
+CO2,2014,asinh,India,1.7
+CO2,2014,asinh,E US,15.4
+CO2,2014,asinh,Europe,11.0
+CO2,2050,v1,E China,55.2
+CO2,2050,v1,India,31.6
+CO2,2050,v1,E US,62.5
+CO2,2050,v1,Europe,51.5
+CO2,2050,asinh,E China,28.1
+CO2,2050,asinh,India,7.1
+CO2,2050,asinh,E US,26.4
+CO2,2050,asinh,Europe,16.5
+CO2,2080,v1,E China,62.8
+CO2,2080,v1,India,41.2
+CO2,2080,v1,E US,65.4
+CO2,2080,v1,Europe,58.1
+CO2,2080,asinh,E China,33.7
+CO2,2080,asinh,India,11.0
+CO2,2080,asinh,E US,32.2
+CO2,2080,asinh,Europe,19.8
+CO2,2100,v1,E China,64.7
+CO2,2100,v1,India,45.1
+CO2,2100,v1,E US,66.3
+CO2,2100,v1,Europe,60.9
+CO2,2100,asinh,E China,35.7
+CO2,2100,asinh,India,14.7
+CO2,2100,asinh,E US,36.1
+CO2,2100,asinh,Europe,23.7
+SUL,1850,v1,E China,0.2
+SUL,1850,v1,India,1.5
+SUL,1850,v1,E US,18.3
+SUL,1850,v1,Europe,29.5
+SUL,1850,asinh,E China,0.0
+SUL,1850,asinh,India,0.0
+SUL,1850,asinh,E US,0.0
+SUL,1850,asinh,Europe,1.2
+SUL,2014,v1,E China,82.8
+SUL,2014,v1,India,67.6
+SUL,2014,v1,E US,84.6
+SUL,2014,v1,Europe,71.9
+SUL,2014,asinh,E China,33.5
+SUL,2014,asinh,India,12.3
+SUL,2014,asinh,E US,5.3
+SUL,2014,asinh,Europe,2.9
+SUL,2050,v1,E China,77.6
+SUL,2050,v1,India,63.0
+SUL,2050,v1,E US,46.2
+SUL,2050,v1,Europe,53.2
+SUL,2050,asinh,E China,23.6
+SUL,2050,asinh,India,18.4
+SUL,2050,asinh,E US,2.4
+SUL,2050,asinh,Europe,1.9
+SUL,2080,v1,E China,74.9
+SUL,2080,v1,India,62.3
+SUL,2080,v1,E US,42.8
+SUL,2080,v1,Europe,43.4
+SUL,2080,asinh,E China,20.5
+SUL,2080,asinh,India,16.9
+SUL,2080,asinh,E US,0.5
+SUL,2080,asinh,Europe,1.4
+SUL,2100,v1,E China,72.7
+SUL,2100,v1,India,60.3
+SUL,2100,v1,E US,39.9
+SUL,2100,v1,Europe,38.4
+SUL,2100,asinh,E China,19.3
+SUL,2100,asinh,India,15.2
+SUL,2100,asinh,E US,0.5
+SUL,2100,asinh,Europe,1.4
+BC,1850,v1,E China,53.2
+BC,1850,v1,India,51.0
+BC,1850,v1,E US,49.5
+BC,1850,v1,Europe,32.1
+BC,1850,asinh,E China,1.2
+BC,1850,asinh,India,0.5
+BC,1850,asinh,E US,0.5
+BC,1850,asinh,Europe,1.7
+BC,2014,v1,E China,78.6
+BC,2014,v1,India,61.8
+BC,2014,v1,E US,60.1
+BC,2014,v1,Europe,60.5
+BC,2014,asinh,E China,44.6
+BC,2014,asinh,India,35.8
+BC,2014,asinh,E US,1.0
+BC,2014,asinh,Europe,0.8
+BC,2050,v1,E China,78.0
+BC,2050,v1,India,61.8
+BC,2050,v1,E US,48.6
+BC,2050,v1,Europe,45.5
+BC,2050,asinh,E China,44.4
+BC,2050,asinh,India,39.5
+BC,2050,asinh,E US,0.5
+BC,2050,asinh,Europe,0.1
+BC,2080,v1,E China,74.7
+BC,2080,v1,India,61.3
+BC,2080,v1,E US,36.1
+BC,2080,v1,Europe,33.1
+BC,2080,asinh,E China,35.3
+BC,2080,asinh,India,27.9
+BC,2080,asinh,E US,0.5
+BC,2080,asinh,Europe,0.1
+BC,2100,v1,E China,72.5
+BC,2100,v1,India,60.8
+BC,2100,v1,E US,27.4
+BC,2100,v1,Europe,29.3
+BC,2100,asinh,E China,30.8
+BC,2100,asinh,India,23.5
+BC,2100,asinh,E US,0.0
+BC,2100,asinh,Europe,0.1

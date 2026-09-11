@@ -1,0 +1,25 @@
+% Temperature: N statistics, full record.
+% Built by scripts/make_fig16_n_statistics.py — do not edit.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{Nonlinearity statistics for temperature over 1850--2050, area-weighted by region. ``mean'' is the time mean of $N$ and ``$|N|$'' the time mean of its absolute value: where $|N|$ greatly exceeds $|$mean$|$ the nonlinearity is large but changes sign, which a mean map hides. ``Resolved'' is the percentage of the region's area where $|$mean$(N)| $ exceeds twice its own sampling floor --- $N$ combines three ensemble means, so three sampling errors add, and below that threshold the residual cannot be distinguished from ensemble noise however structured the map appears. Units $^{\circ}$C.}
+\label{tab:fig16}
+\begin{tabular}{|l|r|r|r|r|r|r|}
+\hline
+ & \multicolumn{3}{c|}{\textbf{CESM2}} & \multicolumn{3}{c|}{\textbf{Emulator}} \\
+\cline{2-7}
+\textbf{Region} & mean & $|N|$ & resolved \% & mean & $|N|$ & resolved \% \\
+\hline
+Global & +0.151 & +0.334 & 77 & +0.193 & +0.299 & 83 \\
+Arctic & +0.480 & +0.816 & 99 & +0.651 & +0.773 & 100 \\
+N. Atlantic & +0.581 & +0.755 & 95 & +0.721 & +0.808 & 97 \\
+N. America & +0.299 & +0.566 & 90 & +0.345 & +0.488 & 93 \\
+Europe & +0.230 & +0.480 & 99 & +0.330 & +0.467 & 100 \\
+East Asia & +0.246 & +0.398 & 100 & +0.320 & +0.390 & 100 \\
+Sahel & +0.225 & +0.364 & 97 & +0.323 & +0.380 & 98 \\
+Tropics & +0.131 & +0.252 & 90 & +0.133 & +0.215 & 90 \\
+\hline
+\end{tabular}
+\end{table}

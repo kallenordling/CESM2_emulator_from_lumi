@@ -45,7 +45,7 @@ curves are shorter than the record at both ends.
 EVAL_DIR = "/home/nordling/mnt/lumi_sc/eval_output/manual/ep0860_ens25_absolute"
 REFERENCE_DIR = "/home/nordling/mnt/lumi_sc/emulator_data/cesm2_reference"
 
-FIGURE_NAME = {"TREFHT": "fig07", "PRECT": "fig08"}
+FIGURE_NAME = {"TREFHT": "aux07", "PRECT": "aux08"}   # not in the paper set; aux* keeps it off figNN
 OUT = "plots/{name}.png"               # the .pdf sibling is written alongside
 TABLE = "plots/{name}_running.tex"
 

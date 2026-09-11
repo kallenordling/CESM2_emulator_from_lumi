@@ -36,16 +36,17 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-# TREFHT -> figs 05/06, PRECT -> figs 07/08. Both slots were free; the
-# previous occupants of all four are in plots/archive.
+# The paper groups these by KIND, not by variable: both city TIMESERIES first
+# (fig07 temperature, fig08 precipitation), then both city DISTRIBUTIONS
+# (fig09, fig10). Slots 05/06 now hold the ensemble-mean anomaly maps.
 VARS = {
     "TREFHT": dict(unit="°C", label="TREFHT  [°C]", npz="city_series.npz",
-                   figs=("fig05", "fig06"), stem=("figure_15_city_timeseries",
+                   figs=("fig07", "fig09"), stem=("figure_15_city_timeseries",
                                                   "figure_16_city_histograms"),
                    long="Near-surface temperature"),
     "PRECT":  dict(unit="mm/day", label="PRECT  [mm/day]",
                    npz="city_series_PRECT.npz",
-                   figs=("fig07", "fig08"), stem=("figure_17_city_timeseries_PRECT",
+                   figs=("fig08", "fig10"), stem=("figure_17_city_timeseries_PRECT",
                                                   "figure_18_city_histograms_PRECT"),
                    long="Precipitation"),
 }
@@ -57,10 +58,10 @@ CFG = VARS[VAR]
 
 RESULT = os.path.join(HERE, "results", CFG["npz"])
 FIGDIR = os.path.join(HERE, "figures")
-# Paper figures follow the repo convention plots/figNN/figNN.{png,pdf}. The
-# previous occupants of 05/06 were moved to plots/archive, so these slots are
-# free; scripts/make_fig5.py still NAMES its outputs fig05/fig06 though, so
-# re-running it would overwrite these.
+# Paper figures follow the repo convention plots/figNN/figNN.{png,pdf}.
+# make_fig5.py and make_fig7.py used to name their outputs fig05-fig08 and
+# would silently overwrite these; they now write aux05-aux08, since those
+# figures are not in the paper set.
 PAPER = {"timeseries": CFG["figs"][0], "histograms": CFG["figs"][1]}
 
 

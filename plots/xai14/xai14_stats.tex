@@ -1,0 +1,26 @@
+% The conditioning EOFs, 'ssp370' basis.
+% Built from plots/cond_eofs_ep0863.npz by scripts/make_fig14_eofs.py
+% — do not edit by hand.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{The conditioning modes, from the persisted ``ssp370'' PCA basis of the checkpoint behind figures 9--13, fitted on 2015-2100 (n=86) --- time is the sample axis, so these are the modes of how the emissions VARY over that period, and the ssp370 basis therefore describes the 21st century alone. The CO$_2$ channel is denoised to 30 components and the sulfate and black-carbon channels to five each before the network sees them, so these patterns are the emulator's complete vocabulary for ``where the emissions are'': a perturbation of a single grid cell is an input it was never trained on. ``Variance'' is the share of the channel's temporal variance the mode carries, and the regional columns give the share of the mode's total absolute loading falling in each region, so they say what the mode is a pattern OF. Note that EOF1 alone carries the great majority of the variance --- it is the global pattern scaling up and down in time --- so the regional redistribution that a ``where'' question asks about lives in EOF2 and EOF3. The sign of a principal component is arbitrary; each mode here is flipped so its area-weighted mean is positive.}
+\label{tab:fig14}
+\begin{tabular}{|l|r|r|r|r|r|r|r|}
+\hline
+\textbf{Mode} & \textbf{Variance} & \textbf{East Asia} & \textbf{South Asia} & \textbf{Europe} & \textbf{N. America} & \textbf{Africa} & \textbf{S. America} \\
+ & (\%) & \multicolumn{6}{c|}{share of the mode's loading, \%} \\
+\hline
+CO2 EOF1 & 90.6 & 6.8 & 6.2 & 5.6 & 8.4 & 16.4 & 12.3 \\
+CO2 EOF2 & 7.2 & 8.8 & 7.6 & 5.5 & 7.9 & 18.6 & 11.3 \\
+CO2 EOF3 & 1.4 & 9.8 & 8.2 & 6.0 & 8.2 & 19.1 & 11.1 \\
+SUL EOF1 & 96.9 & 4.1 & 1.6 & 2.5 & 3.8 & 9.2 & 6.0 \\
+SUL EOF2 & 2.5 & 5.0 & 1.8 & 3.2 & 5.7 & 13.0 & 7.3 \\
+SUL EOF3 & 0.4 & 2.7 & 1.2 & 5.1 & 11.0 & 11.1 & 9.0 \\
+BC EOF1 & 93.0 & 4.6 & 3.1 & 8.9 & 16.1 & 10.3 & 6.4 \\
+BC EOF2 & 6.2 & 4.3 & 2.5 & 6.7 & 9.8 & 16.1 & 4.4 \\
+BC EOF3 & 0.6 & 3.6 & 2.1 & 6.1 & 17.6 & 19.3 & 8.4 \\
+\hline
+\end{tabular}
+\end{table}

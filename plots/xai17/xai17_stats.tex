@@ -1,0 +1,25 @@
+% Precipitation: N statistics, full record.
+% Built by scripts/make_fig16_n_statistics.py — do not edit.
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{Nonlinearity statistics for precipitation over 1850--2050, area-weighted by region. ``mean'' is the time mean of $N$ and ``$|N|$'' the time mean of its absolute value: where $|N|$ greatly exceeds $|$mean$|$ the nonlinearity is large but changes sign, which a mean map hides. ``Resolved'' is the percentage of the region's area where $|$mean$(N)| $ exceeds twice its own sampling floor --- $N$ combines three ensemble means, so three sampling errors add, and below that threshold the residual cannot be distinguished from ensemble noise however structured the map appears. Units mm\,day$^{-1}$.}
+\label{tab:fig17}
+\begin{tabular}{|l|r|r|r|r|r|r|}
+\hline
+ & \multicolumn{3}{c|}{\textbf{CESM2}} & \multicolumn{3}{c|}{\textbf{Emulator}} \\
+\cline{2-7}
+\textbf{Region} & mean & $|N|$ & resolved \% & mean & $|N|$ & resolved \% \\
+\hline
+Global & +0.011 & +0.280 & 52 & +0.013 & +0.199 & 63 \\
+Arctic & +0.013 & +0.076 & 46 & +0.030 & +0.060 & 91 \\
+N. Atlantic & +0.043 & +0.224 & 84 & +0.035 & +0.194 & 83 \\
+N. America & +0.041 & +0.177 & 68 & +0.010 & +0.131 & 74 \\
+Europe & +0.043 & +0.143 & 73 & +0.028 & +0.105 & 71 \\
+East Asia & +0.017 & +0.316 & 39 & +0.032 & +0.237 & 60 \\
+Sahel & +0.056 & +0.111 & 95 & +0.066 & +0.091 & 99 \\
+Tropics & +0.014 & +0.495 & 60 & +0.007 & +0.350 & 71 \\
+\hline
+\end{tabular}
+\end{table}
