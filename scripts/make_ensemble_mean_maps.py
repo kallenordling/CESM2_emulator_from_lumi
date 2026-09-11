@@ -302,8 +302,10 @@ def draw(var, mode, emu, ref, outdir):
     fig.suptitle(f"{var} ensemble mean, final decade — "
                  f"{'anomaly vs 1850-1900' if mode == 'anomaly' else 'absolute'}"
                  f"{proj_note}", fontsize=12)
+    # PNG to look at, PDF to \includegraphics — the paper set is vector.
     path = os.path.join(outdir, f"ensmean_map_{var}_{mode}.png")
-    fig.savefig(path, dpi=160, bbox_inches="tight")
+    for out in (path, os.path.splitext(path)[0] + ".pdf"):
+        fig.savefig(out, dpi=160, bbox_inches="tight")
     plt.close(fig)
     return path
 
