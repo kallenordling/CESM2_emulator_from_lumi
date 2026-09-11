@@ -289,7 +289,7 @@ if [[ "${FRESH}" == "1" ]]; then
     echo "[fresh] FRESH=1 — training from scratch into ${SAVE_NAME}"
 else
     LOAD_OVERRIDE=""
-    echo "[fresh] resuming newest ${SAVE_NAME%.pt}_*.pt (FRESH=1 for a clean start)"
+    echo "[fresh] FRESH=0 — RESUMING newest ${SAVE_NAME%.pt}_*.pt (pass FRESH=1 to start from scratch instead)"
 fi
 
 # ── Self-chaining ──────────────────────────────────────────────────────────────
