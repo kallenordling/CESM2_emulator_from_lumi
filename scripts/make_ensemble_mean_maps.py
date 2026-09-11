@@ -320,8 +320,11 @@ def draw(var, mode, emu, ref, outdir):
     paper = PAPER_NAME.get((var, mode))
     if paper:
         parent = os.path.dirname(outdir.rstrip("/")) or "plots"
-        outs += [os.path.join(parent, f"{paper}.png"),
-                 os.path.join(parent, f"{paper}.pdf")]
+        # Supplement figures live in their own folder, main-text ones beside it.
+        target = os.path.join(parent, "supplement") if paper.startswith("figS") else parent
+        os.makedirs(target, exist_ok=True)
+        outs += [os.path.join(target, f"{paper}.png"),
+                 os.path.join(target, f"{paper}.pdf")]
     for out in outs:
         fig.savefig(out, dpi=160, bbox_inches="tight")
     plt.close(fig)

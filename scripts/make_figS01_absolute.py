@@ -66,10 +66,10 @@ DATA_CONFIG = "configs/config_data_ybias_BCprect.yaml"
 # re-read (necessary after repairing the underlying data).
 CACHE = "plots/fig1_cesm2_members.csv"
 
-OUT = "plots/figS01.png"       # the .pdf sibling is written alongside
+OUT = "plots/supplement/figS01.png"       # the .pdf sibling is written alongside
 
 # LaTeX table of the same numbers, for \\input into the paper.
-TABLE = "plots/figS01_skill.tex"
+TABLE = "plots/supplement/figS01_skill.tex"
 
 # The four experiments, in plotting order:
 #   key -> (legend label, tree subdirectory, colour)

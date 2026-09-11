@@ -26,14 +26,14 @@ fig16.pdf   paper_fig_attribution_ep0860_maps_PRECT.pdf           Precipitation 
 fig17.pdf   paper_fig_attribution_ep0860_decompose.pdf            Origin of the non-additivity: additive conditioning, Arctic waterfall, R vs All / vs Aerosol
 fig18.pdf   paper_fig_tp_scatter_ep0860.pdf                       Precipitation vs temperature, one dot per year, per scenario (hydrological sensitivity)
 
-SUPPLEMENT — the ABSOLUTE counterparts. The main text shows anomalies,
+SUPPLEMENT (figures_overleaf/supplement/) — the ABSOLUTE counterparts. The main text shows anomalies,
 which remove any constant offset between emulator and CESM2 by
 construction; these keep it, so a bias here that is absent in the main
 text is a mean-state offset rather than an error in the response.
 
-figS01.pdf   absolute_series_TREFHT.pdf                            ABSOLUTE global-mean temperature, emulator vs CESM2, all scenarios
-figS02.pdf   absolute_series_PRECT.pdf                             ABSOLUTE global-mean precipitation, emulator vs CESM2, all scenarios
-figS03.pdf   absolute_maps_TREFHT.pdf                              ABSOLUTE temperature maps: emulator, CESM2, difference
-figS04.pdf   absolute_maps_PRECT.pdf                               ABSOLUTE precipitation maps: emulator, CESM2, difference
+supplement/figS01.pdf   absolute_series_TREFHT.pdf                            ABSOLUTE global-mean temperature, emulator vs CESM2, all scenarios
+supplement/figS02.pdf   absolute_series_PRECT.pdf                             ABSOLUTE global-mean precipitation, emulator vs CESM2, all scenarios
+supplement/figS03.pdf   absolute_maps_TREFHT.pdf                              ABSOLUTE temperature maps: emulator, CESM2, difference
+supplement/figS04.pdf   absolute_maps_PRECT.pdf                               ABSOLUTE precipitation maps: emulator, CESM2, difference
 
 (source)    attribution_equations.tex / .pdf                      Derivation of R and the fig17(a) waterfall decomposition, with numbers
