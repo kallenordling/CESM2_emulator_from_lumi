@@ -1879,7 +1879,13 @@ class UNetTrainer:
         save_path = os.path.join(self.save_dir, f"{base}_{epoch}.pt")
         torch.save(state_dict, save_path, _use_new_zipfile_serialization=False)
 
-        # ── Rotate: keep the 5 newest numbered checkpoints (best.pt is excluded) ─
+        # ── Rotate: keep the N newest numbered checkpoints (best.pt is excluded) ─
+        # N was 5. An eval is triggered at save time but runs only when SLURM
+        # schedules it, and a 5-deep window is ~40 min of training here, so
+        # eval_ep0010 (job 21919448) started three hours later and died with
+        # FileNotFoundError on a checkpoint rotation had already deleted. Each
+        # is ~790 MB, so a deeper window costs GB on a scratch with terabytes
+        # free, and buys hours of queue tolerance.
         def _epoch_from_name(fname: str) -> int:
             try:
                 return int(fname.split("_")[-1].split(".")[0])
@@ -1891,7 +1897,8 @@ class UNetTrainer:
             for f in os.listdir(self.save_dir)
             if f.startswith(base + "_") and f.endswith(".pt") and not f.endswith("_best.pt")
         ]
-        for stale in sorted(existing, key=_epoch_from_name, reverse=True)[5:]:
+        keep = int(getattr(self, "keep_checkpoints", 20))
+        for stale in sorted(existing, key=_epoch_from_name, reverse=True)[keep:]:
             try:
                 os.remove(stale)
             except OSError:

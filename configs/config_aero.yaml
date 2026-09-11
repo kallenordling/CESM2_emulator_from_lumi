@@ -161,6 +161,16 @@ trainer:
     # the value is persisted per checkpoint as COND_TRANSFORM.
     cond_transform: null
 
+    # How many numbered checkpoints to keep, newest first (_best.pt is always
+    # kept). An eval is triggered when a checkpoint is written but runs only
+    # when SLURM schedules it, hours later on a busy queue; at the old value of
+    # 5 the file was already rotated away and the eval died with
+    # FileNotFoundError. Each checkpoint is ~790 MB, so 20 is ~16 GB: fine on
+    # scratch, NOT fine in /projappl, which is already at quota. A run that
+    # leaves save_dir at the default runs/ writes into /projappl and should
+    # either lower this or point SAVE_DIR at scratch.
+    keep_checkpoints: 20
+
     reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.
     eval_script: run_eval_aero.sh
     # Auto-eval-trigger (_spawn_eval → eval_triggers/*.json → watch_eval_triggers.sh
