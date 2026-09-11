@@ -405,16 +405,29 @@ _MINMAX_OVERRIDE = None
 # to the two channels it helps.
 _TRANSFORM_MODES = ("v1", "asinh")
 
+# Named specs. Hydra's override grammar rejects a value containing "=" and ","
+# unless it is quoted all the way through the shell, the sbatch --export list
+# and accelerate -- job 21896489 died on
+# `cond_transform=CO2=v1,SUL=asinh,BC=asinh` with "mismatched input '='" before
+# it trained a step. An alias has no special characters, so it survives every
+# layer. The general spec still works for a direct call.
+_TRANSFORM_ALIASES = {
+    "asinh_aero": {"CO2": "v1", "SUL": "asinh", "BC": "asinh"},
+}
+
 
 def _parse_cond_transform(spec: str) -> "str | dict":
     """"v1" | "asinh" | "CO2=v1,SUL=asinh,BC=asinh" -> mode or per-var dict."""
     spec = str(spec).strip()
     if spec in _TRANSFORM_MODES:
         return spec
+    if spec in _TRANSFORM_ALIASES:
+        return dict(_TRANSFORM_ALIASES[spec])
     if "=" not in spec:
         raise ValueError(
             f"unknown cond_transform {spec!r} (expected 'v1', 'asinh', or a "
-            "per-channel spec like 'CO2=v1,SUL=asinh,BC=asinh')")
+            f"per-channel spec like 'CO2=v1,SUL=asinh,BC=asinh', or one "
+            f"of the aliases {tuple(_TRANSFORM_ALIASES)})")
     out = {}
     for item in spec.split(","):
         var, _, mode = item.partition("=")
@@ -430,8 +443,10 @@ def _parse_cond_transform(spec: str) -> "str | dict":
 def set_cond_transform(mode: str) -> None:
     """Select the conditioning transform BEFORE datasets build.
 
-    Accepts "v1", "asinh", or a per-channel spec ("CO2=v1,SUL=asinh,BC=asinh").
-    A channel the spec does not name falls back to "v1".
+    Accepts "v1", "asinh", the alias "asinh_aero" (CO2 on v1, SUL and BC on
+    asinh), or a per-channel spec ("CO2=v1,SUL=asinh,BC=asinh"). A channel the
+    spec does not name falls back to "v1". Prefer the alias from a launcher:
+    Hydra cannot parse the punctuation in the general spec.
     """
     global _COND_TRANSFORM
     _parse_cond_transform(mode)          # validate before mutating

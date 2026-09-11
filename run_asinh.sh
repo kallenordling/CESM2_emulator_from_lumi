@@ -52,8 +52,11 @@
 # new transform to the two channels it helps.
 #
 # Fire:  FRESH=1 CHAIN_REMAINING=6 sbatch run_asinh.sh
-#        FRESH=1 RUN_TAG=asinh99 COND_TRANSFORM="CO2=v1,SUL=asinh,BC=asinh" \
-#            sbatch run_asinh.sh
+#        FRESH=1 RUN_TAG=asinh99 COND_TRANSFORM=asinh_aero sbatch run_asinh.sh
+#
+# COND_TRANSFORM=asinh_aero is the ALIAS for "CO2=v1,SUL=asinh,BC=asinh". Pass
+# the alias, never the spec: Hydra's override grammar rejects a value carrying
+# "=" and ",", which is what killed job 21896489 before its first step.
 # RUN_TAG keeps a new arm off the previous one's checkpoints; it is sticky down
 # the chain, so set it on the first submit only.
 #
@@ -220,7 +223,8 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
 # filmattn's did. Keep it out of a resume and the chain resumes the wrong arm --
 # --export=ALL carries it, so only the FIRST submit needs to set it.
 RUN_TAG="${RUN_TAG:-asinh}"
-export RUN_TAG
+SAVE_DIR="${SAVE_DIR:-runs/}"
+export RUN_TAG SAVE_DIR
 
 # ── Launch eval watcher as a background SLURM job ────────────────────────────
 WATCHER_TIME=$(squeue -h -j "${SLURM_JOB_ID}" -o '%l' 2>/dev/null | tr -d '[:space:]' || true)
@@ -298,15 +302,19 @@ echo "[chain] this script: ${SCRIPT_NAME}"
 
 CHAIN_REMAINING="${CHAIN_REMAINING:-6}"
 if [[ "${CHAIN_REMAINING}" -gt 1 ]]; then
+    # The script submitted below is THIS one, not the one it was copied from.
+    # The inherited literal sent link 2 of the asinh chain into the BASELINE
+    # launcher (job 21844722), which then ran run_mseyb_BCprect with 5 more
+    # links queued behind it, so it is derived instead.
+    #
+    # These comments live ABOVE the command, never inside it. A `#` line
+    # between backslash-continued lines comments out the REST of the joined
+    # command — the script path went with it, sbatch read an empty stdin, and
+    # job 21896489 died with "Batch script is empty!" after queueing nothing.
     NEXT_JOB=$(sbatch --parsable \
            --dependency="afterany:${SLURM_JOB_ID}" \
            --export="ALL,CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )),FRESH=0,CO2FIX=${CO2FIX:-0}" \
            --chdir="${SLURM_SUBMIT_DIR}" \
-           # THIS script, not the one it was copied from. The inherited
-           # literal sent link 2 of the asinh chain into the BASELINE launcher
-           # (job 21844722), which then ran run_mseyb_BCprect with 5 more links
-           # queued behind it. Derive it instead so a future copy cannot repeat
-           # the mistake.
            "${SLURM_SUBMIT_DIR}/${SCRIPT_NAME}" 2>/dev/null) || NEXT_JOB=""
     echo "[chain] queued next link ${NEXT_JOB:-FAILED} (afterany:${SLURM_JOB_ID}, CHAIN_REMAINING=$(( CHAIN_REMAINING - 1 )))"
 else
