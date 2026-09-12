@@ -39,6 +39,13 @@ LUMI_EVAL_PROJECT="${LUMI_EVAL_PROJECT:-462001112}"
 export LUMI_EVAL_PROJECT
 export LUMI_EVAL_OUT="${LUMI_EVAL_OUT:-/scratch/project_${LUMI_EVAL_PROJECT}/eval_output}"
 
+# Checkpoints follow the same rule as eval output: SCRATCH, on LUMI_EVAL_PROJECT,
+# collected in one place across arms. They used to land in runs/ relative to the
+# submit directory, i.e. on /projappl, which filled to quota (55G of 54G) and
+# then truncated whatever was being written - a checkpoint, or the SLURM log,
+# which is what made completed evals report failure.
+export LUMI_RUNS_DIR="${LUMI_RUNS_DIR:-/scratch/project_${LUMI_EVAL_PROJECT}/runs}"
+
 # Container-internal view of projappl. Some launchers need this exact prefix
 # because the bind mount inside the singularity image resolves differently.
 export LUMI_REPO_PFS="/pfs/lustrep1/projappl/project_${LUMI_PROJECT}/CESM2_emulator_from_lumi"

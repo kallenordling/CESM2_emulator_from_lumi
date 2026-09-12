@@ -52,7 +52,7 @@ trainer:
     # denoising MSE. Used by the run_mseyb A/B arm (run2_mseyb.sh). Default off.
     mse_only: false
     batch_size: 8        # must match batch_size in config_data.yaml
-    save_dir: runs/
+    save_dir: ${oc.env:LUMI_RUNS_DIR,/scratch/project_462001112/runs}
     save_name: run_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
     load_path: "newest"        # first link: no run_sensfix_*.pt exists → falls through to from-scratch; chained links resume newest
     lr: 0.00005
@@ -166,9 +166,8 @@ trainer:
     # when SLURM schedules it, hours later on a busy queue; at the old value of
     # 5 the file was already rotated away and the eval died with
     # FileNotFoundError. Each checkpoint is ~790 MB, so 20 is ~16 GB: fine on
-    # scratch, NOT fine in /projappl, which is already at quota. A run that
-    # leaves save_dir at the default runs/ writes into /projappl and should
-    # either lower this or point SAVE_DIR at scratch.
+    # scratch, which is where save_dir now points. It would NOT be fine in
+    # /projappl, the old default, which is at quota.
     keep_checkpoints: 20
 
     reset_optimizer: false      # keep Adam momentum across chained links. First link starts from scratch via load_path:"newest" fallback (no run_normfix ckpt yet); subsequent links resume cleanly.

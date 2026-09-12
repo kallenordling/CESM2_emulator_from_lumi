@@ -35,6 +35,12 @@ EVAL_OUT: str = os.environ.get(
     "LUMI_EVAL_OUT", f"/scratch/project_{EVAL_PROJECT}/eval_output"
 )
 
+#: Checkpoints, on EVAL_PROJECT's scratch for the same reason EVAL_OUT is, and
+#: exempt from ``expand()`` below for the same reason too.
+RUNS_DIR: str = os.environ.get(
+    "LUMI_RUNS_DIR", f"/scratch/project_{EVAL_PROJECT}/runs"
+)
+
 #: Container-internal view of projappl (singularity bind mount).
 REPO_PFS: str = f"/pfs/lustrep1/projappl/project_{LUMI_PROJECT}/CESM2_emulator_from_lumi"
 
@@ -51,6 +57,7 @@ for _k, _v in (
     ("LUMI_PKGS", PKGS),
     ("LUMI_DATA", DATA),
     ("LUMI_EVAL_OUT", EVAL_OUT),
+    ("LUMI_RUNS_DIR", RUNS_DIR),
 ):
     os.environ.setdefault(_k, _v)
 del _k, _v
@@ -63,13 +70,13 @@ def expand(path: str) -> str:
     written under a previous project still resolves against the current one
     instead of silently pointing at a directory this account cannot read.
 
-    EXCEPTION: paths under ``EVAL_OUT`` are returned untouched. Eval output lives
+    EXCEPTION: paths under ``EVAL_OUT`` and ``RUNS_DIR`` are returned untouched. Eval output lives
     on LUMI_EVAL_PROJECT by design, and the blanket rewrite below would drag it
     back onto LUMI_PROJECT — the one place the "one project id" rule must not
     apply.
     """
     out = os.path.expandvars(path)
-    if out.startswith(EVAL_OUT):
+    if out.startswith(EVAL_OUT) or out.startswith(RUNS_DIR):
         return out
     for prefix in ("/scratch/project_", "/projappl/project_"):
         old = out.find(prefix)
