@@ -403,7 +403,43 @@ _MINMAX_OVERRIDE = None
 # Keeping CO2 on v1 therefore leaves the channel exactly as the precip-bc
 # branch (and every shipped checkpoint) had it, and confines the new transform
 # to the two channels it helps.
-_TRANSFORM_MODES = ("v1", "asinh")
+_TRANSFORM_MODES = ("v1", "asinh", "minmax")
+
+# "minmax" — v1's LINEAR map with no clip: lo = the minimum and hi = the maximum
+# of the SMOOTHED field over the training cond files, so nothing reaches past
+# +1 and nothing saturates. v1 anchors hi at a percentile and clips, which pins
+# whole countries; asinh compresses the tail but amplifies near-zero cells.
+#
+# The anchors come from the SMOOTHED field because smoothing is linear and so
+# commutes with this map: normalising then smoothing yields exactly the field
+# that smoothing then normalising would, PROVIDED hi is taken after smoothing.
+# Taken from the raw field instead, a single unsmoothed hotspot sets the
+# ceiling and the smoothed field never gets near +1 (SUL raw max is ~60x the
+# smoothed one). That is why the pipeline order can stay normalise -> smooth
+# -> PCA for training and eval alike.
+#
+# The cost is the reverse of v1's problem: with the ceiling at the single
+# hottest cell, the bulk of emitting cells sits close to -1.
+_MINMAX_SMOOTH_SIGMA = {"CO2": 0.0, "SUL": 2.0, "SO2": 2.0, "sul": 2.0, "BC": 2.0}
+
+
+def set_minmax_smooth_sigma(sigmas: dict) -> None:
+    """Channel -> gaussian sigma used to take the minmax anchors.
+
+    Must match cond_smooth_sigma, or the anchors describe a different field
+    from the one the model is fed.
+    """
+    _MINMAX_SMOOTH_SIGMA.update({k: float(v) for k, v in sigmas.items()})
+    _get_emissions_minmax.cache_clear()
+
+
+def _smooth_for_fit(arr: np.ndarray, sigma: float) -> np.ndarray:
+    """Same filter and boundaries as smooth_cond_spatial: lon wraps, lat reflects."""
+    if sigma <= 0:
+        return arr
+    from scipy.ndimage import gaussian_filter1d
+    out = gaussian_filter1d(arr, sigma=sigma, axis=-1, mode="wrap")
+    return gaussian_filter1d(out, sigma=sigma, axis=-2, mode="reflect")
 
 # Named specs. Hydra's override grammar rejects a value containing "=" and ","
 # unless it is quoted all the way through the shell, the sbatch --export list
@@ -517,11 +553,22 @@ def _get_emissions_minmax():
         for var in ["CO2", "SO2", "SUL", "sul", "BC"]:
             if var not in ds_emis.data_vars:
                 continue
-            all_vals.setdefault(var, []).append(ds_emis[var].values.flatten())
+            vals = ds_emis[var].values
+            if transform_for(var) == "minmax":
+                vals = _smooth_for_fit(np.asarray(vals, dtype=np.float64),
+                                       _MINMAX_SMOOTH_SIGMA.get(var, 0.0))
+            all_vals.setdefault(var, []).append(np.asarray(vals).flatten())
         ds_emis.close()
     combined = {}
     for var, arrays in all_vals.items():
         flat = np.concatenate(arrays)
+        if transform_for(var) == "minmax":
+            finite = flat[np.isfinite(flat)]
+            combined[var] = (float(finite.min()), float(finite.max()))
+            print(f"[COND] minmax anchors for {var} (smoothed, sigma="
+                  f"{_MINMAX_SMOOTH_SIGMA.get(var, 0.0)}): "
+                  f"lo={combined[var][0]:.4e} hi={combined[var][1]:.4e}")
+            continue
         if transform_for(var) == "asinh":
             # (s, top). Both from the POSITIVE cells: the field is majority
             # zero (ocean), so an all-cell percentile lands far below the
@@ -560,6 +607,16 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
     """
     if ds.name in ["CO2", "SUL", "BC"]:
         minmax = _get_emissions_minmax()
+
+        if transform_for(ds.name) == "minmax":
+            # Linear, lo -> -1, hi -> +1, and deliberately NOT clipped: the
+            # anchors already span the training data, so a value past +1 is
+            # an out-of-distribution scenario exceeding the training maximum,
+            # and clipping it would hide exactly that.
+            lo_, hi_ = minmax[ds.name]
+            if hi_ <= lo_:
+                return xr.zeros_like(ds).fillna(-1)
+            return (2.0 * (ds - lo_) / (hi_ - lo_) - 1.0).fillna(-1)
 
         if transform_for(ds.name) == "asinh":
             # asinh(v/s) / asinh(top/s), mapped to [-1, 1]. Linear while

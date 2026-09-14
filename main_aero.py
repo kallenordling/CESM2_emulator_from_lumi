@@ -85,6 +85,13 @@ def main(cfg: DictConfig) -> None:
     )
     if cond_transform != "v1":
         from data import climate_dataset as _cdt
+        # The minmax anchors are taken on the SMOOTHED field, so the fit needs
+        # the same per-channel sigma the dataset will apply.
+        _sig = data_cfg.get("cond_smooth_sigma", None)
+        _vars = data_cfg.get("cond_vars", None)
+        if _sig is not None and _vars is not None:
+            _cdt.set_minmax_smooth_sigma(
+                {str(v): float(s_) for v, s_ in zip(list(_vars), list(_sig))})
         _cdt.set_cond_transform(cond_transform)
         if accelerator.is_main_process:
             logger.info(f"[COND] transform = {cond_transform} "
