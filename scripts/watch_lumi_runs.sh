@@ -31,7 +31,7 @@ while true; do
     # The checkpoint line carries the run name in its path, so keep it out of
     # the queue snapshot or every checkpoint fires a spurious STATE event.
     state=$(grep -E "asinh|minmax|filmattn|eval" <<<"$snap" | grep -vE "\||^CKPT" \
-            | tr -s ' ' | sed 's/^ *//')
+            | tr -s ' ' | sed 's/^ *//' | sort)   # squeue order varies poll to poll
     hist=$(grep "|" <<<"$snap")
     ckpt=$(sed -n 's/^CKPT //p' <<<"$snap")
 
