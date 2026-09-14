@@ -797,7 +797,11 @@ class UNetTrainer:
                 "checkpoint": checkpoint_path,
                 "output_dir": output_dir,
                 "sbatch_script": os.path.join(project_root, getattr(self, "eval_script", "run_eval_aero.sh")),
-                "log_dir": os.path.join(project_root, "logs"),
+                # Scratch, not project_root/logs: /projappl is at quota and a
+                # truncated write there makes a completed eval report failure.
+                "log_dir": os.environ.get(
+                    "LUMI_LOG_DIR",
+                    os.path.join(os.path.dirname(L.RUNS_DIR), "logs")),
                 # Only set for runs whose model.{in,out,cond}_channels differ
                 # from the production default — see eval_model_config comment
                 # in configs/config_aero.yaml. null/absent = watcher uses

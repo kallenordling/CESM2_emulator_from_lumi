@@ -12,7 +12,12 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=128G
 #SBATCH --time=04:00:00
-#SBATCH --output=logs/%x_%j.out
+# SLURM cannot expand variables in a directive, so this path is literal.
+# It used to be logs/, relative to the submit directory on /projappl,
+# which is at quota: a failed log write trips set -e and kills the job.
+# That is what ended link 4 of the asinh99 chain 1:50 in, having queued
+# no successor. Scratch has terabytes free.
+#SBATCH --output=/scratch/project_462001112/logs/%x_%j.out
 
 # Single source of truth for the LUMI project id and its paths.
 source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
