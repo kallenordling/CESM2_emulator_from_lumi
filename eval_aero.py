@@ -383,8 +383,11 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
     # first, then inject the numbers.
     ct = ckpt.get("COND_TRANSFORM") or "v1"
     set_cond_transform(ct)
-    if ct != "v1":
-        print(f"[COND-TRANSFORM] checkpoint trained with '{ct}'")
+    # Printed unconditionally. It used to print only for non-v1, so an eval
+    # running a checkout that ignored the transform looked exactly like a v1
+    # eval, and the absence of the line was the only clue.
+    print(f"[COND-TRANSFORM] checkpoint trained with '{ct}' "
+          f"(eval code: {os.path.abspath(__file__)})")
     cond_norm = ckpt.get("COND_NORM")
     if cond_norm:
         set_minmax_override(cond_norm)

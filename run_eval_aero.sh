@@ -52,12 +52,30 @@ export HIP_CACHE_PATH=/tmp/hip_${SLURM_JOB_ID}
 export MIOPEN_FIND_ENFORCE=2
 mkdir -p /tmp/miopen_${SLURM_JOB_ID} /tmp/hip_${SLURM_JOB_ID}
 
-# Use container-internal path if available
-if [ -d "${LUMI_REPO_PFS}" ]; then
+# WHICH CODE evaluates the checkpoint. It must be the checkout that TRAINED it:
+# eval re-applies the conditioning transform the checkpoint persisted, and a
+# checkout that predates that transform silently normalises with the wrong map.
+#
+# This used to take LUMI_REPO_PFS, which follows LUMI_PROJECT. An arm charged to
+# one project but trained from another's checkout (asinh99: code on 462001328,
+# LUMI_PROJECT=462001112) was therefore evaluated by 462001112's film-attention
+# checkout, which has no asinh support. SUL and BC were pushed through the
+# affine v1 map using asinh's (scale, top) numbers as (lo, hi), which flattens
+# nearly every emitting cell to -1: every asinh99 eval showed no aerosol
+# response and a +0.8 K hist->ssp370 step that the MODEL never produced.
+#
+# Order: an explicit override, then the directory this job was submitted from
+# (the watcher submits from the training checkout), then the old default.
+if [ -n "${EVAL_CODE_DIR:-}" ]; then
+    WORK_DIR=${EVAL_CODE_DIR}
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "${SLURM_SUBMIT_DIR}/eval_aero.py" ]; then
+    WORK_DIR=${SLURM_SUBMIT_DIR}
+elif [ -d "${LUMI_REPO_PFS}" ]; then
     WORK_DIR=${LUMI_REPO_PFS}
 else
     WORK_DIR=${LUMI_REPO}
 fi
+echo "[EVAL-CODE] running eval_aero.py from ${WORK_DIR}"
 
 # When submitted by the trainer, CHECKPOINT and OUTPUT_DIR are set via --export.
 # Fall back to defaults for manual submission.
