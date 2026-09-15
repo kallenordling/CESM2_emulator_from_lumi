@@ -68,6 +68,43 @@ def raw_move(species):
                 - np.asarray(h[species].sel(year=1850).values, float))
 
 
+def smooth_pca_move(species, n_comp=5, sigma=2.0, year=2040, base_year=1850):
+    """The emission change after the pipeline's smoothing AND PCA truncation, in Gt.
+
+    Same basis construction as cond_basis.joint_basis -- hist <= 2014 joined to
+    ssp370 >= 2015, n_comp EOFs per aerosol species -- but fitted on the SMOOTHED
+    PHYSICAL fields rather than on normalised ones. That shows what the rank-5
+    truncation does to the emission change independently of any transform, so
+    the loss can be told apart from the saturation.
+
+    Returns (reconstructed change, change removed by the truncation).
+    """
+    from scipy.ndimage import gaussian_filter1d
+    from sklearn.decomposition import PCA
+
+    def sm(a):
+        a = gaussian_filter1d(a, sigma, axis=-1, mode="wrap")
+        return gaussian_filter1d(a, sigma, axis=-2, mode="reflect")
+
+    with xr.open_dataset(f"{COND_DIR}/emissions_hist_only_timefixed_bc_co2fix.nc") as h, \
+         xr.open_dataset(f"{COND_DIR}/emissions_ssp370_only_timefixed_bc_co2fix.nc") as s:
+        hy, sy = h["year"].values, s["year"].values
+        hf = sm(np.asarray(h[species].values, float))
+        sf = sm(np.asarray(s[species].values, float))
+    record = np.concatenate([hf[hy <= 2014], sf[sy >= 2015]])
+    years = np.concatenate([hy[hy <= 2014], sy[sy >= 2015]])
+    T, H, W = record.shape
+    pca = PCA(n_components=n_comp).fit(record.reshape(T, H * W))
+    recon = pca.inverse_transform(pca.transform(record.reshape(T, H * W))).reshape(T, H, W)
+    i1, i0 = int(np.where(years == year)[0][0]), int(np.where(years == base_year)[0][0])
+    full = record[i1] - record[i0]
+    kept = recon[i1] - recon[i0]
+    print(f"[pca] {species}: {n_comp} EOFs keep {100 * pca.explained_variance_ratio_.sum():.2f}% "
+          f"of variance; the 1850->2040 change keeps "
+          f"{100 * (1 - np.sum((full - kept) ** 2) / np.sum(full ** 2)):.1f}% of its energy")
+    return kept, full - kept
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--v1", required=True)
@@ -144,8 +181,8 @@ def main():
                   (smooth2(raw[species[0]]), f"emission change {species[0]}, smoothed (sigma 2)"),
                   (smooth2(raw[species[1]]), f"emission change {species[1]}, smoothed (sigma 2)")]
 
-    fig = plt.figure(figsize=(14.5, 9.8), constrained_layout=True)
-    axes = make_axes(fig, 3, 4)
+    fig = plt.figure(figsize=(14.5, 13.0), constrained_layout=True)
+    axes = make_axes(fig, 4, 4)
     k = 0
     for j, (field, title) in enumerate(raw_panels):
         ax = axes[0][j]
@@ -174,12 +211,51 @@ def main():
         cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
         cb.set_label(f"{unit} per gridpoint (log)", fontsize=7)
 
+    # Row 1: the same change after smoothing AND the rank-5 PCA, still physical.
+    pca_stage = {sp: smooth_pca_move(sp) for sp in species}
+    for j, sp in enumerate(species):
+        kept, lost = pca_stage[sp]
+        unit = "Gt SO2/yr" if sp == "SUL" else "Gt BC/yr"
+        for col, (field, title, kind) in enumerate((
+                (kept, f"{sp} change, smoothed + 5-EOF PCA", "log"),
+                (lost, f"{sp} change REMOVED by the PCA", "div"))):
+            ax = axes[1][2 * j + col]
+            if kind == "log":
+                pos = field[field > 0]
+                norm = LogNorm(vmin=float(np.percentile(pos, 50)),
+                               vmax=float(np.percentile(pos, 99.9)))
+                cmap_pca = plt.get_cmap("magma").copy()
+                cmap_pca.set_bad("0.62")
+                im = draw_map(ax, to_pm180(np.where(field > 0, field, np.nan), lon)[0],
+                              cmap=cmap_pca, norm=norm, outline="0.85")
+                ax.text(0.5, -0.02, "grey: reconstruction <= 0", transform=ax.transAxes,
+                        ha="center", va="top", fontsize=7, color="0.3")
+                label = f"{unit} per gridpoint (log)"
+            else:
+                v = float(np.nanpercentile(np.abs(field), 99.5))
+                im = draw_map(ax, to_pm180(field, lon)[0], cmap="RdBu_r", vmin=-v, vmax=v)
+                label = f"{unit} per gridpoint"
+            if HAVE_CARTOPY:
+                import cartopy.crs as ccrs
+                lat0, lat1, lon0, lon1 = ARABIA
+                ax.plot([lon0, lon1, lon1, lon0, lon0], [lat0, lat0, lat1, lat1, lat0],
+                        color="lime", lw=1.2, transform=ccrs.PlateCarree())
+            ax.set_title(title, fontsize=9)
+            if j == 0 and col == 0:
+                ax.text(-0.04, 0.5, "cond files after\nsmoothing + PCA", transform=ax.transAxes,
+                        rotation=90, va="center", ha="right", fontsize=10)
+            panel_label(ax, k); k += 1
+            cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
+            cb.set_label(label, fontsize=7)
+
     for i0, (name, z) in enumerate(runs.items()):
-        i = i0 + 1
+        i = i0 + 2
         d = z["delta"]
         dens = z["source_mean_Global"] * d * K_PER_UNIT
-        panels = [(d[0], f"delta {species[0]}", "magma", (0, np.nanpercentile(np.abs(d[0]), 99))),
-                  (d[1], f"delta {species[1]}", "magma", (0, np.nanpercentile(np.abs(d[1]), 99))),
+        panels = [(d[0], f"{species[0]} move: normalised + smoothed + PCA", "magma",
+                   (0, np.nanpercentile(np.abs(d[0]), 99))),
+                  (d[1], f"{species[1]} move: normalised + smoothed + PCA", "magma",
+                   (0, np.nanpercentile(np.abs(d[1]), 99))),
                   (dens[0], f"Global N density {species[0]} (K)", "RdBu_r", None),
                   (dens[1], f"Global N density {species[1]} (K)", "RdBu_r", None)]
         for j, (field, title, cmap, lim) in enumerate(panels):
