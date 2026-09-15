@@ -124,10 +124,58 @@ def main():
         print(f"   {'M.East |share|':14s}{me}")
 
     # ---- 3. the figure -----------------------------------------------------
-    fig = plt.figure(figsize=(14.5, 6.6), constrained_layout=True)
-    axes = make_axes(fig, 2, 4)
+    # Row 0 is the PHYSICAL change the conditioning is supposed to represent:
+    # emissions straight from the cond files, 2040 minus 1850, in the files' own
+    # units. Left pair unsmoothed, right pair after the same sigma=2 gaussian the
+    # pipeline applies -- the smoothed field is what normalisation actually sees.
+    # Log colour scale, because the change spans five decades and a linear scale
+    # would show three bright pixels. Comparing this row with the delta panels
+    # below is the saturation test by eye: a faithful map keeps Arabia dimmer
+    # than East Asia, as it is here.
+    from matplotlib.colors import LogNorm
+    from scipy.ndimage import gaussian_filter1d
+
+    def smooth2(a):
+        a = gaussian_filter1d(a, 2.0, axis=-1, mode="wrap")
+        return gaussian_filter1d(a, 2.0, axis=-2, mode="reflect")
+
+    raw_panels = [(raw[species[0]], f"emission change {species[0]}, raw"),
+                  (raw[species[1]], f"emission change {species[1]}, raw"),
+                  (smooth2(raw[species[0]]), f"emission change {species[0]}, smoothed (sigma 2)"),
+                  (smooth2(raw[species[1]]), f"emission change {species[1]}, smoothed (sigma 2)")]
+
+    fig = plt.figure(figsize=(14.5, 9.8), constrained_layout=True)
+    axes = make_axes(fig, 3, 4)
     k = 0
-    for i, (name, z) in enumerate(runs.items()):
+    for j, (field, title) in enumerate(raw_panels):
+        ax = axes[0][j]
+        pos = field[field > 0]
+        # anchored per panel: from the median emitting cell to the 99.9th percentile
+        norm = LogNorm(vmin=float(np.percentile(pos, 50)), vmax=float(np.percentile(pos, 99.9)))
+        shown = np.where(field > 0, field, np.nan)
+        # A log scale cannot show a decline, so those cells are masked. Paint
+        # them a labelled grey: left white they read as missing data.
+        cmap_raw = plt.get_cmap("magma").copy()
+        cmap_raw.set_bad("0.62")
+        im = draw_map(ax, to_pm180(shown, lon)[0], cmap=cmap_raw, norm=norm, outline="0.85")
+        ax.text(0.5, -0.02, "grey: emissions fell or unchanged", transform=ax.transAxes,
+                ha="center", va="top", fontsize=7, color="0.3")
+        if HAVE_CARTOPY:
+            import cartopy.crs as ccrs
+            lat0, lat1, lon0, lon1 = ARABIA
+            ax.plot([lon0, lon1, lon1, lon0, lon0], [lat0, lat0, lat1, lat1, lat0],
+                    color="lime", lw=1.2, transform=ccrs.PlateCarree())
+        ax.set_title(title, fontsize=9)
+        if j == 0:
+            ax.text(-0.04, 0.5, "cond files\n2040 - 1850", transform=ax.transAxes, rotation=90,
+                    va="center", ha="right", fontsize=10)
+        panel_label(ax, k); k += 1
+        unit = "Gt SO2/yr" if species[j % 2] == "SUL" else "Gt BC/yr"
+        cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
+        cb.set_label(f"{unit} per gridpoint (log)", fontsize=7)
+
+    for i0, (name, z) in enumerate(runs.items()):
+        i = i0 + 1
         d = z["delta"]
         dens = z["source_mean_Global"] * d * K_PER_UNIT
         panels = [(d[0], f"delta {species[0]}", "magma", (0, np.nanpercentile(np.abs(d[0]), 99))),
@@ -146,15 +194,14 @@ def main():
                 lat0, lat1, lon0, lon1 = ARABIA
                 ax.plot([lon0, lon1, lon1, lon0, lon0], [lat0, lat0, lat1, lat1, lat0],
                         color="lime", lw=1.2, transform=ccrs.PlateCarree())
-            if i == 0:
-                ax.set_title(title, fontsize=9)
+            ax.set_title(title, fontsize=9)
             if j == 0:
                 ax.text(-0.04, 0.5, name, transform=ax.transAxes, rotation=90,
                         va="center", ha="right", fontsize=10)
             panel_label(ax, k); k += 1
             fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
-    fig.suptitle("Saturation test: aerosol conditioning move 1850->2040 and the Global nonlinear-term "
-                 "density, v1 vs asinh (Arabian Peninsula boxed)", fontsize=11)
+    fig.suptitle("Saturation test: the emission change in the cond files, the conditioning move the model "
+                 "receives, and the Global nonlinear-term density (Arabian Peninsula boxed)", fontsize=11)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     for ext in (".png", ".pdf"):
         fig.savefig(args.out + ext, dpi=160, bbox_inches="tight")
