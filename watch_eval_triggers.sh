@@ -66,6 +66,23 @@ while true; do
         # glob returns the pattern itself if no match
         [[ -f "$trigger" ]] || continue
 
+        # Only this watcher's runs. Every arm launched from one checkout shares
+        # this trigger directory, and a watcher per arm used to take EVERY
+        # trigger, so two watchers polling the same second both submitted it:
+        # asinh99's and minmax's watchers each queued eval_ep0140 (jobs
+        # 22060051/22060052), two jobs writing one output directory at once.
+        mine=""
+        for name in ${PROD_RUN//,/ }; do
+            grep -q "$name" "$trigger" && { mine=1; break; }
+        done
+        [[ -n "$mine" ]] || continue
+
+        # Claim the trigger atomically before submitting, so even two watchers
+        # for the SAME run cannot both act on it: mv succeeds for exactly one.
+        claimed="${trigger}.claimed.$$"
+        mv "$trigger" "$claimed" 2>/dev/null || continue
+        trigger="$claimed"
+
         echo "[watcher] Found trigger: $trigger"
 
         # Parse fields with python (available on login node via module or system)
