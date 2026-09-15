@@ -22,7 +22,7 @@ while true; do
         # those as finished made an earlier version cry wolf on every start.
         sacct -X -S $(date -d "12 hours ago" +%Y-%m-%dT%H:%M) \
               -o JobID,JobName%22,State,ExitCode,Elapsed -n -P 2>/dev/null \
-          | grep -E "asinh|minmax|filmattn|mseyb|eval" \
+          | grep -E "asinh|minmax|v1noclip|filmattn|mseyb|eval" \
           | grep -E "COMPLETED|FAILED|TIMEOUT|CANCELLED|OUT_OF_MEMORY|NODE_FAIL|PREEMPTED" \
           | tail -8
         echo "CKPT $(ls -t '"$RUNS_DIR"'/*.pt 2>/dev/null | head -1)"
@@ -30,7 +30,7 @@ while true; do
 
     # The checkpoint line carries the run name in its path, so keep it out of
     # the queue snapshot or every checkpoint fires a spurious STATE event.
-    state=$(grep -E "asinh|minmax|filmattn|eval" <<<"$snap" | grep -vE "\||^CKPT" \
+    state=$(grep -E "asinh|minmax|v1noclip|filmattn|eval" <<<"$snap" | grep -vE "\||^CKPT" \
             | tr -s ' ' | sed 's/^ *//' | sort)   # squeue order varies poll to poll
     hist=$(grep "|" <<<"$snap")
     ckpt=$(sed -n 's/^CKPT //p' <<<"$snap")
