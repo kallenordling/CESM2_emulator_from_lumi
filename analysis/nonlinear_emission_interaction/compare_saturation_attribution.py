@@ -109,11 +109,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--v1", required=True)
     ap.add_argument("--asinh", required=True)
+    ap.add_argument("--minmax", default=None,
+                    help="optional third arm: linear to the smoothed maximum, no clip")
     ap.add_argument("--out", default=os.path.join(HERE, "figures", "figure_40_saturation_attribution"))
     args = ap.parse_args()
 
-    runs = {"v1 (paper ep863)": np.load(args.v1, allow_pickle=True),
-            "asinh_aero (asinh99)": np.load(args.asinh, allow_pickle=True)}
+    def epoch_of(z):
+        ck = str(z["checkpoint"]) if "checkpoint" in z.files else ""
+        tail = os.path.splitext(os.path.basename(ck))[0].rsplit("_", 1)[-1]
+        return f"ep{tail}" if tail.isdigit() else "ep?"
+
+    runs = {}
+    for label, path in (("v1 (paper)", args.v1), ("asinh_aero (asinh99)", args.asinh),
+                        ("minmax, no clip", args.minmax)):
+        if path:
+            z = np.load(path, allow_pickle=True)
+            runs[f"{label} {epoch_of(z)}"] = z
     first = next(iter(runs.values()))
     lat, lon = first["lat"], first["lon"]
     species = [str(s) for s in first["aerosol_names"]]
@@ -181,8 +192,9 @@ def main():
                   (smooth2(raw[species[0]]), f"emission change {species[0]}, smoothed (sigma 2)"),
                   (smooth2(raw[species[1]]), f"emission change {species[1]}, smoothed (sigma 2)")]
 
-    fig = plt.figure(figsize=(14.5, 13.0), constrained_layout=True)
-    axes = make_axes(fig, 4, 4)
+    nrows = 2 + len(runs)
+    fig = plt.figure(figsize=(14.5, 3.25 * nrows), constrained_layout=True)
+    axes = make_axes(fig, nrows, 4)
     k = 0
     for j, (field, title) in enumerate(raw_panels):
         ax = axes[0][j]
@@ -275,9 +287,16 @@ def main():
                 ax.text(-0.04, 0.5, name, transform=ax.transAxes, rotation=90,
                         va="center", ha="right", fontsize=10)
             panel_label(ax, k); k += 1
-            fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
+            cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
+            # Three ticks with scientific notation: small ranges like +-0.0025
+            # otherwise print labels that run into each other.
+            from matplotlib.ticker import MaxNLocator
+            cb.locator = MaxNLocator(nbins=3, symmetric=cmap == "RdBu_r")
+            cb.formatter.set_powerlimits((-2, 2))
+            cb.update_ticks()
     fig.suptitle("Saturation test: the emission change in the cond files, the conditioning move the model "
-                 "receives, and the Global nonlinear-term density (Arabian Peninsula boxed)", fontsize=11)
+                 "receives under each transform, and the Global nonlinear-term density "
+                 "(Arabian Peninsula boxed; every panel has its own colour scale)", fontsize=11)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     for ext in (".png", ".pdf"):
         fig.savefig(args.out + ext, dpi=160, bbox_inches="tight")
