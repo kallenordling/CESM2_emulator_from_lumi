@@ -40,7 +40,8 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts"))
-from make_ensemble_mean_maps import make_axes, draw_map, panel_label, to_pm180, HAVE_CARTOPY  # noqa: E402
+from make_ensemble_mean_maps import make_axes, draw_map, panel_label, to_pm180, HAVE_CARTOPY, PANEL_LETTERS  # noqa: E402
+sys.path.insert(0, HERE)
 
 K_PER_UNIT = 21.0      # DENORM_FN TREFHT = x*21.0 + 4.5
 COND_DIR = os.path.expanduser("~/mnt/lumi_sc/emulator_data")
@@ -194,7 +195,19 @@ def main():
 
     nrows = 2 + len(runs)
     fig = plt.figure(figsize=(14.5, 3.25 * nrows), constrained_layout=True)
-    axes = make_axes(fig, nrows, 4)
+    # Maps everywhere except columns 3-4 of each transform row, which hold time
+    # series and so must be ordinary axes, not projected ones.
+    gs = fig.add_gridspec(nrows, 4)
+    axes = np.empty((nrows, 4), dtype=object)
+    for r_ in range(nrows):
+        for c_ in range(4):
+            if r_ >= 2 and c_ >= 2:
+                axes[r_, c_] = fig.add_subplot(gs[r_, c_])
+            elif HAVE_CARTOPY:
+                import cartopy.crs as ccrs
+                axes[r_, c_] = fig.add_subplot(gs[r_, c_], projection=ccrs.Robinson())
+            else:
+                axes[r_, c_] = fig.add_subplot(gs[r_, c_])
     k = 0
     for j, (field, title) in enumerate(raw_panels):
         ax = axes[0][j]
@@ -246,7 +259,7 @@ def main():
             else:
                 v = float(np.nanpercentile(np.abs(field), 99.5))
                 im = draw_map(ax, to_pm180(field, lon)[0], cmap="RdBu_r", vmin=-v, vmax=v)
-                label = f"{unit} per gridpoint"
+                label = f"{unit} per gridpoint (x1e{int(np.floor(np.log10(v)))})"
             if HAVE_CARTOPY:
                 import cartopy.crs as ccrs
                 lat0, lat1, lon0, lon1 = ARABIA
@@ -258,45 +271,89 @@ def main():
                         rotation=90, va="center", ha="right", fontsize=10)
             panel_label(ax, k); k += 1
             cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
+            if kind != "log":
+                # Scale into the label: an offset exponent drawn at the bar's
+                # end collides with the label text on these narrow panels.
+                ex = 10.0 ** int(np.floor(np.log10(v)))
+                from matplotlib.ticker import FuncFormatter, MaxNLocator
+                cb.locator = MaxNLocator(nbins=3, symmetric=True)
+                cb.formatter = FuncFormatter(lambda x, _p, ex=ex: f"{x / ex:.0f}")
+                cb.update_ticks()
             cb.set_label(label, fontsize=7)
+
+    # Global-mean NORMALISED conditioning, 1850-2100, through the same stages as
+    # the maps (normalise -> smooth -> joint PCA), so the two halves of a row
+    # show one object. The anchors come from asian_saturation_by_transform,
+    # which fits them exactly as training does. Grey, on its own axis: the
+    # global total emission from the same files, for shape.
+    from asian_saturation_by_transform import anchors as fit_anchors, \
+        transforms as build_maps, smooth as sm2, path as cond_path_of
+    from sklearn.decomposition import PCA as _PCA
+    KEY = {"v1": "v1 (clip)", "asinh_aero": "asinh (p99.9)", "minmax": "minmax (no clip)"}
+    with xr.open_dataset(cond_path_of("hist")) as h_, xr.open_dataset(cond_path_of("ssp370")) as s_:
+        hy_, sy_ = h_["year"].values, s_["year"].values
+        record = {sp: np.concatenate([np.asarray(h_[sp].values, float)[hy_ <= 2014],
+                                      np.asarray(s_[sp].values, float)[sy_ >= 2015]])
+                  for sp in species}
+    yrs = np.concatenate([hy_[hy_ <= 2014], sy_[sy_ >= 2015]])
+    wts = np.cos(np.deg2rad(lat))[:, None] * np.ones((1, len(lon)))
+    fits = {sp: build_maps(fit_anchors(sp)) for sp in species}
+
+    def global_series(sp, key):
+        zz = sm2(fits[sp][key](record[sp]))
+        T, H, W = zz.shape
+        pca = _PCA(n_components=5).fit(zz.reshape(T, -1))
+        zp = pca.inverse_transform(pca.transform(zz.reshape(T, -1))).reshape(T, H, W)
+        return np.array([np.average(zp[t], weights=wts) for t in range(T)])
+
+    emis_global = {sp: np.array([np.average(record[sp][t], weights=wts) for t in range(len(yrs))])
+                   for sp in species}
 
     for i0, (name, z) in enumerate(runs.items()):
         i = i0 + 2
         d = z["delta"]
-        dens = z["source_mean_Global"] * d * K_PER_UNIT
-        panels = [(d[0], f"{species[0]} move: normalised + smoothed + PCA", "magma",
-                   (0, np.nanpercentile(np.abs(d[0]), 99))),
-                  (d[1], f"{species[1]} move: normalised + smoothed + PCA", "magma",
-                   (0, np.nanpercentile(np.abs(d[1]), 99))),
-                  (dens[0], f"Global N density {species[0]} (K)", "RdBu_r", None),
-                  (dens[1], f"Global N density {species[1]} (K)", "RdBu_r", None)]
-        for j, (field, title, cmap, lim) in enumerate(panels):
+        key = KEY.get(str(z["cond_transform"]) if "cond_transform" in z.files else "v1", "v1 (clip)")
+        for j in range(2):
             ax = axes[i][j]
-            if lim is None:
-                v = np.nanpercentile(np.abs(field), 99.5)
-                lim = (-v, v)
-            im = draw_map(ax, to_pm180(field, lon)[0], cmap=cmap, vmin=lim[0], vmax=lim[1],
-                          outline="0.85" if cmap == "magma" else "0.15")
+            im = draw_map(ax, to_pm180(d[j], lon)[0], cmap="magma",
+                          vmin=0, vmax=float(np.nanpercentile(np.abs(d[j]), 99)), outline="0.85")
             if HAVE_CARTOPY:
                 import cartopy.crs as ccrs
                 lat0, lat1, lon0, lon1 = ARABIA
                 ax.plot([lon0, lon1, lon1, lon0, lon0], [lat0, lat0, lat1, lat1, lat0],
                         color="lime", lw=1.2, transform=ccrs.PlateCarree())
-            ax.set_title(title, fontsize=9)
+            ax.set_title(f"{species[j]} move 1850->2040", fontsize=9)
             if j == 0:
-                ax.text(-0.04, 0.5, name, transform=ax.transAxes, rotation=90,
-                        va="center", ha="right", fontsize=10)
+                ax.text(-0.04, 0.5, f"{name}\nnormalised + smoothed + PCA", transform=ax.transAxes,
+                        rotation=90, va="center", ha="right", fontsize=9)
             panel_label(ax, k); k += 1
             cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
-            # Three ticks with scientific notation: small ranges like +-0.0025
-            # otherwise print labels that run into each other.
             from matplotlib.ticker import MaxNLocator
-            cb.locator = MaxNLocator(nbins=3, symmetric=cmap == "RdBu_r")
-            cb.formatter.set_powerlimits((-2, 2))
+            cb.locator = MaxNLocator(nbins=3)
             cb.update_ticks()
-    fig.suptitle("Saturation test: the emission change in the cond files, the conditioning move the model "
-                 "receives under each transform, and the Global nonlinear-term density "
-                 "(Arabian Peninsula boxed; every panel has its own colour scale)", fontsize=11)
+        for j, sp in enumerate(species):
+            ax = axes[i][2 + j]
+            ax.set_box_aspect(0.55)          # about a Robinson map's height/width
+            ser = global_series(sp, key)
+            ax.plot(yrs, ser, color="#0072B2", lw=1.8, label="normalised, global mean")
+            ax.set_ylabel("normalised value", fontsize=8, color="#0072B2")
+            ax.tick_params(axis="y", labelcolor="#0072B2", labelsize=7)
+            ax.tick_params(axis="x", labelsize=7)
+            ax.axvline(2014.5, color="0.8", lw=0.8)
+            tw = ax.twinx()
+            tw.plot(yrs, emis_global[sp], color="0.55", lw=1.1, ls="--", label="emissions, global mean")
+            tw.set_ylabel(f"{'Gt SO2' if sp == 'SUL' else 'Gt BC'}/yr per gridpoint", fontsize=7, color="0.45")
+            tw.tick_params(axis="y", labelcolor="0.45", labelsize=6)
+            tw.ticklabel_format(axis="y", style="sci", scilimits=(-2, 2))
+            ax.set_title(f"{sp}: global mean over time", fontsize=9)
+            ax.text(0.02, 0.95, f"({PANEL_LETTERS[k]})", transform=ax.transAxes,
+                    fontweight="bold", va="top", fontsize=9); k += 1
+            if i == 2 and j == 0:
+                h1, l1 = ax.get_legend_handles_labels(); h2, l2 = tw.get_legend_handles_labels()
+                ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="lower right")
+    fig.suptitle("Saturation test: the emission change in the cond files, and the conditioning each "
+                 "normalisation delivers -- its 1850->2040 move and its global mean over time "
+                 "(Arabian Peninsula boxed; each panel has its own scale)", fontsize=11)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     for ext in (".png", ".pdf"):
         fig.savefig(args.out + ext, dpi=160, bbox_inches="tight")
