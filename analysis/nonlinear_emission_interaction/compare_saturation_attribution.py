@@ -369,8 +369,15 @@ def main():
         key = KEY.get(str(z["cond_transform"]) if "cond_transform" in z.files else "v1", "v1 (clip)")
         for j in range(2):
             ax = axes[i][j]
-            im = draw_map(ax, to_pm180(d[j], lon)[0], cmap="magma",
-                          vmin=0, vmax=float(np.nanpercentile(np.abs(d[j]), 99)), outline="0.85")
+            # Diverging around zero. A floor at 0 painted every DECREASE the same
+            # black as no change; 0.2-0.6% of cells do fall 1850->2040 (old
+            # industrial Europe), by up to -0.47. Two slopes, because rises
+            # reach +2 while the deepest fall is under -0.5.
+            from matplotlib.colors import TwoSlopeNorm
+            vpos = float(np.nanpercentile(d[j][d[j] > 0], 99)) if (d[j] > 0).any() else 1.0
+            vneg = float(min(np.nanmin(d[j]), -0.05 * vpos))
+            im = draw_map(ax, to_pm180(d[j], lon)[0], cmap="RdBu_r",
+                          norm=TwoSlopeNorm(vmin=vneg, vcenter=0.0, vmax=vpos), outline="0.15")
             if HAVE_CARTOPY:
                 import cartopy.crs as ccrs
                 lat0, lat1, lon0, lon1 = ARABIA
@@ -382,9 +389,10 @@ def main():
                         rotation=90, va="center", ha="right", fontsize=9)
             panel_label(ax, k); k += 1
             cb = fig.colorbar(im, ax=ax, shrink=0.6, orientation="horizontal", pad=0.02)
-            from matplotlib.ticker import MaxNLocator
-            cb.locator = MaxNLocator(nbins=3)
-            cb.update_ticks()
+            # Label the deepest fall, zero and the top: with two slopes an
+            # automatic locator put every tick on the positive side.
+            cb.set_ticks([vneg, 0.0, vpos])
+            cb.set_ticklabels([f"{vneg:.2f}", "0", f"{vpos:.2f}"])
         for j, sp in enumerate(species):
             ax = axes[i][2 + j]
             ax.set_box_aspect(0.55)          # about a Robinson map's height/width
