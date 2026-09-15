@@ -403,7 +403,14 @@ _MINMAX_OVERRIDE = None
 # Keeping CO2 on v1 therefore leaves the channel exactly as the precip-bc
 # branch (and every shipped checkpoint) had it, and confines the new transform
 # to the two channels it helps.
-_TRANSFORM_MODES = ("v1", "asinh", "minmax")
+_TRANSFORM_MODES = ("v1", "asinh", "minmax", "v1_noclip")
+
+# "v1_noclip" — v1 EXACTLY, same percentile anchors (CO2 1-99, SUL/BC 5-95, BC
+# honouring bc_clip_mode), with the clip removed. The paper checkpoint's
+# normalisation minus the one step that saturates. Everything above the anchor
+# keeps growing linearly past +1, unbounded: measured on the training files the
+# largest cells go to roughly +1300 for CO2 (not smoothed) and a few hundred for
+# SUL and BC after smoothing, against a bulk that stays in [-1, 1].
 
 # "minmax" — v1's LINEAR map with no clip: lo = the minimum and hi = the maximum
 # of the SMOOTHED field over the training cond files, so nothing reaches past
@@ -579,6 +586,8 @@ def _get_emissions_minmax():
             combined[var] = (float(np.percentile(posv, 50)) * _ASINH_SCALE_FRAC,
                              float(np.percentile(posv, _ASINH_TOP_PCTL)))
             continue
+        # v1 and v1_noclip share these percentile anchors; they differ only in
+        # whether normalize() clips.
         if var == "BC" and _BC_CLIP_MODE == "populated":
             flat = flat[flat > 0]
             if flat.size == 0:
@@ -634,6 +643,11 @@ def normalize(ds: xr.DataArray) -> xr.DataArray:
         min_val, max_val = minmax[ds.name]
 
         range_val = max_val - min_val
+        if transform_for(ds.name) == "v1_noclip":
+            if range_val == 0:
+                return xr.zeros_like(ds).fillna(-1)
+            mean_val = (min_val + max_val) / 2
+            return ((ds - mean_val) / (range_val / 2)).fillna(-1)   # deliberately NOT clipped
         if range_val == 0:
             return xr.zeros_like(ds).clip(-1, 1).fillna(-1)
         mean_val = (min_val + max_val) / 2
