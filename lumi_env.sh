@@ -46,6 +46,11 @@ export LUMI_EVAL_OUT="${LUMI_EVAL_OUT:-/scratch/project_${LUMI_EVAL_PROJECT}/eva
 # which is what made completed evals report failure.
 export LUMI_RUNS_DIR="${LUMI_RUNS_DIR:-/scratch/project_${LUMI_EVAL_PROJECT}/runs}"
 
+# Eval requests: trainer writes, watch_eval_triggers.sh consumes. On scratch for
+# the same reason as the above -- a full /projappl turns the request into an
+# empty file and the eval never happens.
+export LUMI_TRIGGER_DIR="${LUMI_TRIGGER_DIR:-/scratch/project_${LUMI_EVAL_PROJECT}/eval_triggers}"
+
 # Container-internal view of projappl. Some launchers need this exact prefix
 # because the bind mount inside the singularity image resolves differently.
 export LUMI_REPO_PFS="/pfs/lustrep1/projappl/project_${LUMI_PROJECT}/CESM2_emulator_from_lumi"

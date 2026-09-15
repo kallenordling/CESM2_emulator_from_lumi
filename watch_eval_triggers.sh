@@ -18,7 +18,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # When run as a SLURM job, $0 points to /var/spool/slurmd/jobXXX/ so we
 # use SLURM_SUBMIT_DIR instead. Fall back to dirname $0 for manual runs.
 PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(dirname "$(realpath "$0")")}"
-TRIGGER_DIR="${PROJECT_DIR}/eval_triggers"
+# Scratch, shared by every arm (watchers filter by PROD_RUN). It used to be
+# ${PROJECT_DIR}/eval_triggers on /projappl, which is at quota, so the
+# trainer's requests arrived as empty files and were silently lost.
+TRIGGER_DIR="${LUMI_TRIGGER_DIR:-/scratch/project_${LUMI_EVAL_PROJECT:-462001112}/eval_triggers}"
 DONE_DIR="${TRIGGER_DIR}/done"
 POLL_INTERVAL=60   # seconds between checks
 

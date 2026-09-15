@@ -779,7 +779,8 @@ class UNetTrainer:
         import json
         try:
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            trigger_dir = os.path.join(project_root, "eval_triggers")
+            # Scratch, not <checkout>/eval_triggers: see lumi_paths.TRIGGER_DIR.
+            trigger_dir = L.TRIGGER_DIR
             os.makedirs(trigger_dir, exist_ok=True)
 
             # Write eval output to scratch (writable), not next to the checkpoint

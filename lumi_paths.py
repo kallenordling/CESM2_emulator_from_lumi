@@ -41,6 +41,15 @@ RUNS_DIR: str = os.environ.get(
     "LUMI_RUNS_DIR", f"/scratch/project_{EVAL_PROJECT}/runs"
 )
 
+#: Eval requests, written by the trainer and consumed by watch_eval_triggers.sh.
+#: They used to live in <checkout>/eval_triggers on /projappl, which is at
+#: quota: the trainer's write came out as a ZERO-BYTE .json.tmp and the request
+#: was lost without an error (minmax ep0200, 2026-09-15). Watchers filter by
+#: PROD_RUN, so every arm and checkout can share one directory.
+TRIGGER_DIR: str = os.environ.get(
+    "LUMI_TRIGGER_DIR", f"/scratch/project_{EVAL_PROJECT}/eval_triggers"
+)
+
 #: Container-internal view of projappl (singularity bind mount).
 REPO_PFS: str = f"/pfs/lustrep1/projappl/project_{LUMI_PROJECT}/CESM2_emulator_from_lumi"
 
@@ -58,6 +67,7 @@ for _k, _v in (
     ("LUMI_DATA", DATA),
     ("LUMI_EVAL_OUT", EVAL_OUT),
     ("LUMI_RUNS_DIR", RUNS_DIR),
+    ("LUMI_TRIGGER_DIR", TRIGGER_DIR),
 ):
     os.environ.setdefault(_k, _v)
 del _k, _v
