@@ -23,6 +23,10 @@ PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(dirname "$(realpath "$0")")}"
 # trainer's requests arrived as empty files and were silently lost.
 TRIGGER_DIR="${LUMI_TRIGGER_DIR:-/scratch/project_${LUMI_EVAL_PROJECT:-462001112}/eval_triggers}"
 DONE_DIR="${TRIGGER_DIR}/done"
+# Transition: training jobs started before the move still write requests into
+# the checkout's old folder, and the next chain link will write to scratch. A
+# watcher reads both, so no request is stranded across the handover.
+LEGACY_TRIGGER_DIR="${PROJECT_DIR}/eval_triggers"
 POLL_INTERVAL=60   # seconds between checks
 
 mkdir -p "$TRIGGER_DIR" "$DONE_DIR"
@@ -65,7 +69,7 @@ for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
 done
 
 while true; do
-    for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
+    for trigger in "${TRIGGER_DIR}"/eval_request_*.json "${LEGACY_TRIGGER_DIR}"/eval_request_*.json; do
         # glob returns the pattern itself if no match
         [[ -f "$trigger" ]] || continue
 
