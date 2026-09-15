@@ -69,6 +69,47 @@ def raw_move(species):
                 - np.asarray(h[species].sel(year=1850).values, float))
 
 
+class CondOnly(dict):
+    """A figure row with no model behind it: only delta and a transform name."""
+    @property
+    def files(self):
+        return list(self.keys())
+
+
+def conditioning_only_row(species, pctl, n_comp=5, year=2040, base_year=1850):
+    """v1's clipped linear map with the clip at [100-pctl, pctl], pushed through
+    normalise -> smooth -> joint PCA exactly as the model rows are. Returns the
+    row (delta) and a callable giving each species' normalised record, so the
+    time-series panel reuses the same numbers."""
+    from asian_saturation_by_transform import smooth as sm, path as cpath, FIT_FILES as FF
+    from sklearn.decomposition import PCA
+
+    with xr.open_dataset(cpath("hist")) as h, xr.open_dataset(cpath("ssp370")) as s_:
+        hy, sy = h["year"].values, s_["year"].values
+        rec = {sp: np.concatenate([np.asarray(h[sp].values, float)[hy <= 2014],
+                                   np.asarray(s_[sp].values, float)[sy >= 2015]]) for sp in species}
+    years = np.concatenate([hy[hy <= 2014], sy[sy >= 2015]])
+    deltas, processed = [], {}
+    for sp in species:
+        pool = []
+        for t in FF:
+            with xr.open_dataset(cpath(t)) as ds:
+                a = np.asarray(ds[sp].values, float).ravel()
+            pool.append(a[np.isfinite(a)])
+        lo, hi = np.percentile(np.concatenate(pool), [100.0 - pctl, pctl])
+        z = sm(np.clip((rec[sp] - (lo + hi) / 2) / ((hi - lo) / 2), -1, 1))
+        T, H, W = z.shape
+        pca = PCA(n_components=n_comp).fit(z.reshape(T, -1))
+        zp = pca.inverse_transform(pca.transform(z.reshape(T, -1))).reshape(T, H, W)
+        processed[sp] = zp
+        i1, i0 = int(np.where(years == year)[0][0]), int(np.where(years == base_year)[0][0])
+        deltas.append(zp[i1] - zp[i0])
+        print(f"[v1 p{pctl:g}] {sp}: lo={lo:.3e} hi={hi:.3e}")
+    row = CondOnly(delta=np.stack(deltas).astype(np.float32),
+                   cond_transform=np.array(f"v1_p{pctl:g}"))
+    return row, processed
+
+
 def smooth_pca_move(species, n_comp=5, sigma=2.0, year=2040, base_year=1850):
     """The emission change after the pipeline's smoothing AND PCA truncation, in Gt.
 
@@ -112,6 +153,11 @@ def main():
     ap.add_argument("--asinh", required=True)
     ap.add_argument("--minmax", default=None,
                     help="optional third arm: linear to the smoothed maximum, no clip")
+    ap.add_argument("--v1-clip-pctl", type=float, default=99.0,
+                    help="add a CONDITIONING-ONLY row: v1's linear map with its clip "
+                         "moved to [100-p, p] percentiles for SUL and BC (precip-bc uses "
+                         "5-95). No model was trained this way, so the row has no N. "
+                         "Pass 0 to omit it.")
     ap.add_argument("--out", default=os.path.join(HERE, "figures", "figure_40_saturation_attribution"))
     args = ap.parse_args()
 
@@ -136,6 +182,14 @@ def main():
 
     # ---- 1. the input distortion ------------------------------------------
     masks = {n: box(lat, lon, *b) for n, *b in SOURCE}
+    # rows = everything the figure shows; runs = only what has a model behind it.
+    rows, extra_series = {}, {}
+    for name, z in runs.items():
+        rows[name] = z
+        if name.startswith("v1") and args.v1_clip_pctl:
+            label = f"v1, clip p{100 - args.v1_clip_pctl:g}-p{args.v1_clip_pctl:g} (no model)"
+            rows[label], extra_series[label] = conditioning_only_row(species, args.v1_clip_pctl)
+
     print("\n1. CONDITIONING MOVE, Middle East relative to East Asia "
           "(1.0 would mean Arabia moves as far as East China)")
     print(f"   {'':22s}" + "".join(f"{sp:>12s}" for sp in species))
@@ -144,7 +198,7 @@ def main():
                   for sp in species)
     print(f"   {'RAW emissions':22s}{row}")
     ratios = {}
-    for name, z in runs.items():
+    for name, z in rows.items():
         d = z["delta"]
         r = [d[i][masks["Middle East"]].mean() / d[i][masks["East Asia"]].mean()
              for i in range(len(species))]
@@ -193,7 +247,7 @@ def main():
                   (smooth2(raw[species[0]]), f"emission change {species[0]}, smoothed (sigma 2)"),
                   (smooth2(raw[species[1]]), f"emission change {species[1]}, smoothed (sigma 2)")]
 
-    nrows = 2 + len(runs)
+    nrows = 2 + len(rows)
     fig = plt.figure(figsize=(14.5, 3.25 * nrows), constrained_layout=True)
     # Maps everywhere except columns 3-4 of each transform row, which hold time
     # series and so must be ordinary axes, not projected ones.
@@ -309,7 +363,7 @@ def main():
     emis_global = {sp: np.array([np.average(record[sp][t], weights=wts) for t in range(len(yrs))])
                    for sp in species}
 
-    for i0, (name, z) in enumerate(runs.items()):
+    for i0, (name, z) in enumerate(rows.items()):
         i = i0 + 2
         d = z["delta"]
         key = KEY.get(str(z["cond_transform"]) if "cond_transform" in z.files else "v1", "v1 (clip)")
@@ -334,7 +388,11 @@ def main():
         for j, sp in enumerate(species):
             ax = axes[i][2 + j]
             ax.set_box_aspect(0.55)          # about a Robinson map's height/width
-            ser = global_series(sp, key)
+            if name in extra_series:
+                zp_ = extra_series[name][sp]
+                ser = np.array([np.average(zp_[t], weights=wts) for t in range(zp_.shape[0])])
+            else:
+                ser = global_series(sp, key)
             ax.plot(yrs, ser, color="#0072B2", lw=1.8, label="normalised, global mean")
             ax.set_ylabel("normalised value", fontsize=8, color="#0072B2")
             ax.tick_params(axis="y", labelcolor="#0072B2", labelsize=7)
