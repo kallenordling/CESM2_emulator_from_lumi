@@ -229,7 +229,11 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
 # --export=ALL carries it, so only the FIRST submit needs to set it.
 RUN_TAG="${RUN_TAG:-asinh}"
 SAVE_DIR="${SAVE_DIR:-runs/}"
-export RUN_TAG SAVE_DIR
+# TRAIN_DATA_CONFIG selects the data config for training AND its evals (the
+# eval reads cond smoothing/PCA from it). Not DATA_CONFIG: the eval watcher
+# already uses that name per trigger. Sticky down the chain like RUN_TAG.
+TRAIN_DATA_CONFIG="${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}"
+export RUN_TAG SAVE_DIR TRAIN_DATA_CONFIG
 
 # ── Launch eval watcher as a background SLURM job ────────────────────────────
 WATCHER_TIME=$(squeue -h -j "${SLURM_JOB_ID}" -o '%l' 2>/dev/null | tr -d '[:space:]' || true)
@@ -338,7 +342,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         --machine_rank=\${SLURM_NODEID} \
         --main_process_ip=${MAIN_PROCESS_IP} \
         main_aero.py \
-        data_config=config_data_ybias_BCprect.yaml \
+        data_config="${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
         trainer.hyperparameters.cond_transform="${COND_TRANSFORM:-asinh}" \
         model.in_channels=2 \
         model.out_channels=2 \
@@ -347,7 +351,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.save_dir="${SAVE_DIR:-runs/}" \
         ${LOAD_OVERRIDE} \
         trainer.hyperparameters.mse_only=true \
-        trainer.hyperparameters.eval_data_config=configs/config_data_ybias_BCprect.yaml
+        trainer.hyperparameters.eval_data_config="configs/${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}"
 '"
 
 srun bash -c "$RUN_CMD" || true
