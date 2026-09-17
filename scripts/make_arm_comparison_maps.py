@@ -37,8 +37,9 @@ from make_ensemble_mean_maps import (
 EVAL_ROOT = os.path.expanduser("~/mnt/lumi_sc/eval_output")
 ARMS = [  # label, eval run dir, epoch
     ("asinh99 (SUL/BC asinh)", "run_asinh99_co2fix", 470),
-    ("minmax (no clip, max anchor)", "run_minmax_co2fix", 390),
+    ("minmax (no clip, max anchor)", "run_minmax_co2fix", 470),
     ("v1noclip (v1 anchors, no clip)", "run_v1noclip_co2fix", 240),
+    ("v1noclip (v1 anchors, no clip)", "run_v1noclip_co2fix", 410),
 ]
 
 
@@ -66,6 +67,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--var", nargs="+", default=["TREFHT", "PRECT"])
     ap.add_argument("--outdir", default="plots/arm_maps")
+    ap.add_argument("--arm", action="append", default=None, metavar="RUN:EPOCH",
+                    help="override the arms, e.g. --arm run_minmax_co2fix:470 (repeatable)")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -79,7 +82,10 @@ def main():
 
         anom = lambda d, k: d[k]["final"] - d[k]["base"]
         rows = [("v1 paper (clipped) ep860", {k: anom(emu, k) for k in SCENARIOS})]
-        for label, run, ep in ARMS:
+        arms = ARMS if not args.arm else [
+            (a.split(":")[0].replace("run_", "").replace("_co2fix", ""), a.split(":")[0], int(a.split(":")[1]))
+            for a in args.arm]
+        for label, run, ep in arms:
             m = arm_maps(var, run, ep, windows)
             rows.append((f"{label} ep{ep}", {k: anom(m, k) for k in SCENARIOS}))
 
