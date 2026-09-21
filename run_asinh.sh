@@ -331,6 +331,17 @@ else
 fi
 
 # ── Launch ────────────────────────────────────────────────────────────────────
+# Hydra's default run dir is ./outputs/<date>/<time>, i.e. INSIDE the checkout on
+# /projappl/project_462001328 — which is at quota (55G/54G). Hydra then dies with
+# "OSError: [Errno 122] Disk quota exceeded" in _run_hydra before training starts,
+# which is what killed several co2smooth chain links on 2026-09-18/19 (they show
+# up as COMPLETED jobs lasting 2-3 minutes). Same class of failure as the
+# truncated checkpoint and the lost eval triggers: a full /projappl fails writes,
+# sometimes silently. Keep this on scratch.
+HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-/scratch/project_${LUMI_EVAL_PROJECT:-462001112}/hydra/${SLURM_JOB_NAME:-run}_${SLURM_JOB_ID}}"
+mkdir -p "${HYDRA_RUN_DIR}"
+echo "[hydra] run dir = ${HYDRA_RUN_DIR}"
+
 NUM_PROCESSES=$(( SLURM_NNODES * SLURM_GPUS_PER_NODE ))
 MAIN_PROCESS_IP=$(hostname -i)
 
@@ -351,7 +362,8 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.save_dir="${SAVE_DIR:-runs/}" \
         ${LOAD_OVERRIDE} \
         trainer.hyperparameters.mse_only=true \
-        trainer.hyperparameters.eval_data_config="configs/${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}"
+        trainer.hyperparameters.eval_data_config="configs/${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
+        hydra.run.dir="${HYDRA_RUN_DIR}"
 '"
 
 srun bash -c "$RUN_CMD" || true
