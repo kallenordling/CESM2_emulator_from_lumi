@@ -161,6 +161,14 @@ trainer:
     # the value is persisted per checkpoint as COND_TRANSFORM.
     cond_transform: null
 
+    # null/"normalize_first" = the shipped order, cond_file -> normalize ->
+    # smooth -> PCA. "normalize_last" moves normalise AFTER smoothing and PCA
+    # and refits the anchors on that processed field. The reorder ALONE is a
+    # no-op (all three steps are linear for an unclipped affine transform,
+    # verified to 2e-13); the refit is the point, and it drops SUL's peak from
+    # 384 to 115 in model units. FRESH run only; persisted as COND_ORDER.
+    cond_order: null
+
     # How many numbered checkpoints to keep, newest first (_best.pt is always
     # kept). An eval is triggered when a checkpoint is written but runs only
     # when SLURM schedules it, hours later on a busy queue; at the old value of
