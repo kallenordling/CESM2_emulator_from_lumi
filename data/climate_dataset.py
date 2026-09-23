@@ -603,6 +603,109 @@ def _get_emissions_minmax():
     return combined
 
 
+# ── Pipeline order (2026-09-23) ──────────────────────────────────────────────
+# "normalize_first" (default, every shipped checkpoint): cond_file -> normalize
+#   -> smooth -> PCA. The clip therefore acts on RAW inventory values.
+# "normalize_last": cond_file -> smooth -> PCA -> normalize, with the anchors
+#   REFIT on the smoothed+PCA'd field.
+#
+# THE REFIT IS THE WHOLE POINT. Smoothing is linear, PCA with mean removal is
+# linear, and an unclipped affine normalise commutes with both, so reordering
+# alone is a mathematical no-op -- verified to 2e-13 on the real cond files.
+# What changes is the anchor: measured on ssp370, refitting drops CO2's peak
+# from 34.4 to 23.0 and SUL's from 383.7 to 115.4 in model units, because the
+# anchors then describe the field the network actually receives instead of the
+# raw point-source inventory.
+_COND_ORDER = "normalize_first"
+_PROCESSED_MINMAX_CACHE: "dict | None" = None
+
+
+def set_cond_order(order: str) -> None:
+    global _COND_ORDER, _PROCESSED_MINMAX_CACHE
+    order = str(order).lower()
+    if order not in ("normalize_first", "normalize_last"):
+        raise ValueError(f"cond_order must be normalize_first|normalize_last, got {order!r}")
+    _COND_ORDER = order
+    _PROCESSED_MINMAX_CACHE = None
+    print(f"[COND] pipeline order = {order}")
+
+
+def get_cond_order() -> str:
+    return _COND_ORDER
+
+
+def _get_processed_minmax(sigmas, n_components, var_names):
+    """Anchors fitted on the SMOOTHED + PCA'd reference fields.
+
+    Mirrors the real pipeline: per reference scenario, smooth each channel with
+    its own sigma, fit that scenario's own PCA (the training code fits one PCA
+    per scenario), reconstruct, then pool across scenarios and take the same
+    per-channel percentiles normalize() would have used on raw values.
+    """
+    global _PROCESSED_MINMAX_CACHE
+    if _PROCESSED_MINMAX_CACHE is not None:
+        return _PROCESSED_MINMAX_CACHE
+    pooled = {v: [] for v in var_names}
+    for path in EMISSIONS_PATHS:
+        ds_emis = xr.open_dataset(path)
+        for v_idx, var in enumerate(var_names):
+            if var not in ds_emis.data_vars:
+                continue
+            arr = np.asarray(ds_emis[var].values, dtype=np.float64)   # (T, H, W)
+            sig = float(sigmas[v_idx]) if sigmas is not None else 0.0
+            if sig > 0:
+                arr = smooth_cond_spatial(arr[None], [sig], "gaussian", [var])[0]
+            nc = n_components[v_idx] if n_components is not None else None
+            if nc:
+                arr, _ = fit_pca_denoise(arr.astype(np.float32), int(nc), var)
+                arr = np.asarray(arr, dtype=np.float64)
+            pooled[var].append(arr.ravel())
+        ds_emis.close()
+    out = {}
+    for var, arrays in pooled.items():
+        if not arrays:
+            continue
+        flat = np.concatenate(arrays)
+        flat = flat[np.isfinite(flat)]
+        plo, phi = _CLIP_PCTL.get(var, (1, 99))
+        out[var] = (float(np.percentile(flat, plo)), float(np.percentile(flat, phi)))
+        print(f"[COND] processed anchors for {var} (sigma="
+              f"{sigmas[var_names.index(var)] if sigmas else 0}, p{plo}-p{phi}): "
+              f"lo={out[var][0]:.4e} hi={out[var][1]:.4e}")
+    _PROCESSED_MINMAX_CACHE = out
+    return out
+
+
+def normalize_tensor_cond(tensor, var_names, sigmas, n_components):
+    """Apply the cond transform to an ALREADY smoothed + PCA'd tensor.
+
+    Only the affine transforms are supported here. v1's clip is deliberately
+    refused: clipping after PCA would clip a RECONSTRUCTION, which is a
+    different operation from clipping the inventory, and no shipped checkpoint
+    means that. Use normalize_first for anything that clips.
+    """
+    anchors = _get_processed_minmax(sigmas, n_components, var_names)
+    out = tensor.clone()
+    for v_idx, var in enumerate(var_names):
+        mode = transform_for(var)
+        if mode not in ("v1_noclip", "minmax"):
+            raise ValueError(
+                f"cond_order=normalize_last supports v1_noclip/minmax only; "
+                f"{var} asks for {mode!r}. Clipping or asinh after PCA is a "
+                f"different operation from doing it on the inventory."
+            )
+        lo_, hi_ = anchors[var]
+        if hi_ <= lo_:
+            out[v_idx] = -1.0
+            continue
+        mid = (lo_ + hi_) / 2.0
+        half = (hi_ - lo_) / 2.0
+        out[v_idx] = (tensor[v_idx] - mid) / half
+        print(f"[COND] normalize_last {var}: lo={lo_:.4e} hi={hi_:.4e} "
+              f"-> range [{float(out[v_idx].min()):.2f}, {float(out[v_idx].max()):.2f}]")
+    return torch.nan_to_num(out, nan=-1.0)
+
+
 def normalize(ds: xr.DataArray) -> xr.DataArray:
     """Normalise a DataArray for model input.
 
@@ -938,7 +1041,12 @@ class ClimateDataset(Dataset):
         if self.time_dim not in raw_cond.dims and "year" in raw_cond.dims:
             raw_cond = raw_cond.rename({"year": self.time_dim})
         raw_cond = raw_cond.chunk({self.time_dim: -1})
-        raw_cond = raw_cond[self.cond_vars].map(normalize)#.sel({self.time_dim: selected_years})
+        if _COND_ORDER == "normalize_last":
+            # Smoothing and PCA run on RAW values; normalize_tensor_cond
+            # applies the transform afterwards with refitted anchors.
+            raw_cond = raw_cond[self.cond_vars]
+        else:
+            raw_cond = raw_cond[self.cond_vars].map(normalize)
 
         coord_vals = raw_cond[self.time_dim].values
         if hasattr(coord_vals[0], 'year'):
@@ -983,6 +1091,12 @@ class ClimateDataset(Dataset):
                 var_names=self.cond_vars,
                 pca_objects=self._pca_cond,     # None on first call → fits
             )
+
+        # ── Normalisation LAST (optional order) ──────────────────────────────
+        if _COND_ORDER == "normalize_last":
+            self.tensor_data_cond = normalize_tensor_cond(
+                self.tensor_data_cond, self.cond_vars,
+                self.cond_smooth_sigma, self.n_components_cond).contiguous()
 
         # Save diagnostic spatial plots (only on first load)
         diag_dir = os.path.join(self.data_dir, "diagnostics")

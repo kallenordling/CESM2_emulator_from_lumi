@@ -97,6 +97,21 @@ def main(cfg: DictConfig) -> None:
             logger.info(f"[COND] transform = {cond_transform} "
                         f"(v1 clips whole countries at +1; see climate_dataset)")
 
+    # Pipeline order. "normalize_last" moves normalise AFTER smoothing and PCA
+    # and refits the anchors on that processed field — see set_cond_order. Same
+    # "before any dataset is built" requirement as cond_transform, and it is
+    # persisted per checkpoint as COND_ORDER so eval reproduces it.
+    cond_order = str(
+        OmegaConf.select(cfg, "trainer.hyperparameters.cond_order")
+        or data_cfg.get("cond_order", None)
+        or "normalize_first"
+    )
+    if cond_order != "normalize_first":
+        from data import climate_dataset as _cdt2
+        _cdt2.set_cond_order(cond_order)
+        if accelerator.is_main_process:
+            logger.info(f"[COND] pipeline order = {cond_order}")
+
     if bc_clip_mode != "v1":
         from data import climate_dataset as _cds
         _cds.set_bc_clip_mode(bc_clip_mode)

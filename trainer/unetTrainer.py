@@ -222,8 +222,10 @@ class UNetTrainer:
         # recomputing with possibly-different module defaults (bc_clip_mode).
         try:
             self._cond_norm_state = get_active_minmax()
-            from data.climate_dataset import get_active_cond_transform
+            from data.climate_dataset import (get_active_cond_transform,
+                                              get_cond_order)
             self._cond_transform_state = get_active_cond_transform()
+            self._cond_order_state = get_cond_order()
         except Exception as e:
             print(f"[TRAINER] WARNING: could not capture cond-norm state: {e}")
             self._cond_norm_state = None
@@ -1851,6 +1853,9 @@ class UNetTrainer:
             # Without this a checkpoint trained with asinh would be evaluated
             # with the v1 affine map and silently produce nonsense.
             "COND_TRANSFORM": getattr(self, "_cond_transform_state", None),
+            # Pipeline order, so eval cannot silently normalise in the
+            # other order and score a different input than training saw.
+            "COND_ORDER":     getattr(self, "_cond_order_state", None),
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
             sd[ckpt_key] = getattr(self, attr)

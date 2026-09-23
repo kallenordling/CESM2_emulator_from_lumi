@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 import yaml
+from scipy.stats import ttest_ind
 
 # Cartopy is optional: it lives in the plotting env, not the base one, and the
 # Natural Earth shapefiles it draws from are cached locally (no network at draw
@@ -141,6 +142,11 @@ def read_cesm(var, members, n_years):
         good_b = [b for b in bases if b is not None]
         out[key] = dict(final=np.mean(finals, axis=0),
                         base=np.mean(good_b, axis=0) if good_b else None,
+                        # Per-member final-decade maps, kept for the significance
+                        # test in draw(). The ensemble MEAN is what the figure
+                        # shows; the spread is what decides whether a difference
+                        # between the two means is distinguishable from noise.
+                        final_members=np.stack(finals),
                         window=wins, n=len(finals), lat=lat, lon=lon)
     return out
 
@@ -159,7 +165,10 @@ def read_emulator(var, n_years, n_cap):
         bsel = (years >= BASELINE[0]) & (years <= BASELINE[1])
         base = (np.asarray(da.isel(year=np.where(bsel)[0]).mean(("member", "year")).values,
                            dtype=float) if bsel.any() else None)
+        fm = np.asarray(da.isel(year=np.where(sel)[0]).mean("year")
+                        .transpose("member", ...).values, dtype=float)
         out[key] = dict(final=final, base=base, window=wins,
+                        final_members=fm,
                         n=int(da.sizes["member"]),
                         lat=ds["lat"].values, lon=ds["lon"].values)
         print(f"  [{key}] emulator {out[key]['n']} members, window {wins}")
@@ -180,8 +189,8 @@ def to_celsius(side, var, name):
     for key, d in side.items():
         typical = float(np.nanmean(d["final"]))
         if typical > 100:
-            for field in ("final", "base"):
-                if d[field] is not None:
+            for field in ("final", "base", "final_members"):
+                if d.get(field) is not None:
                     d[field] = d[field] - 273.15
             print(f"[units] {name:8s} {key:7s} K -> degC (mean was {typical:.1f})")
         elif typical > 40:
@@ -228,8 +237,16 @@ def make_axes(fig, nrows, ncols):
 PANEL_LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 
+def _panel_letter(index):
+    """a..z, then aa, ab, ... — a 7-row comparison has 28 panels, past 'z'."""
+    n = len(PANEL_LETTERS)
+    if index < n:
+        return PANEL_LETTERS[index]
+    return PANEL_LETTERS[index // n - 1] + PANEL_LETTERS[index % n]
+
+
 def panel_label(ax, index):
-    ax.text(0.0, 1.0, f"({PANEL_LETTERS[index]})", transform=ax.transAxes,
+    ax.text(0.0, 1.0, f"({_panel_letter(index)})", transform=ax.transAxes,
             fontweight="bold", fontsize=9, va="top", ha="left")
 
 
@@ -251,15 +268,21 @@ def draw_map(ax, data, outline="0.15", **kw):
     return im
 
 
-def draw(var, mode, emu, ref, outdir):
+def draw(var, mode, emu, ref, outdir, stipple_on=True):
     unit = META[var]["unit"]
     lat, lon = emu["hist"]["lat"], emu["hist"]["lon"]
 
-    fields = {}
+    fields, sig = {}, {}
     for key in SCENARIOS:
         e = emu[key]["final"] - (emu[key]["base"] if mode == "anomaly" else 0)
         c = ref[key]["final"] - (ref[key]["base"] if mode == "anomaly" else 0)
         fields[key] = tuple(to_pm180(f, lon)[0] for f in (e, c, e - c))
+        # Significance is a property of the two ENSEMBLES, so it is the same
+        # test in both modes -- a constant baseline offset shifts every member
+        # of a side alike and cannot change a difference of means.
+        if stipple_on and "final_members" in emu[key] and "final_members" in ref[key]:
+            m, frac = significant_mask(emu[key], ref[key])
+            sig[key] = (to_pm180(m, lon)[0], frac)
 
     # One scale for the top two rows so emulator and CESM2 are comparable, and
     # a separate symmetric scale for the difference row.
@@ -291,6 +314,8 @@ def draw(var, mode, emu, ref, outdir):
             else:
                 im_diff = draw_map(ax, data, cmap=META[var]["dcmap"],
                                    vmin=-dmax, vmax=dmax)
+                if key in sig:
+                    stipple(ax, sig[key][0], lat, to_pm180(data, lon)[1])
             if i == 0:
                 w = emu[key]["window"]
                 ax.set_title(f"{label}\n{w[0]}-{w[1]}  "
@@ -304,31 +329,91 @@ def draw(var, mode, emu, ref, outdir):
             # so the corners of the axes box are off the globe and text there
             # gets clipped by the neighbouring panel.
             gm = np.average(data, weights=weights)
-            ax.text(0.5, -0.06, f"{gm:+.2f} {unit}" if i == 2 else f"{gm:.2f} {unit}",
+            note = f"{gm:.2f} {unit}"
+            if i == 2:
+                note = f"{gm:+.2f} {unit}"
+                if key in sig:
+                    note += f"   {100 * sig[key][1]:.0f}% sig."
+            ax.text(0.5, -0.06, note,
                     transform=ax.transAxes, fontsize=8, ha="center", va="top")
     fig.colorbar(im_top, ax=list(axes[:2].ravel()), shrink=0.62,
                  label=f"{var} {'anomaly ' if mode == 'anomaly' else ''}({unit})")
     fig.colorbar(im_diff, ax=list(axes[2].ravel()), shrink=0.8,
                  label=f"difference ({unit})")
     proj_note = f" ({PROJECTION})" if HAVE_CARTOPY else ""
+    sig_note = ("; stippling = difference significant at FDR q<0.05 (Welch across members)"
+                if sig else "")
     fig.suptitle(f"{var} ensemble mean, final decade — "
                  f"{'anomaly vs 1850-1900' if mode == 'anomaly' else 'absolute'}"
-                 f"{proj_note}", fontsize=12)
+                 f"{proj_note}{sig_note}", fontsize=12)
     # PNG to look at, PDF to \includegraphics — the paper set is vector.
     path = os.path.join(outdir, f"ensmean_map_{var}_{mode}.png")
     outs = [path, os.path.splitext(path)[0] + ".pdf"]
     paper = PAPER_NAME.get((var, mode))
     if paper:
         parent = os.path.dirname(outdir.rstrip("/")) or "plots"
-        # Supplement figures live in their own folder, main-text ones beside it.
-        target = os.path.join(parent, "supplement") if paper.startswith("figS") else parent
-        os.makedirs(target, exist_ok=True)
-        outs += [os.path.join(target, f"{paper}.png"),
-                 os.path.join(target, f"{paper}.pdf")]
+        # Supplement figures share one folder; main-text ones get a folder each
+        # (plots/fig05/fig05.pdf), matching every other paper figure, AND a copy
+        # beside it. Both existed already and drifted apart -- write both.
+        targets = ([os.path.join(parent, "supplement")] if paper.startswith("figS")
+                   else [parent, os.path.join(parent, paper)])
+        for target in targets:
+            os.makedirs(target, exist_ok=True)
+            outs += [os.path.join(target, f"{paper}.png"),
+                     os.path.join(target, f"{paper}.pdf")]
     for out in outs:
         fig.savefig(out, dpi=160, bbox_inches="tight")
     plt.close(fig)
     return ", ".join(outs)
+
+
+def significant_mask(emu_key, ref_key, q=0.05):
+    """Cells where the emulator's ensemble mean differs from CESM2's beyond
+    ensemble noise: Welch t-test across MEMBERS, then Benjamini-Hochberg.
+
+    Welch rather than Student because the two sides have different member counts
+    (25 emulator vs 6-11 held-out CESM2) and different spreads. BH because a
+    naive p < 0.05 over ~55 000 cells paints ~2 700 false positives -- enough to
+    look like a coherent region on a map. q is the false DISCOVERY rate: 5% of
+    the stippled cells are expected to be spurious, not 5% of all cells.
+
+    The baseline is the side's ensemble MEAN in both cases, so this tests the
+    final-decade difference and treats the 1850-1900 offset as common-mode. That
+    understates uncertainty slightly, but the baseline spread is far smaller than
+    the final-decade spread, and using it per member is impossible for aaer/ghg,
+    which borrow ssp370's baseline.
+
+    Returns (mask, fraction of area stippled). NOT evidence of no bias where it
+    is False -- see the TOST note in bias_equivalence_testing.
+    """
+    a = emu_key["final_members"] - emu_key["base"]
+    b = ref_key["final_members"] - ref_key["base"]
+    if a.shape[0] < 2 or b.shape[0] < 2:
+        return np.zeros(a.shape[1:], bool), 0.0
+    p = ttest_ind(a, b, axis=0, equal_var=False).pvalue
+    flat = np.ravel(p)
+    ok = np.isfinite(flat)
+    mask = np.zeros_like(flat, bool)
+    if ok.any():
+        pv = np.sort(flat[ok])
+        n = pv.size
+        below = np.where(pv <= q * np.arange(1, n + 1) / n)[0]
+        if below.size:
+            mask[ok] = flat[ok] <= pv[below[-1]]
+    return mask.reshape(p.shape), float(mask.mean())
+
+
+def stipple(ax, mask, lat, lon, step=3):
+    """Dots on the cells the test rejects, thinned so the field stays readable."""
+    if not mask.any():
+        return
+    la, lo = np.asarray(lat), np.asarray(lon)
+    sub = np.zeros_like(mask)
+    sub[::step, ::step] = mask[::step, ::step]
+    yy, xx = np.where(sub)
+    kw = dict(transform=ccrs.PlateCarree()) if HAVE_CARTOPY else {}
+    ax.scatter(lo[xx], la[yy], s=0.45, c="0.12", marker=".",
+               linewidths=0, alpha=0.75, **kw)
 
 
 def weighted_stats(e, c, lat):
@@ -446,7 +531,9 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     all_stats = {}
     for var in args.var:
-        cache = os.path.join(args.outdir, f"cache_{var}_{args.n_years}y.npz")
+        # v2 keeps the per-member maps the significance test needs. The v1 cache
+        # is left in place -- make_arm_comparison_maps.py still reads it.
+        cache = os.path.join(args.outdir, f"cache_{var}_{args.n_years}y_v2.npz")
         members = heldout_members(var)
         n_cap = {k: len(v) for k, v in members.items()}
         if os.path.exists(cache):

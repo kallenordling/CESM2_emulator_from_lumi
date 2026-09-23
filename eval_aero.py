@@ -383,6 +383,11 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
     # first, then inject the numbers.
     ct = ckpt.get("COND_TRANSFORM") or "v1"
     set_cond_transform(ct)
+    co = ckpt.get("COND_ORDER") or "normalize_first"
+    if co != "normalize_first":
+        from data.climate_dataset import set_cond_order
+        set_cond_order(co)
+    print(f"[COND-ORDER] checkpoint trained with '{co}'", flush=True)
     # Printed unconditionally. It used to print only for non-v1, so an eval
     # running a checkout that ignored the transform looked exactly like a v1
     # eval, and the absence of the line was the only clue.
