@@ -96,6 +96,16 @@ def _area_weights_1d(lats, *, dtype, device):
     return w / w.mean()
 
 
+def _cd_processed_state():
+    """Processed cond anchors in force, for COND_PROCESSED_NORM. Import is local
+    because climate_dataset sets them lazily at first load_data."""
+    try:
+        from data.climate_dataset import get_processed_minmax_state
+        return get_processed_minmax_state()
+    except Exception:
+        return None
+
+
 class UNetTrainer:
     """Trainer class for 2D diffusion models."""
 
