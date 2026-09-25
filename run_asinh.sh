@@ -356,6 +356,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         data_config="${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
         trainer.hyperparameters.cond_transform="${COND_TRANSFORM:-asinh}" \
         trainer.hyperparameters.cond_order="${COND_ORDER:-normalize_first}" \
+        trainer.hyperparameters.anchor_scenarios="${ANCHOR_SCENARIOS:-all4}" \
         model.in_channels=2 \
         model.out_channels=2 \
         model.cond_channels=3 \

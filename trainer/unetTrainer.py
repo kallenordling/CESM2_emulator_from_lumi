@@ -223,9 +223,11 @@ class UNetTrainer:
         try:
             self._cond_norm_state = get_active_minmax()
             from data.climate_dataset import (get_active_cond_transform,
-                                              get_cond_order)
+                                              get_cond_order,
+                                              get_anchor_scenarios)
             self._cond_transform_state = get_active_cond_transform()
             self._cond_order_state = get_cond_order()
+            self._cond_anchors_state = get_anchor_scenarios()
         except Exception as e:
             print(f"[TRAINER] WARNING: could not capture cond-norm state: {e}")
             self._cond_norm_state = None
@@ -1856,6 +1858,10 @@ class UNetTrainer:
             # Pipeline order, so eval cannot silently normalise in the
             # other order and score a different input than training saw.
             "COND_ORDER":     getattr(self, "_cond_order_state", None),
+            "COND_ANCHORS":   getattr(self, "_cond_anchors_state", None),
+            # The anchors normalize_last actually used. COND_NORM covers
+            # the raw path only, so without this eval REFITS them.
+            "COND_PROCESSED_NORM": _cd_processed_state(),
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
             sd[ckpt_key] = getattr(self, attr)

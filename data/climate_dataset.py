@@ -81,6 +81,49 @@ EMISSIONS_PATHS = [
     f"{L.DATA}/emissions_ghg_only_timefixed_bc_co2fix.nc",
 ]
 
+# Which of those files the ANCHORS are fitted on (the files the DATASET reads
+# are set per experiment in the data config and are unaffected).
+#
+#   "all4"        every shipped checkpoint: hist + ssp370 + aaer + ghg pooled.
+#   "hist_ssp370" the two scenarios that actually exercise every channel.
+#
+# WHY IT MATTERS: ghg holds SUL/BC at ~0 and aaer holds CO2 near pre-industrial,
+# so pooling all four pulls each channel's percentile toward a scenario that
+# does not drive it. Measured: CO2's hi anchor is 4.30e-02 over all four vs
+# 9.94e-02 over hist+ssp370 -- a factor 2.3, and since the anchor DIVIDES, the
+# model's input is 2.3x larger under "all4" for the same emissions.
+#
+# Changing this changes the meaning of every cond channel => FRESH run only.
+# Persisted per checkpoint (COND_NORM for the raw path, COND_PROCESSED_NORM for
+# normalize_last) so eval reproduces training exactly instead of refitting.
+_ANCHOR_SCENARIOS = "all4"
+
+
+def set_anchor_scenarios(which: str) -> None:
+    global _ANCHOR_SCENARIOS, _PROCESSED_MINMAX_CACHE
+    which = str(which).lower()
+    if which not in ("all4", "hist_ssp370"):
+        raise ValueError(f"anchor_scenarios must be all4|hist_ssp370, got {which!r}")
+    _ANCHOR_SCENARIOS = which
+    _PROCESSED_MINMAX_CACHE = None
+    try:
+        _get_emissions_minmax.cache_clear()
+    except AttributeError:
+        pass
+    print(f"[COND] anchor scenarios = {which}")
+
+
+def get_anchor_scenarios() -> str:
+    return _ANCHOR_SCENARIOS
+
+
+def _anchor_paths():
+    """The subset of EMISSIONS_PATHS the anchors are fitted on."""
+    if _ANCHOR_SCENARIOS == "hist_ssp370":
+        return [p for p in EMISSIONS_PATHS
+                if ("_hist_" in p or "_ssp370_" in p)]
+    return list(EMISSIONS_PATHS)
+
 
 # -----------------------------------------------------------------------------
 # Alternative normalisation functions kept for diagnostic scripts only
@@ -555,7 +598,7 @@ def _get_emissions_minmax():
     if _MINMAX_OVERRIDE is not None:
         return _MINMAX_OVERRIDE
     all_vals = {}  # var -> list of flat arrays
-    for path in EMISSIONS_PATHS:
+    for path in _anchor_paths():
         ds_emis = xr.open_dataset(path)
         for var in ["CO2", "SO2", "SUL", "sul", "BC"]:
             if var not in ds_emis.data_vars:
@@ -618,6 +661,20 @@ def _get_emissions_minmax():
 # raw point-source inventory.
 _COND_ORDER = "normalize_first"
 _PROCESSED_MINMAX_CACHE: "dict | None" = None
+_PROCESSED_OVERRIDE: "dict | None" = None
+
+
+def set_processed_minmax_override(anchors: "dict | None") -> None:
+    """Inject checkpoint-persisted processed anchors (see COND_PROCESSED_NORM)."""
+    global _PROCESSED_OVERRIDE, _PROCESSED_MINMAX_CACHE
+    _PROCESSED_OVERRIDE = (None if anchors is None else
+                           {str(k): (float(v[0]), float(v[1])) for k, v in anchors.items()})
+    _PROCESSED_MINMAX_CACHE = None
+
+
+def get_processed_minmax_state() -> "dict | None":
+    """The processed anchors actually in force, for persisting."""
+    return _PROCESSED_MINMAX_CACHE
 
 
 def set_cond_order(order: str) -> None:
@@ -645,8 +702,15 @@ def _get_processed_minmax(sigmas, n_components, var_names):
     global _PROCESSED_MINMAX_CACHE
     if _PROCESSED_MINMAX_CACHE is not None:
         return _PROCESSED_MINMAX_CACHE
+    if _PROCESSED_OVERRIDE is not None:
+        # Injected from a checkpoint: reuse the EXACT anchors training used
+        # rather than refitting and trusting the two to agree. Refitting is
+        # what let the first normlast evals normalise SUL ~6x off in silence.
+        print(f"[COND] processed anchors from checkpoint: {_PROCESSED_OVERRIDE}")
+        _PROCESSED_MINMAX_CACHE = _PROCESSED_OVERRIDE
+        return _PROCESSED_MINMAX_CACHE
     pooled = {v: [] for v in var_names}
-    for path in EMISSIONS_PATHS:
+    for path in _anchor_paths():
         ds_emis = xr.open_dataset(path)
         for v_idx, var in enumerate(var_names):
             if var not in ds_emis.data_vars:

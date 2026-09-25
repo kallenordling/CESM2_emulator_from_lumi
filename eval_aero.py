@@ -383,6 +383,15 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
     # first, then inject the numbers.
     ct = ckpt.get("COND_TRANSFORM") or "v1"
     set_cond_transform(ct)
+    anc = ckpt.get("COND_ANCHORS")
+    if anc and anc != "all4":
+        from data.climate_dataset import set_anchor_scenarios
+        set_anchor_scenarios(anc)
+    pnorm = ckpt.get("COND_PROCESSED_NORM")
+    if pnorm:
+        from data.climate_dataset import set_processed_minmax_override
+        set_processed_minmax_override(pnorm)
+        print(f"[COND-PROCESSED] using checkpoint-persisted processed anchors", flush=True)
     co = ckpt.get("COND_ORDER") or "normalize_first"
     if co != "normalize_first":
         from data.climate_dataset import set_cond_order

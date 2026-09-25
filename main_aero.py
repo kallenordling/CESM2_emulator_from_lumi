@@ -101,6 +101,17 @@ def main(cfg: DictConfig) -> None:
     # and refits the anchors on that processed field — see set_cond_order. Same
     # "before any dataset is built" requirement as cond_transform, and it is
     # persisted per checkpoint as COND_ORDER so eval reproduces it.
+    anchor_scenarios = str(
+        OmegaConf.select(cfg, "trainer.hyperparameters.anchor_scenarios")
+        or data_cfg.get("anchor_scenarios", None)
+        or "all4"
+    )
+    if anchor_scenarios != "all4":
+        from data import climate_dataset as _cdt3
+        _cdt3.set_anchor_scenarios(anchor_scenarios)
+        if accelerator.is_main_process:
+            logger.info(f"[COND] anchor scenarios = {anchor_scenarios}")
+
     cond_order = str(
         OmegaConf.select(cfg, "trainer.hyperparameters.cond_order")
         or data_cfg.get("cond_order", None)

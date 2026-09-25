@@ -169,6 +169,13 @@ trainer:
     # 384 to 115 in model units. FRESH run only; persisted as COND_ORDER.
     cond_order: null
 
+    # Which scenarios the cond ANCHORS are fitted on. null/"all4" = the shipped
+    # hist+ssp370+aaer+ghg pool; "hist_ssp370" drops the single-forcing runs,
+    # where ghg has SUL/BC ~0 and aaer holds CO2 near pre-industrial and so each
+    # drags a channel's percentile toward a scenario that never drives it.
+    # FRESH run only; persisted as COND_ANCHORS (+ COND_PROCESSED_NORM).
+    anchor_scenarios: null
+
     # How many numbered checkpoints to keep, newest first (_best.pt is always
     # kept). An eval is triggered when a checkpoint is written but runs only
     # when SLURM schedules it, hours later on a busy queue; at the old value of
