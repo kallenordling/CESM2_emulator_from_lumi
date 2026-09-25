@@ -443,7 +443,15 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
     if time_dim not in raw.dims and "year" in raw.dims:
         raw = raw.rename({"year": time_dim})
     raw = raw[cond_vars].chunk({time_dim: -1})
-    norm = raw.map(normalize)
+    # PIPELINE ORDER must match training. Under "normalize_last" the transform
+    # runs AFTER smoothing and PCA, with anchors refit on that processed field;
+    # normalising here as well (or instead) feeds the model a differently
+    # scaled input than it trained on. That silent mismatch is exactly what
+    # invalidated the first normlast evals: SUL was ~6x off because eval used
+    # the raw checkpoint anchors while training used the processed ones.
+    from data.climate_dataset import get_cond_order
+    _order = get_cond_order()
+    norm = raw[cond_vars] if _order == "normalize_last" else raw.map(normalize)
 
     lat = norm["lat"].values.astype(np.float64)
     lon = norm["lon"].values.astype(np.float64)
@@ -489,6 +497,16 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
             n_components=n_components_cond,
             pca_objects=pca_objects,
         )
+
+    # ── Normalisation LAST, mirroring ClimateDataset ─────────────────────────
+    if _order == "normalize_last":
+        from data.climate_dataset import normalize_tensor_cond
+        sig = (None if cond_smooth_sigma is None else
+               ([float(cond_smooth_sigma)] * len(cond_vars)
+                if isinstance(cond_smooth_sigma, (int, float))
+                else [float(s_) for s_ in cond_smooth_sigma]))
+        cond_tensor = normalize_tensor_cond(
+            cond_tensor, cond_vars, sig, n_components_cond).contiguous()
 
     raw.close()
     return cond_tensor, years, lat, lon
