@@ -422,7 +422,25 @@ _CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95),
 # The mode in force is persisted per checkpoint as COND_TRANSFORM and
 # re-injected at eval, exactly as COND_NORM is.
 _COND_TRANSFORM = "v1"
-_ASINH_TOP_PCTL = 99.9      # positive-cell percentile that maps to +1
+_ASINH_TOP_PCTL = 99.9
+# "minmax_asinh": min/max anchors (so +1 IS the largest cell and nothing can
+# exceed the range) with a concave stretch instead of a straight line, so the
+# bulk is not crushed onto the floor. Measured on the sigma-4 smoothed field,
+# the linear minmax map leaves ~86% of EMITTING cells within 0.06 of -1 because
+# the largest cell is ~23x the 99th percentile. s sets where the map turns over:
+# linear for u << s, logarithmic above.
+# s=0.001 chosen by sweep on the sigma-4 smoothed hist+ssp370 field, % of
+# EMITTING cells stranded within 0.06 of -1 / median emitting cell:
+#   linear   CO2 91.3% -0.999 | SUL 86.2% -0.995 | BC 85.6% -0.996
+#   s=0.005  CO2 58.6% -0.968 | SUL 29.4% -0.845 | BC 37.9% -0.867
+#   s=0.001  CO2 39.0% -0.878 | SUL  2.0% -0.576 | BC 12.1% -0.614   <- used
+#   s=0.0002 CO2 16.7% -0.650 | SUL  0.0% -0.309 | BC  0.0% -0.344
+# Smaller s keeps stretching but approaches a log map near zero, which has no
+# linear region and spreads near-zero ocean cells across the range -- the
+# documented way log normalisation made this model worse. NOT exposed as an env
+# knob on purpose: it is part of the transform's meaning, and eval reads only
+# COND_TRANSFORM from the checkpoint, so a differing s at eval would be silent.
+_MINMAX_ASINH_S = 0.001      # positive-cell percentile that maps to +1
 # 99.5 -> 99.9 on 2026-09-10, measured by scripts/sweep_asinh_cond_params.py
 # as the share of a region's emission MASS the ceiling flattens (ssp370, 2100).
 # At p99.5:  SUL E China 77%, India 81%, Arabia 19%;  BC India 63%, Arabia 32%.
@@ -446,7 +464,7 @@ _MINMAX_OVERRIDE = None
 # Keeping CO2 on v1 therefore leaves the channel exactly as the precip-bc
 # branch (and every shipped checkpoint) had it, and confines the new transform
 # to the two channels it helps.
-_TRANSFORM_MODES = ("v1", "asinh", "minmax", "v1_noclip")
+_TRANSFORM_MODES = ("v1", "asinh", "minmax", "v1_noclip", "minmax_asinh")
 
 # "v1_noclip" — v1 EXACTLY, same percentile anchors (CO2 1-99, SUL/BC 5-95, BC
 # honouring bc_clip_mode), with the clip removed. The paper checkpoint's
@@ -731,10 +749,20 @@ def _get_processed_minmax(sigmas, n_components, var_names):
             continue
         flat = np.concatenate(arrays)
         flat = flat[np.isfinite(flat)]
+        sig_v = sigmas[var_names.index(var)] if sigmas else 0
+        if transform_for(var) in ("minmax", "minmax_asinh"):
+            # TRUE min/max of the processed field: +1 is then the largest cell
+            # that exists, so nothing can exceed [-1, +1] -- bounded WITHOUT a
+            # clip and with nothing pinned. The cost is bulk contrast, since the
+            # range is set by the single most extreme cell; smoothing first is
+            # what makes that affordable (sigma 4 cuts CO2's peak ~12x).
+            out[var] = (float(flat.min()), float(flat.max()))
+            print(f"[COND] processed anchors for {var} (sigma={sig_v}, MIN-MAX): "
+                  f"lo={out[var][0]:.4e} hi={out[var][1]:.4e}")
+            continue
         plo, phi = _CLIP_PCTL.get(var, (1, 99))
         out[var] = (float(np.percentile(flat, plo)), float(np.percentile(flat, phi)))
-        print(f"[COND] processed anchors for {var} (sigma="
-              f"{sigmas[var_names.index(var)] if sigmas else 0}, p{plo}-p{phi}): "
+        print(f"[COND] processed anchors for {var} (sigma={sig_v}, p{plo}-p{phi}): "
               f"lo={out[var][0]:.4e} hi={out[var][1]:.4e}")
     _PROCESSED_MINMAX_CACHE = out
     return out
@@ -752,7 +780,7 @@ def normalize_tensor_cond(tensor, var_names, sigmas, n_components):
     out = tensor.clone()
     for v_idx, var in enumerate(var_names):
         mode = transform_for(var)
-        if mode not in ("v1_noclip", "minmax"):
+        if mode not in ("v1_noclip", "minmax", "minmax_asinh"):
             raise ValueError(
                 f"cond_order=normalize_last supports v1_noclip/minmax only; "
                 f"{var} asks for {mode!r}. Clipping or asinh after PCA is a "
@@ -761,6 +789,14 @@ def normalize_tensor_cond(tensor, var_names, sigmas, n_components):
         lo_, hi_ = anchors[var]
         if hi_ <= lo_:
             out[v_idx] = -1.0
+            continue
+        if mode == "minmax_asinh":
+            u = ((tensor[v_idx] - lo_) / (hi_ - lo_)).clamp(min=0.0)
+            denom = float(np.arcsinh(1.0 / _MINMAX_ASINH_S))
+            out[v_idx] = 2.0 * torch.asinh(u / _MINMAX_ASINH_S) / denom - 1.0
+            print(f"[COND] normalize_last {var} (minmax_asinh s={_MINMAX_ASINH_S}): "
+                  f"lo={lo_:.4e} hi={hi_:.4e} -> range "
+                  f"[{float(out[v_idx].min()):.2f}, {float(out[v_idx].max()):.2f}]")
             continue
         mid = (lo_ + hi_) / 2.0
         half = (hi_ - lo_) / 2.0
