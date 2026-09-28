@@ -29,6 +29,10 @@ set -euo pipefail
 : "${OUT:?set OUT}"
 YEAR="${YEAR:-2040}"
 GRID="${GRID:-21}"
+# The arm's OWN data config and sigma: the new arms use sigma 4 and NO PCA, and
+# the old default would push a differently-built cond through the model.
+DATA_CONFIG="${DATA_CONFIG:-configs/config_data_ybias_BCprect.yaml}"
+SMOOTH_SIGMA="${SMOOTH_SIGMA:-0,2,2}"
 
 module --force purge
 module use /appl/local/laifs/modules
@@ -44,5 +48,6 @@ echo "[INTMAPS] code=${SLURM_SUBMIT_DIR} ckpt=${CHECKPOINT} year=${YEAR} grid=${
 singularity exec ${SIF} bash -c "
     cd '${SLURM_SUBMIT_DIR}' && \
     python analysis/nonlinear_emission_interaction/02_interaction_maps.py \
-        '${CHECKPOINT}' --year ${YEAR} --integrate-grid ${GRID} --out '${OUT}'
+        '${CHECKPOINT}' --year ${YEAR} --integrate-grid ${GRID} --out '${OUT}' \
+        --data-config '${DATA_CONFIG}' --smooth-sigma '${SMOOTH_SIGMA}'
 "

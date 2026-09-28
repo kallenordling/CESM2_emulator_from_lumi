@@ -116,6 +116,33 @@ CO2_CH = [i for i, v in enumerate(cond_vars) if v.upper() == "CO2"]
 AER_CH = [i for i, v in enumerate(cond_vars) if v.upper() in ("SUL", "BC")]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ── Restore the checkpoint's CONDITIONING SETTINGS before anything builds a
+# cond tensor. This script calls build_cond_tensor directly, bypassing
+# eval_aero.main() where that restoration lives, so without this it silently
+# normalises with the DEFAULTS (v1, normalize_first, all4 anchors). On a
+# minmax/normalize_last checkpoint that is a different input from the one the
+# model trained on -- the same class of silent mismatch that invalidated the
+# asinh99 evals and the first normlast evals.
+_ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+from data.climate_dataset import (set_cond_transform, set_cond_order,
+                                  set_anchor_scenarios, set_minmax_override,
+                                  set_processed_minmax_override)
+_ct = _ck.get("COND_TRANSFORM") or "v1"
+set_cond_transform(_ct)
+_anc = _ck.get("COND_ANCHORS")
+if _anc and _anc != "all4":
+    set_anchor_scenarios(_anc)
+if _ck.get("COND_NORM"):
+    set_minmax_override(_ck["COND_NORM"])
+if _ck.get("COND_PROCESSED_NORM"):
+    set_processed_minmax_override(_ck["COND_PROCESSED_NORM"])
+_co = _ck.get("COND_ORDER") or "normalize_first"
+if _co != "normalize_first":
+    set_cond_order(_co)
+print(f"[INTMAPS-COND] transform={_ct} order={_co} anchors={_anc or 'all4'}", flush=True)
+del _ck
+
 model, pca_state = load_model(args.checkpoint, args.model_config, device)
 for p in model.parameters():
     p.requires_grad_(False)
