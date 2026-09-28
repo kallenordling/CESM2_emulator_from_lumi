@@ -33,6 +33,12 @@ GRID="${GRID:-21}"
 # the old default would push a differently-built cond through the model.
 DATA_CONFIG="${DATA_CONFIG:-configs/config_data_ybias_BCprect.yaml}"
 SMOOTH_SIGMA="${SMOOTH_SIGMA:-0,2,2}"
+# "joint" fits a PCA basis and NEEDS n_components_cond; an arm trained with
+# PCA disabled must pass BASIS=none, or joint_basis dies on len(None).
+# With no PCA the perturbation lives in GRID space, so regional attribution
+# is representable for the first time (the 91-95% destruction warning was a
+# property of the PCA bottleneck).
+BASIS="${BASIS:-joint}"
 
 module --force purge
 module use /appl/local/laifs/modules
@@ -49,5 +55,6 @@ singularity exec ${SIF} bash -c "
     cd '${SLURM_SUBMIT_DIR}' && \
     python analysis/nonlinear_emission_interaction/02_interaction_maps.py \
         '${CHECKPOINT}' --year ${YEAR} --integrate-grid ${GRID} --out '${OUT}' \
-        --data-config '${DATA_CONFIG}' --smooth-sigma '${SMOOTH_SIGMA}'
+        --data-config '${DATA_CONFIG}' --smooth-sigma '${SMOOTH_SIGMA}' \
+        --basis '${BASIS}'
 "
