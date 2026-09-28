@@ -39,6 +39,13 @@ SMOOTH_SIGMA="${SMOOTH_SIGMA:-0,2,2}"
 # is representable for the first time (the 91-95% destruction warning was a
 # property of the PCA bottleneck).
 BASIS="${BASIS:-joint}"
+# CO2_SOURCE=1 also computes the SYMMETRIC map d2T/dC(x) dbeta, i.e. CO2 as
+# the spatial field and the aerosol as the scalar. The default spatialises
+# only the aerosol side, which is a choice from the spec -- without this the
+# maps cannot say anything about where the CO2 side of the interaction lives.
+CO2_SOURCE="${CO2_SOURCE:-0}"
+CO2_FLAG=""
+[ "${CO2_SOURCE}" = "1" ] && CO2_FLAG="--co2-source"
 
 module --force purge
 module use /appl/local/laifs/modules
@@ -56,5 +63,5 @@ singularity exec ${SIF} bash -c "
     python analysis/nonlinear_emission_interaction/02_interaction_maps.py \
         '${CHECKPOINT}' --year ${YEAR} --integrate-grid ${GRID} --out '${OUT}' \
         --data-config '${DATA_CONFIG}' --smooth-sigma '${SMOOTH_SIGMA}' \
-        --basis '${BASIS}'
+        --basis '${BASIS}' ${CO2_FLAG}
 "
