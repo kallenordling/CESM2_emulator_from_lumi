@@ -2209,6 +2209,30 @@ def main():
     # uses the same number of EOFs the model was trained with.
     cfg = L.resolve_cfg(OmegaConf.load(args.model_config))
     data_cfg = L.resolve_cfg(OmegaConf.load(args.data_config))
+    _ckpt_peek = torch.load(args.checkpoint, map_location="cpu",
+                            weights_only=False) if args.checkpoint else {}
+    # GUARD: a normalize_last checkpoint is trained with a specific smoothing
+    # sigma and PCA setting that live in the DATA CONFIG, not the checkpoint.
+    # Passing the wrong one (or, as happened 2026-09-29, passing an env var the
+    # launcher does not read, so the DEFAULT config silently applied) evaluates
+    # the model on conditioning it never saw: two 9-hour 25-member evals came
+    # back with r=0.18 and PRECT RMSE 6269 mm/day. Fail loudly instead.
+    _co_ck = _ckpt_peek.get("COND_ORDER") or "normalize_first"
+    if _co_ck == "normalize_last":
+        _sig = data_cfg.get("cond_smooth_sigma", None)
+        _nc = data_cfg.get("n_components_cond", None)
+        _sig = OmegaConf.to_container(_sig, resolve=True) if _sig is not None else None
+        _nc = OmegaConf.to_container(_nc, resolve=True) if _nc is not None else None
+        if _nc is not None or (_sig is not None and len(set(map(float, _sig))) != 1):
+            raise SystemExit(
+                f"[COND-GUARD] checkpoint is cond_order=normalize_last but the data "
+                f"config has cond_smooth_sigma={_sig}, n_components_cond={_nc}. "
+                f"These arms train with a uniform sigma and PCA DISABLED. Pass "
+                f"DATA_CONFIG=configs/config_data_ybias_BCprect_nopca.yaml "
+                f"(note: DATA_CONFIG, not EVAL_DATA_CONFIG)."
+            )
+
+    del _ckpt_peek
     _nc = data_cfg.get("n_components_cond", None)
     N_COMP_COND = OmegaConf.to_container(_nc, resolve=True) if (pca_cond and _nc is not None) else None
     print(f"[PCA] n_components_cond={N_COMP_COND}")
