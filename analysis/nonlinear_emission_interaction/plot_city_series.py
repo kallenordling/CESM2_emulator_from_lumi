@@ -52,11 +52,19 @@ VARS = {
 }
 _ap = argparse.ArgumentParser(description=__doc__)
 _ap.add_argument("--var", default="TREFHT", choices=sorted(VARS))
+_ap.add_argument("--results", default=None,
+                 help="the .npz from dump_city_series.py; default is the "
+                      "per-variable name under results/")
+_ap.add_argument("--outdir", default=None,
+                 help="write figNN.{png,pdf} here instead of into the LIVE "
+                      "paper set at plots/figNN/ and figures/. Use this for "
+                      "any arm that is not the paper checkpoint -- without it "
+                      "this script silently overwrites the paper figures.")
 _args = _ap.parse_args()
 VAR = _args.var
 CFG = VARS[VAR]
 
-RESULT = os.path.join(HERE, "results", CFG["npz"])
+RESULT = _args.results or os.path.join(HERE, "results", CFG["npz"])
 FIGDIR = os.path.join(HERE, "figures")
 # Paper figures follow the repo convention plots/figNN/figNN.{png,pdf}.
 # make_fig5.py and make_fig7.py used to name their outputs fig05-fig08 and
@@ -67,8 +75,12 @@ PAPER = {"timeseries": CFG["figs"][0], "histograms": CFG["figs"][1]}
 
 def outputs(kind, local_stem):
     """Both the working copy and the numbered paper copy."""
-    paths = [os.path.join(FIGDIR, local_stem + ext) for ext in (".png", ".pdf")]
     n = PAPER.get(kind)
+    if _args.outdir:            # an arm that is not the paper checkpoint
+        os.makedirs(_args.outdir, exist_ok=True)
+        stem = n or local_stem
+        return [os.path.join(_args.outdir, stem + ext) for ext in (".png", ".pdf")]
+    paths = [os.path.join(FIGDIR, local_stem + ext) for ext in (".png", ".pdf")]
     if n:
         d = os.path.join(REPO, "plots", n)
         os.makedirs(d, exist_ok=True)

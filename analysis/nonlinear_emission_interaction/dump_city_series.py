@@ -35,6 +35,17 @@ CITIES = [
 ]
 EXPERIMENTS = ["hist", "ssp370", "aaer", "ghg"]
 
+# The member trees are raw CAM output -- TREFHT in K, PRECT in m/s -- while the
+# evaluation NetCDFs are already degC and mm/day. Without this the CESM2 side
+# came out 273.15 too high and ~7.7e7 too large, which is obvious in a global
+# mean but easy to miss in a per-city histogram. Keyed on the file's declared
+# `units`, not on the variable name, and the same table paper_fig_histograms.py
+# uses, so the two figures cannot drift apart.
+TREE_SCALE = {"TREFHT": {"K": 1.0, "degC": 1.0, None: 1.0},
+              "PRECT":  {"m/s": 86400.0 * 1000.0, "mm/day": 1.0, None: 1.0}}
+TREE_OFFSET = {"TREFHT": {"K": -273.15, "degC": 0.0, None: 0.0},
+               "PRECT":  {"m/s": 0.0, "mm/day": 0.0, None: 0.0}}
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument("--eval-dir", required=True)
 ap.add_argument("--var", default="TREFHT")
@@ -86,6 +97,13 @@ def cesm_from_trees(exp, lat, lon180):
             continue
         with xr.open_mfdataset(files, combine="by_coords", decode_times=False) as ds:
             da = ds[args.var]
+            u = da.attrs.get("units")
+            try:
+                scale = TREE_SCALE[args.var][u]
+                offset = TREE_OFFSET[args.var][u]
+            except KeyError:
+                sys.exit(f"[city] {exp} {m}: unhandled units {u!r} for {args.var}"
+                         f" -- refusing to guess")
             tdim = "time" if "time" in da.dims else "year"
             yy = np.asarray(ds[tdim].values).astype(int)
             la_, lo_ = ds["lat"].values, ds["lon"].values
@@ -94,7 +112,8 @@ def cesm_from_trees(exp, lat, lon180):
             for ci, (_, cla, clo) in enumerate(CITIES):
                 i = int(np.argmin(np.abs(la_ - cla)))
                 k = int(np.argmin(np.abs(lo180_ - clo)))
-                row[ci] = np.asarray(da.isel({"lat": i, "lon": k}).values, float)
+                row[ci] = (np.asarray(da.isel({"lat": i, "lon": k}).values, float)
+                           * scale + offset)
             series.append(row)
             years = yy
         print(f"  [city-cesm] {exp} {mi}/{len(members_)} {m}", flush=True)
