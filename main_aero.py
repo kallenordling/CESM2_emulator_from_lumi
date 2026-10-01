@@ -61,46 +61,12 @@ def main(cfg: DictConfig) -> None:
     )
     data_cfg = L.resolve_cfg(OmegaConf.load(data_cfg_path))
 
-    # BC clip mode must be set BEFORE any dataset/cond building (it changes the
-    # percentile anchors of the BC channel normalisation). Default "v1" keeps
-    # existing runs byte-identical; the actual (lo, hi) used is persisted into
-    # checkpoints (COND_NORM) so eval stays consistent per checkpoint.
-    # Read order: trainer.hyperparameters.bc_clip_mode when non-null (CLI
-    # override, e.g. the run2_gainfix.sh fork; the config_aero default is null
-    # precisely so this source stays empty unless explicitly set) → data
-    # config key → "v1".
-    bc_clip_mode = str(
-        OmegaConf.select(cfg, "trainer.hyperparameters.bc_clip_mode")
-        or data_cfg.get("bc_clip_mode", None)
-        or "v1"
-    )
-    # Conditioning transform, same read order and same "set before the
-    # datasets are built" requirement as bc_clip_mode. Changing it changes the
-    # meaning of every cond channel, so it demands a fresh run; the value in
-    # force is persisted per checkpoint as COND_TRANSFORM.
-    cond_transform = str(
-        OmegaConf.select(cfg, "trainer.hyperparameters.cond_transform")
-        or data_cfg.get("cond_transform", None)
-        or "v1"
-    )
-    if cond_transform != "v1":
-        from data import climate_dataset as _cdt
-        # The minmax anchors are taken on the SMOOTHED field, so the fit needs
-        # the same per-channel sigma the dataset will apply.
-        _sig = data_cfg.get("cond_smooth_sigma", None)
-        _vars = data_cfg.get("cond_vars", None)
-        if _sig is not None and _vars is not None:
-            _cdt.set_minmax_smooth_sigma(
-                {str(v): float(s_) for v, s_ in zip(list(_vars), list(_sig))})
-        _cdt.set_cond_transform(cond_transform)
-        if accelerator.is_main_process:
-            logger.info(f"[COND] transform = {cond_transform} "
-                        f"(v1 clips whole countries at +1; see climate_dataset)")
-
-    # Pipeline order. "normalize_last" moves normalise AFTER smoothing and PCA
-    # and refits the anchors on that processed field — see set_cond_order. Same
-    # "before any dataset is built" requirement as cond_transform, and it is
-    # persisted per checkpoint as COND_ORDER so eval reproduces it.
+    # Which reference scenarios the cond min/max anchors are fitted on. Must be
+    # set BEFORE any dataset is built, because the anchors define what every
+    # cond channel means; the value in force is persisted per checkpoint as
+    # COND_ANCHORS so eval reproduces it instead of refitting.
+    # Read order: trainer.hyperparameters (CLI override; the config_aero default
+    # is null precisely so this stays empty unless set) -> data config -> all4.
     anchor_scenarios = str(
         OmegaConf.select(cfg, "trainer.hyperparameters.anchor_scenarios")
         or data_cfg.get("anchor_scenarios", None)
@@ -112,22 +78,19 @@ def main(cfg: DictConfig) -> None:
         if accelerator.is_main_process:
             logger.info(f"[COND] anchor scenarios = {anchor_scenarios}")
 
-    cond_order = str(
-        OmegaConf.select(cfg, "trainer.hyperparameters.cond_order")
-        or data_cfg.get("cond_order", None)
-        or "normalize_first"
-    )
-    if cond_order != "normalize_first":
-        from data import climate_dataset as _cdt2
-        _cdt2.set_cond_order(cond_order)
-        if accelerator.is_main_process:
-            logger.info(f"[COND] pipeline order = {cond_order}")
-
-    if bc_clip_mode != "v1":
-        from data import climate_dataset as _cds
-        _cds.set_bc_clip_mode(bc_clip_mode)
-        if accelerator.is_main_process:
-            logger.info(f"BC clip mode: {bc_clip_mode}")
+    # Keys that selected a conditioning variant removed on 2026-10-01. Silently
+    # ignoring one would train with a pipeline the config does not describe.
+    _retired = [k for k in ("cond_transform", "bc_clip_mode", "cond_order",
+                            "n_components_cond", "n_components_target")
+                if data_cfg.get(k, None) not in (None, "null")
+                or OmegaConf.select(cfg, f"trainer.hyperparameters.{k}")]
+    if _retired:
+        raise SystemExit(
+            f"[COND] config sets {_retired}, which this build no longer has. "
+            f"The conditioning pipeline is now smooth -> min/max normalise, "
+            f"with no clip, no asinh and no PCA. Drop those keys, or check out "
+            f"a commit before the 2026-10-01 cleanup to use them."
+        )
 
     if accelerator.is_main_process:
         logger.info(f"Rank {accelerator.process_index}/{accelerator.num_processes}")
@@ -149,8 +112,6 @@ def main(cfg: DictConfig) -> None:
         seq_len=data_cfg.seq_len,
         target_vars=OmegaConf.to_container(data_cfg.target_vars, resolve=True),
         cond_vars=OmegaConf.to_container(data_cfg.cond_vars, resolve=True),
-        n_components_target=data_cfg.get("n_components_target", None),
-        n_components_cond=data_cfg.get("n_components_cond", None),
         cond_smooth_sigma=data_cfg.get("cond_smooth_sigma", None),
         cond_smooth_method=data_cfg.get("cond_smooth_method", "gaussian"),
         num_workers=4,
@@ -170,8 +131,6 @@ def main(cfg: DictConfig) -> None:
             seq_len=data_cfg.seq_len,
             target_vars=OmegaConf.to_container(data_cfg.target_vars, resolve=True),
             cond_vars=OmegaConf.to_container(data_cfg.cond_vars, resolve=True),
-            n_components_target=data_cfg.get("n_components_target", None),
-            n_components_cond=data_cfg.get("n_components_cond", None),
         cond_smooth_sigma=data_cfg.get("cond_smooth_sigma", None),
         cond_smooth_method=data_cfg.get("cond_smooth_method", "gaussian"),
             num_workers=2,

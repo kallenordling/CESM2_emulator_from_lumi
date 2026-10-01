@@ -2,7 +2,6 @@ import lumi_paths as L
 import os
 import random
 from typing import Any, Optional, Union
-from functools import lru_cache
 
 from omegaconf import OmegaConf
 import torch
@@ -13,8 +12,6 @@ from accelerate import Accelerator
 import matplotlib
 matplotlib.use('Agg')  # non-interactive backend for saving plots
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import QuantileTransformer
-from sklearn.decomposition import PCA
 
 # =============================================================================
 # Target-variable preprocessing / normalisation
@@ -67,8 +64,8 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 # `_only_timefixed.nc` files contain scenario emissions only (no historical
 # baseline), matching what config_data.yaml feeds to training/eval.
 # ssp126 is intentionally excluded: it's the OOD test scenario.
-# The _co2fix set. These four are opened by _get_emissions_minmax() to derive
-# the clip range, so they must exist on any path that does NOT get a range
+# The _co2fix set. These four are opened by _get_processed_minmax() to derive
+# the min/max anchors, so they must exist on any path that does NOT get a range
 # injected from a checkpoint. A FRESH run is exactly that path, which is why
 # naming the pre-co2fix files -- deleted 2026-09-07 -- killed the first asinh
 # launch at the first batch with FileNotFoundError while every RESUMED run kept
@@ -106,10 +103,6 @@ def set_anchor_scenarios(which: str) -> None:
         raise ValueError(f"anchor_scenarios must be all4|hist_ssp370, got {which!r}")
     _ANCHOR_SCENARIOS = which
     _PROCESSED_MINMAX_CACHE = None
-    try:
-        _get_emissions_minmax.cache_clear()
-    except AttributeError:
-        pass
     print(f"[COND] anchor scenarios = {which}")
 
 
@@ -124,81 +117,6 @@ def _anchor_paths():
                 if ("_hist_" in p or "_ssp370_" in p)]
     return list(EMISSIONS_PATHS)
 
-
-# -----------------------------------------------------------------------------
-# Alternative normalisation functions kept for diagnostic scripts only
-# (plot_hist.py, plot_difanos_cond_encoder.py). NOT used by the training path —
-# the active normaliser is `normalize()` below, which uses
-# `_get_emissions_minmax()`.
-# -----------------------------------------------------------------------------
-
-def scale_cumulative_linear(da: xr.DataArray):
-    """Collapse to spatial mean per year, normalize to [-1, 1], broadcast back.
-    Preserves temporal signal perfectly; every grid cell gets the same
-    value per year (the global mean emission level for that year).
-    Best for well-mixed gases like CO2."""
-    spatial_dims = [d for d in da.dims if d not in ("year", "time")]
-    ts = da.mean(dim=spatial_dims)  # [year]
-    lo = float(ts.min(skipna=True))
-    hi = float(ts.max(skipna=True))
-    normed = (2.0 * (ts - lo) / max(hi - lo, 1e-30) - 1.0)
-    return normed.broadcast_like(da).astype("float32")
-
-
-def scale_emis_0_1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.0, floor=1e-30):
-    # TOMCAT emissions: non-negative
-    x = da.clip(min=0)
-    # avoid log(0)
-    x = xr.where(x > 0, x, floor)
-
-    lx = np.log10(x)
-
-    lo = lx.quantile(low_pct/100.0, skipna=True)
-    hi = lx.quantile(high_pct/100.0, skipna=True)
-
-    z = (lx - lo) / (hi - lo)
-    return z.fillna(0).astype("float32")
-
-def scale_emis_m1_p1_log10(da: xr.DataArray, low_pct=1.0, high_pct=99.99999999, floor=1e-30):
-    z01 = scale_emis_0_1_log10(da, low_pct, high_pct, floor)
-    return (2.0 * z01 - 1.0).astype("float32")
-
-
-def scale_quantile_transform(da: xr.DataArray, n_quantiles=1000, floor=1e-30):
-    """sklearn QuantileTransformer: rank-based normalization to [-1, 1]."""
-    shape = da.shape
-    vals = da.values.copy()
-
-    real_mask = vals
-
-    if real_mask.sum() == 0:
-        return xr.DataArray(
-            np.full(shape, -1.0, dtype=np.float32),
-            dims=da.dims, coords=da.coords,
-        )
-
-    real_vals = vals[real_mask].reshape(-1, 1)
-
-    qt = QuantileTransformer(
-        n_quantiles=min(n_quantiles, len(real_vals)),
-        output_distribution='uniform',
-        random_state=42,
-    )
-    qt.fit(real_vals)
-
-    transformed = np.full(shape, -1.0, dtype=np.float32)
-    transformed[real_mask] = (
-        2.0 * qt.transform(vals[real_mask].reshape(-1, 1)).ravel() - 1.0
-    )
-    del vals, real_vals
-
-    return xr.DataArray(
-        transformed, dims=da.dims, coords=da.coords,
-    ).astype("float32")
-
-# ---------------------------------------------------------------------------
-# PCA denoising helpers
-# ---------------------------------------------------------------------------
 
 def smooth_cond_spatial(arr, sigmas, method="gaussian", var_names=None):
     """Per-channel spatial smoothing of cond fields, shape (n_vars, T, H, W).
@@ -236,109 +154,6 @@ def smooth_cond_spatial(arr, sigmas, method="gaussian", var_names=None):
     return arr
 
 
-def fit_pca_denoise(
-    data: np.ndarray,
-    n_components: int,
-    var_name: str = "",
-) -> tuple[np.ndarray, PCA]:
-    T, H, W = data.shape
-    flat = data.reshape(T, H * W).astype(np.float64)  # PCA needs float64
-
-    # Guard: constant field (e.g. SUL=0 in GHG-only scenario) has zero
-    # variance — sklearn PCA divides by singular values → NaN in components.
-    # Return the channel unchanged and fit a 1-component PCA just to produce
-    # a valid object that apply_pca_denoise can use without crashing.
-    if flat.std() < 1e-8:
-        pca = PCA(n_components=1, whiten=False).fit(flat)
-        return data.astype(np.float32), pca
-
-    n_components = min(n_components, T, H * W)
-    pca = PCA(n_components=n_components, whiten=False)
-    scores = pca.fit_transform(flat)           # (T, n_components)
-    del flat                                   # free before inverse_transform
-    recon = pca.inverse_transform(scores)      # (T, H*W)
-    del scores
-
-    result = recon.reshape(T, H, W).astype(np.float32)
-    del recon
-    return result, pca
-
-
-def apply_pca_denoise(data: np.ndarray, pca: PCA) -> np.ndarray:
-    """Project new data through an already-fitted PCA and reconstruct."""
-    T, H, W = data.shape
-    flat = data.reshape(T, H * W).astype(np.float64)
-    scores = pca.transform(flat)
-    del flat
-    recon = pca.inverse_transform(scores)
-    del scores
-    result = recon.reshape(T, H, W).astype(np.float32)
-    del recon
-    return result
-
-
-def pca_denoise_dataset(
-    tensor: torch.Tensor,           # (n_vars, T, H, W)
-    n_components: Union[int, list[int]],
-    var_names: Optional[list] = None,
-    pca_objects: Optional[list] = None,
-) -> tuple[torch.Tensor, list[PCA]]:
-    """Apply PCA denoising to every variable channel of a tensor.
-
-    If ``pca_objects`` is ``None`` the PCA is *fitted* on this data (use for
-    the first realization / training time).  Otherwise the supplied fitted
-    PCAs are *applied* without refitting (use for subsequent realizations and
-    at generation time).
-
-    Args:
-        tensor:       Shape ``(n_vars, T, H, W)``.
-        n_components: Components to retain when fitting.  Pass a single ``int``
-                      to use the same count for every channel, or a ``list``
-                      of ints (one per channel) for per-channel control.
-                      e.g. ``[10, 40]`` keeps 10 EOFs for CO2 and 40 for SO2.
-                      Only used when ``pca_objects`` is ``None``.
-        var_names:    Optional list of variable names for diagnostic prints.
-        pca_objects:  Pre-fitted PCA objects or ``None``.
-
-    Returns:
-        denoised_tensor: Same shape as input.
-        pca_objects:     List of fitted :class:`PCA` objects (one per var).
-    """
-    n_vars = tensor.shape[0]
-    var_names = var_names or [str(i) for i in range(n_vars)]
-
-    # Normalise to a per-channel list
-    if isinstance(n_components, int):
-        n_components_list = [n_components] * n_vars
-    else:
-        if len(n_components) != n_vars:
-            raise ValueError(
-                f"n_components has {len(n_components)} entries but tensor has "
-                f"{n_vars} channels.  Supply one value per channel or a single int."
-            )
-        n_components_list = list(n_components)
-
-    np_data = tensor.numpy()
-    denoised = np.empty_like(np_data)
-    fitted_pcas: list[PCA] = []
-
-    for v in range(n_vars):
-        channel = np_data[v]  # (T, H, W) — view, no copy
-        if pca_objects is None:
-            recon, pca = fit_pca_denoise(channel, n_components_list[v], var_names[v])
-            fitted_pcas.append(pca)
-        else:
-            recon = apply_pca_denoise(channel, pca_objects[v])
-            fitted_pcas.append(pca_objects[v])
-        denoised[v] = recon
-        del recon
-
-    del np_data
-    result = torch.from_numpy(denoised)
-    del denoised
-    return result, fitted_pcas
-
-
 # ---------------------------------------------------------------------------
 
 
@@ -346,344 +161,41 @@ def pca_denoise_dataset(
 # Active cond-normalisation path (used by the training pipeline)
 # =============================================================================
 
-# Per-channel clip percentiles (lo, hi) for the normalize() linear map.
-# CO2 and SUL are both heavy-tailed (rare hotspots), so the top anchor sets how
-# much the populated, signal-carrying gridpoints get compressed toward -1:
-#   - CO2 → (1, 99): wide top so high-emission futures (ssp370/ssp126) don't
-#     saturate at +1 (the af8bfcf fix; see cond_normalization_diag).
-#   - SUL → (5, 95): tighter top restores ~10× more usable aerosol contrast.
-#     Under (1, 99) the inhabited SUL field flattens onto the -1 floor (nonzero
-#     p90 → -0.94 vs -0.04 at 5-95), starving the aerosol-only (aaer) signal and
-#     making its response spiky/unstable. SUL gains nothing from the wider range.
-# Splitting the percentile per channel resolves that CO2-vs-SUL conflict.
-#   - BC → (5, 95): heavy-tailed combustion emissions, same hotspot geography as
-#     SO2. SUL's 5-95 reasoning applies identically; do NOT use CO2's (1, 99).
-_CLIP_PCTL = {"CO2": (1, 99), "SUL": (5, 95), "SO2": (5, 95), "sul": (5, 95),
-              "BC": (5, 95)}
-
-# ── BC clip mode ─────────────────────────────────────────────────────────────
-# "v1"        — percentiles over ALL gridpoints, zeros included (5, 95). Under
-#               this the populated BC field is semi-flattened: populated p50
-#               normalizes to -0.996 and the temporal global-mean swing is ~3×
-#               smaller than SUL's (BC is even more hotspot-concentrated than
-#               SO2, so SUL's percentile choice doesn't transfer).
-# "populated" — hi anchor from the POSITIVE values only, (5, 90). The populated
-#               p90 (~1.36e-8, ≈½ the v1 anchor) trades ~11% of populated
-#               hotspot cores clipping at +1 (SUL saturates 6.3%) for MEASURED
-#               temporal-contrast gains of +16% (hist gmean swing 0.159→0.184)
-#               and +59% (ssp370, 0.054→0.086). NOTE: no linear anchor can
-#               reach SUL-like contrast (0.47) — an anchor low enough to lift the
-#               mid-range clips the fastest-growing hotspot cells and deletes
-#               their temporal signal (empirical scan 2026-07-03: best possible
-#               hist swing ≈0.22 at 15% clipped). A real fix needs a nonlinear
-#               transform, and log-scaling cond previously FAILED (see
-#               feedback_log_normalization) — do not retry it casually.
-# Changing the mode changes the meaning of the BC channel → fresh training
-# required. The (lo, hi) actually used in training is persisted in the
-# checkpoint under "COND_NORM" and re-injected at eval via
-# set_minmax_override(), so old checkpoints keep evaluating with v1 no matter
-# what this module's default is. Select via `bc_clip_mode` in the data config.
-# ── Conditioning transform ───────────────────────────────────────────────────
-# "v1"    — the affine map below: (2v/hi - 1), clipped. hi is a percentile of
-#           the field. MEASURED 2026-09-08 on the raw field, at the point where
-#           the clip actually happens (normalize runs BEFORE the gaussian
-#           smoothing, which then hides the plateau):
+# The conditioning pipeline, in full:
 #
-#             BC   E China 100.0% of years pinned at +1, India 100.0%,
-#                  E US 96.8%, Europe 85.7%
-#             SUL  E US 99.2%, Europe 82.5%, E China 74.1%
-#             CO2  Europe 54.6%, E US 50.6%, E China 42.2%
+#     cond_file -> gaussian smooth (cond_smooth_sigma) -> min/max normalise
 #
-#           So the industrial history of the largest BC sources is not
-#           compressed, it is destroyed before the model sees it. No LINEAR
-#           anchor fixes this: a full sweep over the record showed lowering hi
-#           raises global span and global spatial contrast together while
-#           pushing Europe from 55% to 88% pinned -- the gain comes from
-#           Central Africa, which barely emits.
+# ONE transform, no clip, no PCA. The anchors are the true min and max of the
+# SMOOTHED reference field, so +1 is the largest cell that exists in training
+# and nothing can leave [-1, +1] without a clip. Fitted on hist+ssp370 only
+# (anchor_scenarios): ghg holds SUL/BC at ~0 and aaer holds CO2 near
+# pre-industrial, so pooling all four drags each channel's anchor toward a
+# scenario that does not drive it.
 #
-# "asinh" — v -> asinh(v/s), rescaled so p99.5 of the POSITIVE cells maps to
-#           +1. Linear for v << s and logarithmic above, so the heavy tail is
-#           compressed instead of clipped, and 0 still maps to -1. Measured on
-#           the same record: BC worst-site pinning 100% -> 51% and span
-#           13.5% -> 24%; CO2 55% -> 30% and 11.9% -> 47%.
+# WHY THIS AND NOT THE ALTERNATIVES (all measured, all removed 2026-10-01):
+#   percentile + clip ("v1")  pinned whole countries at +1 -- E China BC was
+#       100% of years saturated -- destroying their industrial history before
+#       the model saw it, and produced grid-scale speckle in the output.
+#   asinh                     compressed the tail but amplified near-zero
+#       cells, leaking attribution onto oceans.
+#   minmax + asinh stretch    fixed the bulk-contrast cost but retained only
+#       20% of the late Asian rise against truth's 71%; the linear map keeps
+#       70%, which is why this one won.
 #
-#           NOT log. Log-scaling the cond was tried and made the model worse
-#           (see the feedback note); it compresses the top of the tail, which
-#           is where these emitters live, and it has no linear region so the
-#           near-zero majority of cells is stretched instead.
-#
-#           A rank/quantile transform scores better on every static metric
-#           (0% pinned, span 33-70%) but uniformises by frequency, so shipping
-#           lanes end up as prominent as industrial regions and the amplitude
-#           ordering the physics depends on is erased. Rejected for that reason,
-#           not for the numbers.
-#
-# Changing this changes the meaning of every cond channel -> FRESH TRAINING.
-# The mode in force is persisted per checkpoint as COND_TRANSFORM and
-# re-injected at eval, exactly as COND_NORM is.
-_COND_TRANSFORM = "v1"
-_ASINH_TOP_PCTL = 99.9
-# "minmax_asinh": min/max anchors (so +1 IS the largest cell and nothing can
-# exceed the range) with a concave stretch instead of a straight line, so the
-# bulk is not crushed onto the floor. Measured on the sigma-4 smoothed field,
-# the linear minmax map leaves ~86% of EMITTING cells within 0.06 of -1 because
-# the largest cell is ~23x the 99th percentile. s sets where the map turns over:
-# linear for u << s, logarithmic above.
-# s=0.001 chosen by sweep on the sigma-4 smoothed hist+ssp370 field, % of
-# EMITTING cells stranded within 0.06 of -1 / median emitting cell:
-#   linear   CO2 91.3% -0.999 | SUL 86.2% -0.995 | BC 85.6% -0.996
-#   s=0.005  CO2 58.6% -0.968 | SUL 29.4% -0.845 | BC 37.9% -0.867
-#   s=0.001  CO2 39.0% -0.878 | SUL  2.0% -0.576 | BC 12.1% -0.614   <- used
-#   s=0.0002 CO2 16.7% -0.650 | SUL  0.0% -0.309 | BC  0.0% -0.344
-# Smaller s keeps stretching but approaches a log map near zero, which has no
-# linear region and spreads near-zero ocean cells across the range -- the
-# documented way log normalisation made this model worse. NOT exposed as an env
-# knob on purpose: it is part of the transform's meaning, and eval reads only
-# COND_TRANSFORM from the checkpoint, so a differing s at eval would be silent.
-_MINMAX_ASINH_S = 0.001      # positive-cell percentile that maps to +1
-# 99.5 -> 99.9 on 2026-09-10, measured by scripts/sweep_asinh_cond_params.py
-# as the share of a region's emission MASS the ceiling flattens (ssp370, 2100).
-# At p99.5:  SUL E China 77%, India 81%, Arabia 19%;  BC India 63%, Arabia 32%.
-# At p99.9:  SUL E China 28%, India 50%, Arabia  0%;  BC India  6%, Arabia  5%.
-# Costs ~8% of global spatial contrast and ~9% of temporal span. The Arabian
-# Peninsula is the reason to care beyond the top emitters: under v1 it sits on
-# the same +1 plateau as E China (98% of its mass pinned) despite emitting far
-# less, which is a candidate explanation for it showing up as a source in the
-# nonlinear-term attribution.
-_ASINH_SCALE_FRAC = 0.10    # s = this fraction of the positive-cell median
-
-_BC_CLIP_MODE = "v1"
-_BC_POPULATED_PCTL = (5, 90)
-_MINMAX_OVERRIDE = None
-
-
-# A PER-CHANNEL spec is also accepted, e.g. "CO2=v1,SUL=asinh,BC=asinh".
-# The channels do not have the same defect: CO2 is CUMULATIVE, so its field
-# grows monotonically and asinh's ceiling saturates it harder every decade,
-# while SUL and BC are per-year and their saturation FALLS through the century.
-# Keeping CO2 on v1 therefore leaves the channel exactly as the precip-bc
-# branch (and every shipped checkpoint) had it, and confines the new transform
-# to the two channels it helps.
-_TRANSFORM_MODES = ("v1", "asinh", "minmax", "v1_noclip", "minmax_asinh")
-
-# "v1_noclip" — v1 EXACTLY, same percentile anchors (CO2 1-99, SUL/BC 5-95, BC
-# honouring bc_clip_mode), with the clip removed. The paper checkpoint's
-# normalisation minus the one step that saturates. Everything above the anchor
-# keeps growing linearly past +1, unbounded: measured on the training files the
-# largest cells go to roughly +1300 for CO2 (not smoothed) and a few hundred for
-# SUL and BC after smoothing, against a bulk that stays in [-1, 1].
-
-# "minmax" — v1's LINEAR map with no clip: lo = the minimum and hi = the maximum
-# of the SMOOTHED field over the training cond files, so nothing reaches past
-# +1 and nothing saturates. v1 anchors hi at a percentile and clips, which pins
-# whole countries; asinh compresses the tail but amplifies near-zero cells.
-#
-# The anchors come from the SMOOTHED field because smoothing is linear and so
-# commutes with this map: normalising then smoothing yields exactly the field
-# that smoothing then normalising would, PROVIDED hi is taken after smoothing.
-# Taken from the raw field instead, a single unsmoothed hotspot sets the
-# ceiling and the smoothed field never gets near +1 (SUL raw max is ~60x the
-# smoothed one). That is why the pipeline order can stay normalise -> smooth
-# -> PCA for training and eval alike.
-#
-# The cost is the reverse of v1's problem: with the ceiling at the single
-# hottest cell, the bulk of emitting cells sits close to -1.
-_MINMAX_SMOOTH_SIGMA = {"CO2": 0.0, "SUL": 2.0, "SO2": 2.0, "sul": 2.0, "BC": 2.0}
-
-
-def set_minmax_smooth_sigma(sigmas: dict) -> None:
-    """Channel -> gaussian sigma used to take the minmax anchors.
-
-    Must match cond_smooth_sigma, or the anchors describe a different field
-    from the one the model is fed.
-    """
-    _MINMAX_SMOOTH_SIGMA.update({k: float(v) for k, v in sigmas.items()})
-    _get_emissions_minmax.cache_clear()
-
-
-def _smooth_for_fit(arr: np.ndarray, sigma: float) -> np.ndarray:
-    """Same filter and boundaries as smooth_cond_spatial: lon wraps, lat reflects."""
-    if sigma <= 0:
-        return arr
-    from scipy.ndimage import gaussian_filter1d
-    out = gaussian_filter1d(arr, sigma=sigma, axis=-1, mode="wrap")
-    return gaussian_filter1d(out, sigma=sigma, axis=-2, mode="reflect")
-
-# Named specs. Hydra's override grammar rejects a value containing "=" and ","
-# unless it is quoted all the way through the shell, the sbatch --export list
-# and accelerate -- job 21896489 died on
-# `cond_transform=CO2=v1,SUL=asinh,BC=asinh` with "mismatched input '='" before
-# it trained a step. An alias has no special characters, so it survives every
-# layer. The general spec still works for a direct call.
-_TRANSFORM_ALIASES = {
-    "asinh_aero": {"CO2": "v1", "SUL": "asinh", "BC": "asinh"},
-}
-
-
-def _parse_cond_transform(spec: str) -> "str | dict":
-    """"v1" | "asinh" | "CO2=v1,SUL=asinh,BC=asinh" -> mode or per-var dict."""
-    spec = str(spec).strip()
-    if spec in _TRANSFORM_MODES:
-        return spec
-    if spec in _TRANSFORM_ALIASES:
-        return dict(_TRANSFORM_ALIASES[spec])
-    if "=" not in spec:
-        raise ValueError(
-            f"unknown cond_transform {spec!r} (expected 'v1', 'asinh', or a "
-            f"per-channel spec like 'CO2=v1,SUL=asinh,BC=asinh', or one "
-            f"of the aliases {tuple(_TRANSFORM_ALIASES)})")
-    out = {}
-    for item in spec.split(","):
-        var, _, mode = item.partition("=")
-        var, mode = var.strip(), mode.strip()
-        if mode not in _TRANSFORM_MODES:
-            raise ValueError(
-                f"cond_transform {spec!r}: channel {var!r} has unknown mode "
-                f"{mode!r} (expected one of {_TRANSFORM_MODES})")
-        out[var] = mode
-    return out
-
-
-def set_cond_transform(mode: str) -> None:
-    """Select the conditioning transform BEFORE datasets build.
-
-    Accepts "v1", "asinh", the alias "asinh_aero" (CO2 on v1, SUL and BC on
-    asinh), or a per-channel spec ("CO2=v1,SUL=asinh,BC=asinh"). A channel the
-    spec does not name falls back to "v1". Prefer the alias from a launcher:
-    Hydra cannot parse the punctuation in the general spec.
-    """
-    global _COND_TRANSFORM
-    _parse_cond_transform(mode)          # validate before mutating
-    _COND_TRANSFORM = str(mode).strip()
-    _get_emissions_minmax.cache_clear()
-
-
-def transform_for(var: str) -> str:
-    """The transform in force for one cond channel."""
-    parsed = _parse_cond_transform(_COND_TRANSFORM)
-    if isinstance(parsed, str):
-        return parsed
-    return parsed.get(var, "v1")
-
-
-def get_active_cond_transform() -> str:
-    """The spec string, as persisted to checkpoints under COND_TRANSFORM."""
-    return _COND_TRANSFORM
-
-
-def set_bc_clip_mode(mode: str) -> None:
-    """Select the BC clip mode ("v1" | "populated") BEFORE datasets are built."""
-    global _BC_CLIP_MODE
-    if mode not in ("v1", "populated"):
-        raise ValueError(f"unknown bc_clip_mode {mode!r} (expected 'v1' or 'populated')")
-    _BC_CLIP_MODE = mode
-    _get_emissions_minmax.cache_clear()
-
-
-def set_minmax_override(minmax: "dict | None") -> None:
-    """Inject checkpoint-persisted per-channel (lo, hi) clip ranges.
-
-    Overrides the recomputed percentiles entirely so eval/resume normalizes
-    cond exactly as the loaded checkpoint's training run did. Pass None to
-    CLEAR a previously set override (a process loading a second checkpoint
-    without COND_NORM must not inherit the first one's ranges).
-    """
-    global _MINMAX_OVERRIDE
-    if minmax is None:
-        _MINMAX_OVERRIDE = None
-    else:
-        _MINMAX_OVERRIDE = {k: (float(v[0]), float(v[1]))
-                            for k, v in minmax.items()}
-    _get_emissions_minmax.cache_clear()
-
-
-def get_active_minmax() -> dict:
-    """The per-channel (lo, hi) currently in effect — persisted to checkpoints."""
-    return dict(_get_emissions_minmax())
-
-
-@lru_cache(maxsize=1)
-def _get_emissions_minmax():
-    """Compute the per-channel clip percentile range across reference scenarios.
-
-    Cached: opens the EMISSIONS_PATHS NetCDFs once per process. The returned
-    (lo, hi) per variable defines the linear mapping in `normalize()`:
-    lo → -1, hi → +1, values outside are clipped to [-1, +1]. Percentiles are
-    per-channel via _CLIP_PCTL (CO2 1-99, SUL 5-95); BC honours _BC_CLIP_MODE.
-    A checkpoint-injected override (set_minmax_override) short-circuits the
-    computation entirely.
-    """
-    if _MINMAX_OVERRIDE is not None:
-        return _MINMAX_OVERRIDE
-    all_vals = {}  # var -> list of flat arrays
-    for path in _anchor_paths():
-        ds_emis = xr.open_dataset(path)
-        for var in ["CO2", "SO2", "SUL", "sul", "BC"]:
-            if var not in ds_emis.data_vars:
-                continue
-            vals = ds_emis[var].values
-            if transform_for(var) == "minmax":
-                vals = _smooth_for_fit(np.asarray(vals, dtype=np.float64),
-                                       _MINMAX_SMOOTH_SIGMA.get(var, 0.0))
-            all_vals.setdefault(var, []).append(np.asarray(vals).flatten())
-        ds_emis.close()
-    combined = {}
-    for var, arrays in all_vals.items():
-        flat = np.concatenate(arrays)
-        if transform_for(var) == "minmax":
-            finite = flat[np.isfinite(flat)]
-            combined[var] = (float(finite.min()), float(finite.max()))
-            print(f"[COND] minmax anchors for {var} (smoothed, sigma="
-                  f"{_MINMAX_SMOOTH_SIGMA.get(var, 0.0)}): "
-                  f"lo={combined[var][0]:.4e} hi={combined[var][1]:.4e}")
-            continue
-        if transform_for(var) == "asinh":
-            # (s, top). Both from the POSITIVE cells: the field is majority
-            # zero (ocean), so an all-cell percentile lands far below the
-            # emitting distribution -- the original defect.
-            posv = flat[flat > 0]
-            if posv.size == 0:
-                raise ValueError(f"cond_transform=asinh: {var} is all zero/NaN")
-            combined[var] = (float(np.percentile(posv, 50)) * _ASINH_SCALE_FRAC,
-                             float(np.percentile(posv, _ASINH_TOP_PCTL)))
-            continue
-        # v1 and v1_noclip share these percentile anchors; they differ only in
-        # whether normalize() clips.
-        if var == "BC" and _BC_CLIP_MODE == "populated":
-            flat = flat[flat > 0]
-            if flat.size == 0:
-                raise ValueError(
-                    "bc_clip_mode=populated: no positive BC values found in "
-                    "EMISSIONS_PATHS — the BC field is all zeros/NaN "
-                    "(corrupt or mis-staged cond files?)."
-                )
-            plo, phi = _BC_POPULATED_PCTL
-        else:
-            plo, phi = _CLIP_PCTL.get(var, (1, 99))
-        combined[var] = (float(np.percentile(flat, plo)), float(np.percentile(flat, phi)))
-    return combined
-
-
-# ── Pipeline order (2026-09-23) ──────────────────────────────────────────────
-# "normalize_first" (default, every shipped checkpoint): cond_file -> normalize
-#   -> smooth -> PCA. The clip therefore acts on RAW inventory values.
-# "normalize_last": cond_file -> smooth -> PCA -> normalize, with the anchors
-#   REFIT on the smoothed+PCA'd field.
-#
-# THE REFIT IS THE WHOLE POINT. Smoothing is linear, PCA with mean removal is
-# linear, and an unclipped affine normalise commutes with both, so reordering
-# alone is a mathematical no-op -- verified to 2e-13 on the real cond files.
-# What changes is the anchor: measured on ssp370, refitting drops CO2's peak
-# from 34.4 to 23.0 and SUL's from 383.7 to 115.4 in model units, because the
-# anchors then describe the field the network actually receives instead of the
-# raw point-source inventory.
-_COND_ORDER = "normalize_first"
+# The anchors in force are persisted per checkpoint as COND_PROCESSED_NORM and
+# re-injected at eval, so an eval reproduces training exactly instead of
+# refitting and trusting the two to agree.
 _PROCESSED_MINMAX_CACHE: "dict | None" = None
 _PROCESSED_OVERRIDE: "dict | None" = None
 
 
 def set_processed_minmax_override(anchors: "dict | None") -> None:
-    """Inject checkpoint-persisted processed anchors (see COND_PROCESSED_NORM)."""
+    """Inject checkpoint-persisted anchors (see COND_PROCESSED_NORM).
+
+    Pass None to CLEAR: a process loading a second checkpoint must not inherit
+    the first one's anchors. Refitting instead of injecting is what let the
+    first normalize_last evals normalise SUL ~6x off in silence.
+    """
     global _PROCESSED_OVERRIDE, _PROCESSED_MINMAX_CACHE
     _PROCESSED_OVERRIDE = (None if anchors is None else
                            {str(k): (float(v[0]), float(v[1])) for k, v in anchors.items()})
@@ -691,39 +203,26 @@ def set_processed_minmax_override(anchors: "dict | None") -> None:
 
 
 def get_processed_minmax_state() -> "dict | None":
-    """The processed anchors actually in force, for persisting."""
+    """The anchors actually in force, for persisting to a checkpoint."""
     return _PROCESSED_MINMAX_CACHE
 
 
-def set_cond_order(order: str) -> None:
-    global _COND_ORDER, _PROCESSED_MINMAX_CACHE
-    order = str(order).lower()
-    if order not in ("normalize_first", "normalize_last"):
-        raise ValueError(f"cond_order must be normalize_first|normalize_last, got {order!r}")
-    _COND_ORDER = order
-    _PROCESSED_MINMAX_CACHE = None
-    print(f"[COND] pipeline order = {order}")
-
-
-def get_cond_order() -> str:
-    return _COND_ORDER
-
-
-def _get_processed_minmax(sigmas, n_components, var_names):
-    """Anchors fitted on the SMOOTHED + PCA'd reference fields.
+def _get_processed_minmax(sigmas, var_names):
+    """Min/max anchors fitted on the SMOOTHED reference fields.
 
     Mirrors the real pipeline: per reference scenario, smooth each channel with
-    its own sigma, fit that scenario's own PCA (the training code fits one PCA
-    per scenario), reconstruct, then pool across scenarios and take the same
-    per-channel percentiles normalize() would have used on raw values.
+    its own sigma, then pool across scenarios and take the true min and max.
+
+    The anchors MUST come from the smoothed field. Smoothing is linear and so
+    commutes with this affine map, but only if hi is taken after smoothing;
+    taken from the raw field a single unsmoothed hotspot sets the ceiling and
+    the smoothed field never approaches +1 (SUL's raw max is ~60x its smoothed
+    one).
     """
     global _PROCESSED_MINMAX_CACHE
     if _PROCESSED_MINMAX_CACHE is not None:
         return _PROCESSED_MINMAX_CACHE
     if _PROCESSED_OVERRIDE is not None:
-        # Injected from a checkpoint: reuse the EXACT anchors training used
-        # rather than refitting and trusting the two to agree. Refitting is
-        # what let the first normlast evals normalise SUL ~6x off in silence.
         print(f"[COND] processed anchors from checkpoint: {_PROCESSED_OVERRIDE}")
         _PROCESSED_MINMAX_CACHE = _PROCESSED_OVERRIDE
         return _PROCESSED_MINMAX_CACHE
@@ -737,10 +236,6 @@ def _get_processed_minmax(sigmas, n_components, var_names):
             sig = float(sigmas[v_idx]) if sigmas is not None else 0.0
             if sig > 0:
                 arr = smooth_cond_spatial(arr[None], [sig], "gaussian", [var])[0]
-            nc = n_components[v_idx] if n_components is not None else None
-            if nc:
-                arr, _ = fit_pca_denoise(arr.astype(np.float32), int(nc), var)
-                arr = np.asarray(arr, dtype=np.float64)
             pooled[var].append(arr.ravel())
         ds_emis.close()
     out = {}
@@ -750,114 +245,44 @@ def _get_processed_minmax(sigmas, n_components, var_names):
         flat = np.concatenate(arrays)
         flat = flat[np.isfinite(flat)]
         sig_v = sigmas[var_names.index(var)] if sigmas else 0
-        if transform_for(var) in ("minmax", "minmax_asinh"):
-            # TRUE min/max of the processed field: +1 is then the largest cell
-            # that exists, so nothing can exceed [-1, +1] -- bounded WITHOUT a
-            # clip and with nothing pinned. The cost is bulk contrast, since the
-            # range is set by the single most extreme cell; smoothing first is
-            # what makes that affordable (sigma 4 cuts CO2's peak ~12x).
-            out[var] = (float(flat.min()), float(flat.max()))
-            print(f"[COND] processed anchors for {var} (sigma={sig_v}, MIN-MAX): "
-                  f"lo={out[var][0]:.4e} hi={out[var][1]:.4e}")
-            continue
-        plo, phi = _CLIP_PCTL.get(var, (1, 99))
-        out[var] = (float(np.percentile(flat, plo)), float(np.percentile(flat, phi)))
-        print(f"[COND] processed anchors for {var} (sigma={sig_v}, p{plo}-p{phi}): "
+        out[var] = (float(flat.min()), float(flat.max()))
+        print(f"[COND] processed anchors for {var} (sigma={sig_v}, MIN-MAX): "
               f"lo={out[var][0]:.4e} hi={out[var][1]:.4e}")
     _PROCESSED_MINMAX_CACHE = out
     return out
 
 
-def normalize_tensor_cond(tensor, var_names, sigmas, n_components):
-    """Apply the cond transform to an ALREADY smoothed + PCA'd tensor.
-
-    Only the affine transforms are supported here. v1's clip is deliberately
-    refused: clipping after PCA would clip a RECONSTRUCTION, which is a
-    different operation from clipping the inventory, and no shipped checkpoint
-    means that. Use normalize_first for anything that clips.
-    """
-    anchors = _get_processed_minmax(sigmas, n_components, var_names)
+def normalize_tensor_cond(tensor, var_names, sigmas):
+    """Min/max normalise an ALREADY smoothed cond tensor to [-1, +1]."""
+    anchors = _get_processed_minmax(sigmas, var_names)
     out = tensor.clone()
     for v_idx, var in enumerate(var_names):
-        mode = transform_for(var)
-        if mode not in ("v1_noclip", "minmax", "minmax_asinh"):
-            raise ValueError(
-                f"cond_order=normalize_last supports v1_noclip/minmax only; "
-                f"{var} asks for {mode!r}. Clipping or asinh after PCA is a "
-                f"different operation from doing it on the inventory."
-            )
         lo_, hi_ = anchors[var]
         if hi_ <= lo_:
             out[v_idx] = -1.0
             continue
-        if mode == "minmax_asinh":
-            u = ((tensor[v_idx] - lo_) / (hi_ - lo_)).clamp(min=0.0)
-            denom = float(np.arcsinh(1.0 / _MINMAX_ASINH_S))
-            out[v_idx] = 2.0 * torch.asinh(u / _MINMAX_ASINH_S) / denom - 1.0
-            print(f"[COND] normalize_last {var} (minmax_asinh s={_MINMAX_ASINH_S}): "
-                  f"lo={lo_:.4e} hi={hi_:.4e} -> range "
-                  f"[{float(out[v_idx].min()):.2f}, {float(out[v_idx].max()):.2f}]")
-            continue
         mid = (lo_ + hi_) / 2.0
         half = (hi_ - lo_) / 2.0
         out[v_idx] = (tensor[v_idx] - mid) / half
-        print(f"[COND] normalize_last {var}: lo={lo_:.4e} hi={hi_:.4e} "
+        print(f"[COND] cond {var}: lo={lo_:.4e} hi={hi_:.4e} "
               f"-> range [{float(out[v_idx].min()):.2f}, {float(out[v_idx].max()):.2f}]")
     return torch.nan_to_num(out, nan=-1.0)
 
 
 def normalize(ds: xr.DataArray) -> xr.DataArray:
-    """Normalise a DataArray for model input.
+    """Normalise a TARGET DataArray (TREFHT, PRECT) via the fixed NORM_FN maps.
 
-    CO2 and SUL: min-max scaling derived from the 1st–99th percentile of the
-    reference scenarios in EMISSIONS_PATHS (hist + ssp370 + aaer + ghg; ssp126
-    excluded as OOD test). Percentile lo → -1, hi → +1; out-of-range values
-    are clipped. This preserves spatial structure while preventing extreme
-    hotspot gridpoints from dominating the range.
-
-    Other variables (e.g. TREFHT, pr): use the fixed lambdas in NORM_FN.
+    Conditioning channels do NOT pass through here: they are smoothed first and
+    normalised as a tensor by normalize_tensor_cond().
     """
-    if ds.name in ["CO2", "SUL", "BC"]:
-        minmax = _get_emissions_minmax()
-
-        if transform_for(ds.name) == "minmax":
-            # Linear, lo -> -1, hi -> +1, and deliberately NOT clipped: the
-            # anchors already span the training data, so a value past +1 is
-            # an out-of-distribution scenario exceeding the training maximum,
-            # and clipping it would hide exactly that.
-            lo_, hi_ = minmax[ds.name]
-            if hi_ <= lo_:
-                return xr.zeros_like(ds).fillna(-1)
-            return (2.0 * (ds - lo_) / (hi_ - lo_) - 1.0).fillna(-1)
-
-        if transform_for(ds.name) == "asinh":
-            # asinh(v/s) / asinh(top/s), mapped to [-1, 1]. Linear while
-            # v << s, logarithmic above, 0 -> -1 as in v1. The clip still
-            # exists but now bites only above p99.5 of the emitting cells
-            # instead of across whole countries.
-            s_, top = minmax[ds.name]
-            if s_ <= 0 or top <= 0:
-                return xr.zeros_like(ds).clip(-1, 1).fillna(-1)
-            denom = float(np.arcsinh(top / s_))
-            z = xr.apply_ufunc(np.arcsinh, ds / s_, dask="parallelized",
-                               output_dtypes=[ds.dtype])
-            return (2.0 * z / denom - 1.0).clip(-1, 1).fillna(-1)
-
-        min_val, max_val = minmax[ds.name]
-
-        range_val = max_val - min_val
-        if transform_for(ds.name) == "v1_noclip":
-            if range_val == 0:
-                return xr.zeros_like(ds).fillna(-1)
-            mean_val = (min_val + max_val) / 2
-            return ((ds - mean_val) / (range_val / 2)).fillna(-1)   # deliberately NOT clipped
-        if range_val == 0:
-            return xr.zeros_like(ds).clip(-1, 1).fillna(-1)
-        mean_val = (min_val + max_val) / 2
-        norm = (ds - mean_val) / (range_val / 2)
-        return norm.clip(-1, 1).fillna(-1)
-
+    if ds.name in ("CO2", "SUL", "BC"):
+        raise RuntimeError(
+            f"normalize() was called on cond channel {ds.name!r}. Cond is "
+            f"normalised after smoothing by normalize_tensor_cond(); routing it "
+            f"through here would normalise the RAW inventory instead."
+        )
     return NORM_FN[ds.name](ds).fillna(0)
+
 
 def denorm(ds: xr.DataArray) -> xr.DataArray:
     norm = DENORM_FN[ds.name](ds)
@@ -876,14 +301,8 @@ class ClimateDataset(Dataset):
         target_vars: list[str],
         cond_file: str,
         cond_vars: list[str],
-        # ── PCA denoising ────────────────────────────────────────────────────
-        # Pass None to disable, a single int to use the same count for every
-        # channel, or a list of ints (one per variable) for per-channel control.
-        # e.g.  n_components_cond=[10, 40]  → 10 EOFs for CO2, 40 for SO2
-        n_components_target: Optional[Union[int, list[int]]] = None,
-        n_components_cond:   Optional[Union[int, list[int]]] = None,
         # Per-channel spatial gaussian σ (in gridpoints) applied to normalised
-        # cond fields before PCA.  None or 0 disables smoothing for that channel.
+        # cond fields.  None or 0 disables smoothing for that channel.
         # Used to suppress fine-scale inventory artefacts (shipping lanes, flight
         # paths) in SUL that would otherwise leak into the predicted TREFHT.
         cond_smooth_sigma: Optional[Union[float, list[float]]] = None,
@@ -924,15 +343,6 @@ class ClimateDataset(Dataset):
         self.vars = OmegaConf.to_object(target_vars) if not isinstance(target_vars, list) else target_vars
         self.cond_vars = OmegaConf.to_object(cond_vars) if not isinstance(cond_vars, list) else cond_vars
 
-        # Normalise n_components_* to a list (one entry per channel) or None.
-        # This is done once here so load_data always receives a consistent type.
-        self.n_components_target = self._norm_n_components(
-            n_components_target, len(self.vars), "target"
-        )
-        self.n_components_cond = self._norm_n_components(
-            n_components_cond, len(self.cond_vars), "cond"
-        )
-
         # Normalise cond_smooth_sigma to a per-channel list (or None).
         if cond_smooth_sigma is None:
             self.cond_smooth_sigma = None
@@ -950,9 +360,6 @@ class ClimateDataset(Dataset):
             self.cond_smooth_sigma = sigmas if any(s > 0 for s in sigmas) else None
         self.cond_smooth_method = str(cond_smooth_method).lower()
 
-        # Fitted PCA objects – populated on first load_data call, then reused
-        self._pca_target: Optional[list[PCA]] = None
-        self._pca_cond: Optional[list[PCA]] = None
 
         # Store one dataset (out of memory) as an xarray dataset for metadata
         # Store a different dataset as a torch tensor for speed
@@ -971,33 +378,6 @@ class ClimateDataset(Dataset):
 
         # Load an example realization right off the bat
         self.load_data(self.realizations[0])
-
-    @staticmethod
-    def _norm_n_components(
-        value: Optional[Union[int, list[int]]],
-        n_vars: int,
-        label: str,
-    ) -> Optional[list[int]]:
-        """Normalise a PCA n_components spec to a per-channel list or None.
-
-        Accepts:
-          None          → PCA disabled, returns None
-          int           → same count for every channel
-          list[int]     → must match n_vars; returned as-is
-        """
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return [int(value)] * n_vars
-        lst = list(value)          # handles ListConfig from OmegaConf
-        lst = [int(v) for v in lst]
-        if len(lst) != n_vars:
-            raise ValueError(
-                f"n_components_{label} has {len(lst)} entries but there are "
-                f"{n_vars} {label} variable(s).  "
-                f"Supply one value per channel or a single int."
-            )
-        return lst
 
     def estimate_num_batches(self, batch_size: int) -> int:
         """Estimates the number of batches in the dataset."""
@@ -1100,13 +480,6 @@ class ClimateDataset(Dataset):
             # Trigger compute and release the dask graph immediately
             self.tensor_data = self.tensor_data.contiguous()
 
-            if self.n_components_target is not None:
-                self.tensor_data, self._pca_target = pca_denoise_dataset(
-                    self.tensor_data,
-                    n_components=self.n_components_target,
-                    var_names=self.vars,
-                    pca_objects=self._pca_target,
-                )
 
             # ── Climatological baseline (computed once, reused for all realizations)
             # We only compute it on the first load_data() call (self.climatology is
@@ -1141,12 +514,9 @@ class ClimateDataset(Dataset):
         if self.time_dim not in raw_cond.dims and "year" in raw_cond.dims:
             raw_cond = raw_cond.rename({"year": self.time_dim})
         raw_cond = raw_cond.chunk({self.time_dim: -1})
-        if _COND_ORDER == "normalize_last":
-            # Smoothing and PCA run on RAW values; normalize_tensor_cond
-            # applies the transform afterwards with refitted anchors.
-            raw_cond = raw_cond[self.cond_vars]
-        else:
-            raw_cond = raw_cond[self.cond_vars].map(normalize)
+        # RAW values: smoothing runs first, normalize_tensor_cond applies the
+        # min/max map afterwards with the anchors fitted on the smoothed field.
+        raw_cond = raw_cond[self.cond_vars]
 
         coord_vals = raw_cond[self.time_dim].values
         if hasattr(coord_vals[0], 'year'):
@@ -1170,7 +540,7 @@ class ClimateDataset(Dataset):
         raw_cond.close()
         del raw_cond
 
-        # ── Spatial smoothing on conditioning (before PCA) ───────────────────
+        # ── Spatial smoothing on conditioning (before normalisation) ─────────
         # Applied per-channel via cond_smooth_sigma list. Removes line features
         # from gridded inventories (e.g. SO2 shipping lanes, flight paths) that
         # would otherwise teach the model non-physical per-pixel correlations.
@@ -1183,20 +553,10 @@ class ClimateDataset(Dataset):
                 self.cond_smooth_sigma, self.cond_smooth_method, self.cond_vars)
             self.tensor_data_cond = torch.from_numpy(arr).contiguous()
 
-        # ── PCA denoising on conditioning ────────────────────────────────────
-        if self.n_components_cond is not None:
-            self.tensor_data_cond, self._pca_cond = pca_denoise_dataset(
-                self.tensor_data_cond,
-                n_components=self.n_components_cond,
-                var_names=self.cond_vars,
-                pca_objects=self._pca_cond,     # None on first call → fits
-            )
-
-        # ── Normalisation LAST (optional order) ──────────────────────────────
-        if _COND_ORDER == "normalize_last":
-            self.tensor_data_cond = normalize_tensor_cond(
-                self.tensor_data_cond, self.cond_vars,
-                self.cond_smooth_sigma, self.n_components_cond).contiguous()
+        # ── Normalisation, AFTER smoothing ───────────────────────────────────
+        self.tensor_data_cond = normalize_tensor_cond(
+            self.tensor_data_cond, self.cond_vars,
+            self.cond_smooth_sigma).contiguous()
 
         # Save diagnostic spatial plots (only on first load)
         diag_dir = os.path.join(self.data_dir, "diagnostics")
@@ -1207,19 +567,15 @@ class ClimateDataset(Dataset):
     def _save_cond_diagnostics(self, diag_dir: str):
         """Save spatial maps and time series of conditioning data.
 
-        When PCA denoising is enabled the plots show the PCA-filtered tensor
-        (i.e. exactly what the model receives).  When PCA is disabled they
-        fall back to the raw-normalised xarray values — the two are identical
-        in that case, so the plots are always consistent with model input.
+        The plots show the tensor the model actually receives: smoothed, then
+        min/max normalised.
         """
         all_years = self.dataset_cond[self.time_dim].values
         candidate_years = [all_years[0], 2015, 2050, all_years[-1]]
         years_to_show   = [y for y in candidate_years if y in all_years]
         year_indices    = [int(np.where(all_years == y)[0][0]) for y in years_to_show]
 
-        pca_active_cond = self._pca_cond is not None
-
-        # tensor_data_cond shape: (n_vars, T, H, W) — already PCA-filtered if enabled
+        # tensor_data_cond shape: (n_vars, T, H, W) — exactly what the model sees
         cond_np = self.tensor_data_cond.numpy()   # (n_vars, T, H, W)
 
         # ── spatial maps ─────────────────────────────────────────────────────
@@ -1243,13 +599,8 @@ class ClimateDataset(Dataset):
                 )
                 plt.colorbar(im, ax=ax, shrink=0.8)
 
-            pca_label = (
-                f" [PCA {self._pca_cond[v_idx].n_components_} comps, "
-                f"{self._pca_cond[v_idx].explained_variance_ratio_.sum()*100:.1f}% var]"
-                if pca_active_cond else ""
-            )
             fig.suptitle(
-                f"{var} — cond_map seen by model{pca_label}",
+                f"{var} — cond_map seen by model",
                 fontsize=13,
             )
             plt.tight_layout()
@@ -1270,12 +621,8 @@ class ClimateDataset(Dataset):
             ax = axes[v_idx]
             ax.plot(all_years, ts, 'b-', linewidth=2)
 
-            pca_label = (
-                f" [PCA {self._pca_cond[v_idx].n_components_} comps]"
-                if pca_active_cond else ""
-            )
             ax.set_title(
-                f"{var} — spatial mean of cond_map seen by model{pca_label}\n"
+                f"{var} — spatial mean of cond_map seen by model\n"
                 f"range: [{ts.min():.3f}, {ts.max():.3f}]",
                 fontsize=12,
             )
@@ -1290,94 +637,6 @@ class ClimateDataset(Dataset):
         save_path = os.path.join(diag_dir, "cond_timeseries.png")
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
-
-        # ── PCA scree + before/after maps ────────────────────────────────────
-        self._save_pca_diagnostics(diag_dir)
-
-    def _save_pca_diagnostics(self, diag_dir: str):
-        """Save scree plots and before/after spatial maps for PCA denoising.
-
-        The "raw" panel is derived fresh from the normalised xarray dataset so
-        it truly reflects the pre-PCA signal, while the "PCA filtered" panel
-        comes from the tensor that the model actually receives.
-        """
-        pca_sets = [
-            (
-                "target",
-                self._pca_target,
-                self.vars,
-                self.tensor_data,                              # already PCA-filtered
-                self.convert_xarray_to_tensor(self.xr_data),  # raw normalised
-            ),
-            (
-                "cond",
-                self._pca_cond,
-                self.cond_vars,
-                self.tensor_data_cond,                                   # already PCA-filtered
-                self.convert_xarray_to_tensor(self.dataset_cond),        # raw normalised
-            ),
-        ]
-
-        for tag, pca_list, var_names, filtered_tensor, raw_tensor in pca_sets:
-            if pca_list is None:
-                continue  # PCA not enabled for this set
-
-            for v_idx, (pca, vname) in enumerate(zip(pca_list, var_names)):
-                # ── scree plot ───────────────────────────────────────────────
-                cumvar = np.cumsum(pca.explained_variance_ratio_) * 100
-                fig, ax = plt.subplots(figsize=(7, 4))
-                ax.plot(np.arange(1, len(cumvar) + 1), cumvar, 'o-', ms=4)
-                ax.axhline(90, color='orange', ls='--', label='90 %')
-                ax.axhline(95, color='red',    ls='--', label='95 %')
-                ax.set_xlabel("Number of components")
-                ax.set_ylabel("Cumulative variance explained (%)")
-                ax.set_title(f"PCA scree — {tag}/{vname}")
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                plt.tight_layout()
-                scree_path = os.path.join(diag_dir, f"pca_scree_{tag}_{vname}.png")
-                plt.savefig(scree_path, dpi=120, bbox_inches='tight')
-                plt.close()
-
-                # ── before / after spatial map ────────────────────────────────
-                # Use the middle time-step for a representative snapshot
-                mid_t = raw_tensor.shape[1] // 2
-
-                raw_map      = raw_tensor[v_idx, mid_t].numpy()       # (H, W)  pre-PCA
-                filtered_map = filtered_tensor[v_idx, mid_t].numpy()  # (H, W)  post-PCA
-                resid_map    = raw_map - filtered_map                  # (H, W)  removed noise
-
-                # Shared colour scale anchored on the raw field range
-                vmin, vmax = raw_map.min(), raw_map.max()
-                # Residual uses its own symmetric scale so small values show up
-                rvmax = np.abs(resid_map).max()
-
-                fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-                for ax, data, title, vm0, vm1 in zip(
-                    axes,
-                    [raw_map,        filtered_map,                          resid_map],
-                    ["Raw (normalised)", f"PCA filtered ({pca.n_components_} comps)",  "Noise removed (raw − filtered)"],
-                    [vmin,           vmin,                                  -rvmax],
-                    [vmax,           vmax,                                   rvmax],
-                ):
-                    im = ax.imshow(data, aspect='auto', cmap='RdBu_r',
-                                   vmin=vm0, vmax=vm1, origin='lower')
-                    ax.set_title(
-                        f"{title}\nmin={data.min():.3f}  max={data.max():.3f}",
-                        fontsize=9,
-                    )
-                    plt.colorbar(im, ax=ax, shrink=0.8)
-
-                fig.suptitle(
-                    f"PCA denoising — {tag}/{vname}  "
-                    f"(t_idx={mid_t},  "
-                    f"{pca.explained_variance_ratio_.sum()*100:.1f} % variance retained)",
-                    fontsize=12,
-                )
-                plt.tight_layout()
-                map_path = os.path.join(diag_dir, f"pca_map_{tag}_{vname}.png")
-                plt.savefig(map_path, dpi=120, bbox_inches='tight')
-                plt.close()
 
     def convert_xarray_to_tensor(self, ds: xr.Dataset) -> torch.Tensor:
         """Generate a tensor of data from an xarray dataset"""
@@ -1394,36 +653,7 @@ class ClimateDataset(Dataset):
         years = coord_dict[self.time_dim]
         ds = self.dataset_cond.sel({self.time_dim: years})
         tensor = self.convert_xarray_to_tensor(ds)
-        # Apply the already-fitted conditioning PCA if available
-        if self._pca_cond is not None:
-            tensor, _ = pca_denoise_dataset(
-                tensor,
-                n_components=self.n_components_cond,
-                var_names=self.cond_vars,
-                pca_objects=self._pca_cond,
-            )
         return tensor
-
-    def get_pca_state(self) -> dict:
-        """Return the fitted PCA objects so they can be saved alongside a
-        checkpoint and restored for consistent generation.
-
-        Returns a dict with keys ``'target'`` and ``'cond'``, each holding
-        a list of :class:`sklearn.decomposition.PCA` objects (or ``None``).
-        """
-        return {
-            "target": self._pca_target,
-            "cond": self._pca_cond,
-        }
-
-    def set_pca_state(self, state: dict) -> None:
-        """Restore PCA objects from a previously saved state dict.
-
-        Call this before :meth:`load_data` when loading a checkpoint for
-        generation so that the same projection is used as during training.
-        """
-        self._pca_target = state.get("target")
-        self._pca_cond = state.get("cond")
 
     def get_baseline_mean(
         self,
@@ -1437,7 +667,7 @@ class ClimateDataset(Dataset):
         correspond to years in ``[baseline_start, baseline_end]``.
 
         The tensor is already in normalised space (post-preprocessing +
-        normalisation, optionally PCA-filtered), so the result is directly
+        normalisation), so the result is directly
         comparable to model outputs and targets during training.
 
         Returns
@@ -1541,7 +771,7 @@ class EvalClimateDataset(ClimateDataset):
 
     This class takes all years in ``[year_min, year_max]``. The chunk files on
     disk already contain them, so nothing else changes: same normalisation, same
-    smoothing, same PCA, same tensor layout. Only more timesteps are loaded, so
+    smoothing, same tensor layout. Only more timesteps are loaded, so
     memory and load time scale roughly with the extra coverage (~3.3x for the
     full range).
 

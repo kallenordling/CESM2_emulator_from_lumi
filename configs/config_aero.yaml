@@ -140,34 +140,7 @@ trainer:
     sampled_gain_every_steps: 50
     sampled_gain_steps: 6
     sampled_gain_probe_years: 5
-    # ── BC cond-channel clip mode (data/climate_dataset.py) ──────────────────
-    # "v1" (default) = 5-95 percentiles over all gridpoints — keeps live runs
-    # byte-identical. "populated" = hi anchor at the p90 of POSITIVE BC values
-    # (≈½ the v1 anchor): measured temporal-contrast gain +16% hist / +59%
-    # ssp370; ~11% of populated hotspot cores clip at +1 (SUL saturates 6.3%).
-    # No linear anchor does better (scan 2026-07-03) — larger gains would need
-    # a nonlinear transform, and log-scaling cond failed before (do not retry).
-    # Changing this changes the BC channel's meaning → FRESH TRAINING ONLY.
-    # The (lo,hi) actually used is persisted in checkpoints (COND_NORM) and
-    # re-injected at eval AND on training resume, so both always match the
-    # checkpoint's training run.
-    # null = defer to the data config's bc_clip_mode key (default "v1"). Set a
-    # string here (or via CLI override, as run2_gainfix.sh does) to force a
-    # mode; a non-null value here WINS over the data config.
-    bc_clip_mode: null
-    # null = defer to the data config's cond_transform key (default "v1").
-    # "asinh" replaces the affine clip, which pins E China/India BC at +1 for
-    # 100% of years. Changing it changes every cond channel -> FRESH run only;
-    # the value is persisted per checkpoint as COND_TRANSFORM.
-    cond_transform: null
 
-    # null/"normalize_first" = the shipped order, cond_file -> normalize ->
-    # smooth -> PCA. "normalize_last" moves normalise AFTER smoothing and PCA
-    # and refits the anchors on that processed field. The reorder ALONE is a
-    # no-op (all three steps are linear for an unclipped affine transform,
-    # verified to 2e-13); the refit is the point, and it drops SUL's peak from
-    # 384 to 115 in model units. FRESH run only; persisted as COND_ORDER.
-    cond_order: null
 
     # Which scenarios the cond ANCHORS are fitted on. null/"all4" = the shipped
     # hist+ssp370+aaer+ghg pool; "hist_ssp370" drops the single-forcing runs,

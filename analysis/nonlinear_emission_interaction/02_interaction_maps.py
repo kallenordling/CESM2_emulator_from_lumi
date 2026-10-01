@@ -56,7 +56,6 @@ from omegaconf import OmegaConf
 from hydra.utils import instantiate
 import lumi_paths as L  # noqa: F401
 from eval_aero import load_model, build_cond_tensor
-from analysis.nonlinear_emission_interaction.cond_basis import resolve_basis
 
 COND_DIR = "/scratch/project_462001328/emulator_data"
 
@@ -93,10 +92,6 @@ parser.add_argument("--co2-source", action="store_true",
                          "spatialise the AEROSOL side only, which is "
                          "a choice from the spec, not a property of "
                          "the interaction.")
-parser.add_argument("--basis", default="joint",
-                    help="conditioning PCA basis; 'joint' is the only single "
-                         "coordinate system that holds both ends of the "
-                         "forcing rectangle. See cond_basis.py.")
 parser.add_argument("--year", type=int, default=2040)
 parser.add_argument("--baseline-year", type=int, default=1850)
 parser.add_argument("--cond-vars", default="CO2,SUL,BC")
@@ -125,43 +120,27 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # model trained on -- the same class of silent mismatch that invalidated the
 # asinh99 evals and the first normlast evals.
 _ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-from data.climate_dataset import (set_cond_transform, set_cond_order,
-                                  set_anchor_scenarios, set_minmax_override,
-                                  set_processed_minmax_override)
-_ct = _ck.get("COND_TRANSFORM") or "v1"
-set_cond_transform(_ct)
+from data.climate_dataset import set_anchor_scenarios, set_processed_minmax_override
 _anc = _ck.get("COND_ANCHORS")
 if _anc and _anc != "all4":
     set_anchor_scenarios(_anc)
-if _ck.get("COND_NORM"):
-    set_minmax_override(_ck["COND_NORM"])
 if _ck.get("COND_PROCESSED_NORM"):
     set_processed_minmax_override(_ck["COND_PROCESSED_NORM"])
-_co = _ck.get("COND_ORDER") or "normalize_first"
-if _co != "normalize_first":
-    set_cond_order(_co)
-print(f"[INTMAPS-COND] transform={_ct} order={_co} anchors={_anc or 'all4'}", flush=True)
+print(f"[INTMAPS-COND] anchors={_anc or 'all4'} "
+      f"processed={'ckpt' if _ck.get('COND_PROCESSED_NORM') else 'REFIT'}", flush=True)
 del _ck
 
-model, pca_state = load_model(args.checkpoint, args.model_config, device)
+model, _ = load_model(args.checkpoint, args.model_config, device)
 for p in model.parameters():
     p.requires_grad_(False)
 cfg = L.resolve_cfg(OmegaConf.load(args.model_config))
 scheduler = instantiate(cfg.scheduler)
 out_channels = int(cfg.model.get("out_channels", 1))
-n_comp = OmegaConf.load(args.data_config).get("n_components_cond", None)
-basis = resolve_basis(
-    args.basis,
-    per_scenario=(pca_state or {}).get("per_scenario", {}),
-    hist_path=args.baseline_file, ssp_path=args.cond_file,
-    cond_vars=cond_vars, n_comp=n_comp, sigmas=sigmas,
-    build_cond_tensor=build_cond_tensor)
-
 tensor, years, lat, lon = build_cond_tensor(
-    args.cond_file, cond_vars, "time", basis, n_comp,
+    args.cond_file, cond_vars, "time",
     cond_smooth_sigma=sigmas, cond_smooth_method="gaussian")
 base_tensor, base_years, _, _ = build_cond_tensor(
-    args.baseline_file, cond_vars, "time", basis, n_comp,
+    args.baseline_file, cond_vars, "time",
     cond_smooth_sigma=sigmas, cond_smooth_method="gaussian")
 state = tensor[:, int(np.where(years == args.year)[0][0])]
 base = base_tensor[:, int(np.where(base_years == args.baseline_year)[0][0])]
@@ -330,35 +309,6 @@ for name in source_maps:
 # projection below, so this needs no extra model evaluation -- the old
 # reduction was simply the wrong one.
 #
-# Phase 5 therefore becomes: rows = temperature-response regions (output-grid
-# regions, well-posed), columns = EOF MODE INDEX, one matrix per species.
-if basis is not None:
-    mode_rows, mode_meta = [], []
-    for name in source_maps:
-        g = payload[f"source_mean_{name}"]                    # (n_aer, H, W)
-        for i, sp in enumerate(payload["aerosol_names"]):
-            pca = basis[AER_CH[i]] if isinstance(basis, (list, tuple)) else None
-            if pca is None or not hasattr(pca, "components_"):
-                continue
-            comps = pca.components_                            # (k, H*W)
-            flat = g[i].reshape(-1)
-            coef = comps @ flat                                # (k,)
-            inside = float((coef ** 2).sum() / ((flat ** 2).sum() + 1e-30))
-            mode_rows.append(coef)
-            mode_meta.append((name, str(sp), inside))
-    if mode_rows:
-        payload["mode_coeffs"] = np.stack(mode_rows)           # (row, k)
-        payload["mode_index"] = np.array(
-            [f"{r}|{s}" for r, s, _ in mode_meta], dtype=object)
-        payload["mode_representable_frac"] = np.array(
-            [f for _, _, f in mode_meta])
-        print("\n[modes] fraction of the source map inside the representable "
-              "EOF span (chance ~ k/(H*W)):")
-        for (r, sp, f), c in zip(mode_meta, payload["mode_coeffs"]):
-            top = " ".join(f"{v:+.2e}" for v in c[:5])
-            print(f"[modes] {r:>12s} {sp:>3s}  inside {100 * f:6.3f}%   "
-                  f"EOF1-5 {top}")
-
 # The conditioning DISPLACEMENT the maps are integrated along, per aerosol
 # channel, exactly as the model received it (normalised, smoothed, projected).
 # Saved so the attribution density G(x) * delta(x) can be formed from this file

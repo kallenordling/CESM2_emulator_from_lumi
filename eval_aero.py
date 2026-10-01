@@ -43,7 +43,6 @@ from data.climate_dataset import (
     normalize,
     DENORM_FN,
     PREPROCESS_FN,
-    pca_denoise_dataset,
 )
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
 from models.video_net import UNetModel3D
@@ -353,7 +352,7 @@ def find_latest_checkpoint(runs_dir: str) -> str:
 
 
 def load_model(ckpt_path: str, config_path: str, device: torch.device):
-    """Load UNet model from checkpoint, return (model, pca_state)."""
+    """Load UNet model from checkpoint and restore its cond anchors."""
     cfg = L.resolve_cfg(OmegaConf.load(config_path))
     model: UNetModel3D = instantiate(cfg.model)
 
@@ -370,56 +369,57 @@ def load_model(ckpt_path: str, config_path: str, device: torch.device):
         print(f"[MODEL] {len(unexpected)} unexpected keys (old arch)")
 
     model = model.to(device).eval()
-    pca_state = ckpt.get("PCA")
+    # The conditioning pipeline is smooth -> min/max normalise. A checkpoint
+    # trained with any of the variants removed on 2026-10-01 cannot be
+    # reproduced by this build, and evaluating it anyway would normalise its
+    # cond channels differently from training WITHOUT failing -- the failure
+    # mode that invalidated a whole set of evals before. So refuse it.
+    #
+    # Checked on CONTENT, not on key presence: an mmlin checkpoint still
+    # carries a COND_NORM dict (the raw-path anchors, unused here) and a PCA
+    # dict whose bases are all None, so testing `ckpt.get("PCA")` for
+    # truthiness rejects exactly the checkpoints this build is FOR.
+    _bad = {}
+    if (ckpt.get("COND_TRANSFORM") or "minmax") != "minmax":
+        _bad["COND_TRANSFORM"] = ckpt["COND_TRANSFORM"]
+    if (ckpt.get("COND_ORDER") or "normalize_last") != "normalize_last":
+        _bad["COND_ORDER"] = ckpt["COND_ORDER"]
+    _pca = ckpt.get("PCA") or {}
+    _bases = [_pca.get("cond"), _pca.get("target")]
+    for _e in (_pca.get("per_scenario") or {}).values():
+        _bases += [_e.get("cond"), _e.get("target")]
+    if any(b is not None for b in _bases):
+        _bad["PCA"] = "fitted bases present"
+    if _bad:
+        raise SystemExit(
+            f"[COND-GUARD] this checkpoint was trained with a conditioning "
+            f"pipeline this build no longer implements: {_bad}. Evaluating it "
+            f"here would silently normalise cond differently from training. "
+            f"Check out a commit before the 2026-10-01 cleanup to evaluate it."
+        )
 
-    # Cond-normalisation ranges persisted by the training run (COND_NORM, new
-    # in the bc-clip era). Injecting them guarantees eval normalizes cond with
-    # exactly the (lo, hi) the checkpoint trained on — required for checkpoints
-    # trained with bc_clip_mode != v1. Old checkpoints lack the key and fall
-    # back to recomputing the module-default (v1) percentiles, as before.
-    from data.climate_dataset import set_minmax_override, set_cond_transform
-    # Order matters: the transform decides what the (a, b) pair in COND_NORM
-    # MEANS -- (lo, hi) under v1, (scale, top) under asinh -- so select it
-    # first, then inject the numbers.
-    ct = ckpt.get("COND_TRANSFORM") or "v1"
-    set_cond_transform(ct)
     anc = ckpt.get("COND_ANCHORS")
     if anc and anc != "all4":
         from data.climate_dataset import set_anchor_scenarios
         set_anchor_scenarios(anc)
+    from data.climate_dataset import set_processed_minmax_override
     pnorm = ckpt.get("COND_PROCESSED_NORM")
     if pnorm:
-        from data.climate_dataset import set_processed_minmax_override
         set_processed_minmax_override(pnorm)
-        print(f"[COND-PROCESSED] using checkpoint-persisted processed anchors", flush=True)
-    co = ckpt.get("COND_ORDER") or "normalize_first"
-    if co != "normalize_first":
-        from data.climate_dataset import set_cond_order
-        set_cond_order(co)
-    print(f"[COND-ORDER] checkpoint trained with '{co}'", flush=True)
-    # Printed unconditionally. It used to print only for non-v1, so an eval
-    # running a checkout that ignored the transform looked exactly like a v1
-    # eval, and the absence of the line was the only clue.
-    print(f"[COND-TRANSFORM] checkpoint trained with '{ct}' "
-          f"(eval code: {os.path.abspath(__file__)})")
-    cond_norm = ckpt.get("COND_NORM")
-    if cond_norm:
-        set_minmax_override(cond_norm)
-        print("[COND-NORM] using checkpoint-persisted clip ranges: "
+        print("[COND] using checkpoint-persisted anchors: "
               + ", ".join(f"{k}=({v[0]:.3e}, {v[1]:.3e})"
-                          for k, v in cond_norm.items()))
+                          for k, v in pnorm.items()), flush=True)
     else:
-        # Explicitly CLEAR any override a previously loaded checkpoint set in
-        # this process, and be loud: without COND_NORM we can only recompute
-        # the module-default (v1) ranges — correct for pre-bc-clip checkpoints,
-        # WRONG for a populated-trained checkpoint whose capture failed.
-        set_minmax_override(None)
-        print("[COND-NORM] WARNING: checkpoint has no COND_NORM — recomputing "
-              "module-default (v1) clip ranges. Correct for pre-bc-clip-era "
-              "checkpoints; if this model was trained with "
-              "bc_clip_mode=populated, this eval is MISCALIBRATED.")
+        # CLEAR any override a previously loaded checkpoint set in this
+        # process, and say so: refitting is only correct if this eval's cond
+        # files and sigma match training exactly.
+        set_processed_minmax_override(None)
+        print("[COND] WARNING: checkpoint has no COND_PROCESSED_NORM — anchors "
+              "will be REFIT from the reference files. Correct only if the "
+              "cond files and cond_smooth_sigma match training exactly.")
+    print(f"[COND] eval code: {os.path.abspath(__file__)}")
 
-    return model, pca_state
+    return model, None
 
 
 def extract_years(coord_vals) -> np.ndarray:
@@ -430,14 +430,14 @@ def extract_years(coord_vals) -> np.ndarray:
 
 
 def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
-                      pca_objects, n_components_cond, cond_smooth_sigma=None,
-                      cond_smooth_method="gaussian"):
-    """Load, normalize, optionally smooth + PCA-project the conditioning data.
+                      cond_smooth_sigma=None, cond_smooth_method="gaussian"):
+    """Load, smooth and min/max normalise the conditioning data.
 
-    The smoothing + PCA steps must mirror the training-side pipeline in
-    ClimateDataset exactly — otherwise the model is fed raw, spiky inventory
-    fields at inference that it never saw in training, and it imprints the
-    grid-scale texture (shipping lanes, flight paths) onto the output.
+    The smoothing must mirror the training-side pipeline in ClimateDataset
+    exactly — otherwise the model is fed raw, spiky inventory fields at
+    inference that it never saw in training, and it imprints the grid-scale
+    texture (shipping lanes, flight paths) onto the output. The anchors come
+    from the checkpoint (COND_PROCESSED_NORM), not from a refit.
 
     Returns:
         cond_tensor : torch.Tensor  (n_vars, T, H, W)
@@ -452,15 +452,8 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
     if time_dim not in raw.dims and "year" in raw.dims:
         raw = raw.rename({"year": time_dim})
     raw = raw[cond_vars].chunk({time_dim: -1})
-    # PIPELINE ORDER must match training. Under "normalize_last" the transform
-    # runs AFTER smoothing and PCA, with anchors refit on that processed field;
-    # normalising here as well (or instead) feeds the model a differently
-    # scaled input than it trained on. That silent mismatch is exactly what
-    # invalidated the first normlast evals: SUL was ~6x off because eval used
-    # the raw checkpoint anchors while training used the processed ones.
-    from data.climate_dataset import get_cond_order
-    _order = get_cond_order()
-    norm = raw[cond_vars] if _order == "normalize_last" else raw.map(normalize)
+    # RAW values here: normalisation runs after smoothing, below.
+    norm = raw[cond_vars]
 
     lat = norm["lat"].values.astype(np.float64)
     lon = norm["lon"].values.astype(np.float64)
@@ -472,7 +465,7 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
 
     years = extract_years(norm[time_dim].values)
 
-    # ── Spatial smoothing on conditioning (before PCA) ───────────────────────
+    # ── Spatial smoothing on conditioning (before normalisation) ─────────────
     # Reuse ClimateDataset's exact smoothing (data/climate_dataset.py) so eval
     # feeds the model the same denoised cond it trained on — same method
     # (gaussian/median) and per-channel sigma.
@@ -485,37 +478,13 @@ def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
                                   cond_smooth_method, cond_vars)
         cond_tensor = torch.from_numpy(arr).contiguous()
 
-    # PCA: a list of fitted objects → APPLY that basis (trained scenarios);
-    # the sentinel "fit" → FIT a fresh per-scenario basis on THIS cond (OOD
-    # scenarios with no persisted basis, e.g. ssp126); None → SKIP PCA.
-    # Fitting fresh uses the SAME [30,5]-EOF operation training ran per scenario
-    # (pca_denoise_dataset with pca_objects=None → fit_pca_denoise), so the cond
-    # keeps the low-rank character the model trained on (e.g. the 5-EOF SUL recon
-    # that drops the CEDS→IAMC 2015-junction EOF) — unlike skipping PCA, which
-    # would feed full-rank cond and reintroduce that junction texture.
-    if isinstance(pca_objects, str) and pca_objects == "fit":
-        cond_tensor, _ = pca_denoise_dataset(
-            cond_tensor,
-            n_components=n_components_cond,
-            var_names=cond_vars,
-            pca_objects=None,
-        )
-    elif pca_objects is not None:
-        cond_tensor, _ = pca_denoise_dataset(
-            cond_tensor,
-            n_components=n_components_cond,
-            pca_objects=pca_objects,
-        )
-
-    # ── Normalisation LAST, mirroring ClimateDataset ─────────────────────────
-    if _order == "normalize_last":
-        from data.climate_dataset import normalize_tensor_cond
-        sig = (None if cond_smooth_sigma is None else
-               ([float(cond_smooth_sigma)] * len(cond_vars)
-                if isinstance(cond_smooth_sigma, (int, float))
-                else [float(s_) for s_ in cond_smooth_sigma]))
-        cond_tensor = normalize_tensor_cond(
-            cond_tensor, cond_vars, sig, n_components_cond).contiguous()
+    # ── Normalisation, AFTER smoothing, mirroring ClimateDataset ─────────────
+    from data.climate_dataset import normalize_tensor_cond
+    sig = (None if cond_smooth_sigma is None else
+           ([float(cond_smooth_sigma)] * len(cond_vars)
+            if isinstance(cond_smooth_sigma, (int, float))
+            else [float(s_) for s_ in cond_smooth_sigma]))
+    cond_tensor = normalize_tensor_cond(cond_tensor, cond_vars, sig).contiguous()
 
     raw.close()
     return cond_tensor, years, lat, lon
@@ -2188,54 +2157,26 @@ def main():
 
     # ── load model ─────────────────────────────────────────────────────────
     ckpt_path = args.checkpoint if args.checkpoint else find_latest_checkpoint(args.runs_dir)
-    model, pca_state = load_model(ckpt_path, args.model_config, device)
+    model, _ = load_model(ckpt_path, args.model_config, device)
     model = model.to(dtype)
-    print(f"[PCA] {'Found in checkpoint' if pca_state else 'None — no PCA projection'}")
 
-    pca_cond   = pca_state.get("cond")   if pca_state else None
-    pca_target = pca_state.get("target") if pca_state else None
-
-    # Each training scenario fit its OWN PCA basis, so applying one basis to
-    # every scenario's cond_file is a mismatch. When the checkpoint carries the
-    # per-scenario map (MultiExperimentDataset.get_pca_state), select the basis
-    # matching each experiment by name below; otherwise fall back to the flat
-    # reference basis (pca_cond) for every scenario (old-checkpoint behaviour).
-    pca_per_scenario = pca_state.get("per_scenario") if pca_state else None
-    if pca_per_scenario:
-        print(f"[PCA] per-scenario bases: {sorted(pca_per_scenario)} "
-              f"(ref={pca_state.get('ref_scenario')})")
-
-    # Read n_components_cond from config_data.yaml (or --data-config) so eval
-    # uses the same number of EOFs the model was trained with.
     cfg = L.resolve_cfg(OmegaConf.load(args.model_config))
     data_cfg = L.resolve_cfg(OmegaConf.load(args.data_config))
-    _ckpt_peek = torch.load(args.checkpoint, map_location="cpu",
-                            weights_only=False) if args.checkpoint else {}
-    # GUARD: a normalize_last checkpoint is trained with a specific smoothing
-    # sigma and PCA setting that live in the DATA CONFIG, not the checkpoint.
-    # Passing the wrong one (or, as happened 2026-09-29, passing an env var the
-    # launcher does not read, so the DEFAULT config silently applied) evaluates
-    # the model on conditioning it never saw: two 9-hour 25-member evals came
-    # back with r=0.18 and PRECT RMSE 6269 mm/day. Fail loudly instead.
-    _co_ck = _ckpt_peek.get("COND_ORDER") or "normalize_first"
-    if _co_ck == "normalize_last":
-        _sig = data_cfg.get("cond_smooth_sigma", None)
-        _nc = data_cfg.get("n_components_cond", None)
-        _sig = OmegaConf.to_container(_sig, resolve=True) if _sig is not None else None
-        _nc = OmegaConf.to_container(_nc, resolve=True) if _nc is not None else None
-        if _nc is not None or (_sig is not None and len(set(map(float, _sig))) != 1):
-            raise SystemExit(
-                f"[COND-GUARD] checkpoint is cond_order=normalize_last but the data "
-                f"config has cond_smooth_sigma={_sig}, n_components_cond={_nc}. "
-                f"These arms train with a uniform sigma and PCA DISABLED. Pass "
-                f"DATA_CONFIG=configs/config_data_ybias_BCprect_nopca.yaml "
-                f"(note: DATA_CONFIG, not EVAL_DATA_CONFIG)."
-            )
-
-    del _ckpt_peek
-    _nc = data_cfg.get("n_components_cond", None)
-    N_COMP_COND = OmegaConf.to_container(_nc, resolve=True) if (pca_cond and _nc is not None) else None
-    print(f"[PCA] n_components_cond={N_COMP_COND}")
+    # GUARD: the checkpoint is trained with a specific smoothing sigma that
+    # lives in the DATA CONFIG, not the checkpoint. Passing the wrong one (or,
+    # as happened 2026-09-29, passing an env var the launcher does not read, so
+    # the DEFAULT config silently applied) evaluates the model on conditioning
+    # it never saw: two 9-hour 25-member evals came back with r=0.18 and PRECT
+    # RMSE 6269 mm/day. Fail loudly instead.
+    _sig = data_cfg.get("cond_smooth_sigma", None)
+    _sig = OmegaConf.to_container(_sig, resolve=True) if _sig is not None else None
+    if _sig is not None and len(set(map(float, _sig))) != 1:
+        raise SystemExit(
+            f"[COND-GUARD] the data config has cond_smooth_sigma={_sig}, but "
+            f"these arms train with a UNIFORM sigma. Pass "
+            f"DATA_CONFIG=configs/config_data_ybias_BCprect_nopca.yaml "
+            f"(note: DATA_CONFIG, not EVAL_DATA_CONFIG)."
+        )
 
     # Mirror the training-side cond smoothing (data/climate_dataset.py). PCA is
     # loaded from the checkpoint and is currently absent, but the Gaussian
@@ -2413,33 +2354,10 @@ def main():
 
         # -- conditioning --------------------------------------------------
         print("  Building conditioning tensor …")
-        # Trained scenario → its own persisted basis. OOD scenario (no persisted
-        # basis, e.g. ssp126) → fit a fresh per-scenario basis ("fit" sentinel),
-        # NOT the aaer reference (which annihilates CO2). PCA-absent ckpt → None.
-        exp_pca_cond = pca_cond
-        if pca_per_scenario is not None and N_COMP_COND is not None:
-            entry = pca_per_scenario.get(name)
-            if entry is not None:
-                exp_pca_cond = entry.get("cond")
-                print(f"  [PCA] using '{name}' scenario basis")
-            else:
-                # OOD scenario (e.g. ssp126, never trained → no persisted basis).
-                # Borrowing the aaer reference basis annihilates ssp126's
-                # cumulative CO2 (aaer has flat pre-industrial CO2, so its CO2
-                # EOFs carry no trend), flooring CONSUMED 2015 CO2 at -1 and
-                # cold-starting the run. Fit a FRESH per-scenario [30,5]-EOF
-                # basis on this scenario's own cond instead (the "fit" sentinel
-                # → build_cond_tensor fits via the same path training used per
-                # scenario): CO2 trend survives AND SUL keeps the 5-EOF denoise
-                # (drops the CEDS→IAMC 2015-junction EOF). Generalises to any
-                # future OOD scenario; trained scenarios are untouched.
-                exp_pca_cond = "fit"
-                print(f"  [PCA] no '{name}' basis in ckpt — fitting fresh "
-                      f"per-scenario basis (OOD)")
         try:
             cond_tensor, cond_years, lat_file, lon_file = build_cond_tensor(
                 exp["cond_file"], COND_VARS, exp["time_dim"],
-                exp_pca_cond, N_COMP_COND, COND_SMOOTH_SIGMA, COND_SMOOTH_METHOD,
+                COND_SMOOTH_SIGMA, COND_SMOOTH_METHOD,
             )
         except Exception as e:
             print(f"  SKIP (conditioning failed): {e}")

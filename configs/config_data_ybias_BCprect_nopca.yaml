@@ -24,7 +24,7 @@
 #
 # Byte-identical to config_data_ybias.yaml (scenario_weights [2,2,4,1],
 # year_bias 1.0, year_bias_floor 0.1, bsp_depth 0, realizations) except
-# target_vars/cond_vars (+PRECT/+BC), n_components_cond/cond_smooth_sigma
+# target_vars/cond_vars (+PRECT/+BC), cond_smooth_sigma
 # (3-length), and data_dir/cond_file (paired TREFHT+PRECT trees, *_bc.nc cond
 # files — same as config_data.yaml; BC var read from the same _bc.nc files
 # run_gainfix already uses).
@@ -40,11 +40,9 @@ cond_vars:
   - CO2
   - SUL
   - BC                        # added for this fork — see header
-n_components_target: null
-n_components_cond: null       # PCA DISABLED on the cond channels
-# Pipeline for this arm (2026-09-25), training AND eval:
-#     cond_file -> gaussian smooth (raw units) -> normalize -> model
-# with cond_order=normalize_last and anchor_scenarios=hist_ssp370, no clip.
+# Pipeline, training AND eval (the only one, since the 2026-10-01 cleanup):
+#     cond_file -> gaussian smooth (raw units) -> min/max normalize -> model
+# anchored on hist+ssp370, no clip, no PCA.
 #
 # Dropping PCA removes the 5-EOF bottleneck and with it the reconstruction
 # ringing that pushed cells below -1 (a projection does not preserve the

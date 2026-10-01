@@ -13,7 +13,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
 from data.multi_experiment_dataset import build_multi_experiment_loader
-from data.climate_dataset import set_minmax_override
+from data.climate_dataset import set_processed_minmax_override
 
 
 # ============================================================
@@ -153,13 +153,13 @@ if "COND_NORM" not in checkpoint:
         "used during training."
     )
 
-print("\nRestoring COND_NORM...")
+print("\nRestoring cond anchors...")
 
-set_minmax_override(
-    checkpoint["COND_NORM"]
+set_processed_minmax_override(
+    checkpoint["COND_PROCESSED_NORM"]
 )
 
-print("COND_NORM restored.")
+print("Cond anchors restored.")
 
 
 # ============================================================
@@ -337,30 +337,6 @@ loader = build_multi_experiment_loader(
 print(
     "Dataset created."
 )
-
-
-# ============================================================
-# RESTORE PCA
-# ============================================================
-
-if "PCA" not in checkpoint:
-
-    raise RuntimeError(
-        "Checkpoint does not contain PCA state."
-    )
-
-print(
-    "\nRestoring PCA state..."
-)
-
-loader.dataset.set_pca_state(
-    checkpoint["PCA"]
-)
-
-print(
-    "PCA restored."
-)
-
 
 # ============================================================
 # CHECK SCENARIOS

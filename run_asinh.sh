@@ -1,62 +1,29 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# ARM: asinh CONDITIONING TRANSFORM.
+# ARM: the mmlin conditioning pipeline.
 #
-# Identical to run_mseyb_BCprect.sh in every respect except one flag,
-# trainer.hyperparameters.cond_transform=asinh, so any difference is
-# attributable to the conditioning transform and nothing else. Same data
-# config, same mse_only training, same channel counts, same node/GPU layout,
-# same baseline architecture (branched from precip-bc, so no FiLM attention and
-# no global pyramid).
+#     cond_file -> gaussian smooth (sigma 4) -> min/max normalise -> model
 #
-# WHY. Measured 2026-09-08 on the raw field, at the point where the clip
-# actually happens -- normalize() runs BEFORE the gaussian smoothing, which
-# then hides the plateau:
+# anchored on the SMOOTHED hist+ssp370 fields, no clip, no PCA. Since the
+# 2026-10-01 cleanup this is the only conditioning pipeline in the code, so the
+# transform flags this script used to carry (COND_TRANSFORM, COND_ORDER) are
+# gone; ANCHOR_SCENARIOS is the one knob left and defaults to hist_ssp370.
 #
-#     BC   E China 100.0% of years pinned at +1, India 100.0%,
-#          E US 96.8%, Europe 85.7%
-#     SUL  E US 99.2%, Europe 82.5%, E China 74.1%
-#     CO2  Europe 54.6%, E US 50.6%, E China 42.2%
+# Why this pipeline: percentile+clip ("v1") pinned whole countries at +1 -- E
+# China BC was 100% of years saturated -- and produced grid-scale speckle;
+# asinh un-saturated the tail but leaked attribution onto oceans; the min/max
+# asinh stretch retained only 20% of the late Asian rise against truth's 71%.
+# The linear map keeps 70%, roughness drops 0.054 -> 0.040, and the Middle
+# East/East Asia ratio that made Arabia dominate the nonlinear term falls from
+# 3.37 to 0.16.
 #
-# The industrial history of the two largest BC sources is not compressed by the
-# v1 affine map, it is DESTROYED before the model sees it. No linear anchor
-# fixes it: a full-record sweep showed lowering hi raises global span and global
-# spatial contrast together while pushing Europe from 55% to 88% pinned, because
-# the gain comes from Central Africa, which barely emits.
-#
-# asinh(v/s) rescaled so p99.5 of the POSITIVE cells maps to +1 is linear below
-# s and logarithmic above, so the tail is compressed rather than clipped, and 0
-# still maps to -1. Measured on the same record: BC worst-site pinning
-# 100% -> 51% and span 13.5% -> 24%; CO2 55% -> 30% and 11.9% -> 47%.
-#
-# NOT log -- that was tried and made the model worse. And not the rank/quantile
-# transform, which scores better on every static metric (0% pinned, span
-# 33-70%) but uniformises by frequency, so shipping lanes become as prominent as
-# industrial regions and the amplitude ordering the physics rests on is erased.
-#
-# READ THE RESULT ON: ssp245 TCRE bias and the RAMIP ssp370-126aer final-decade
-# pattern correlation (baseline r = -0.049, i.e. no aerosol fingerprint at all).
-# Those are the metrics with room to move if the aerosol signal was the thing
-# being clipped away. Compare against run_mseyb_BCprect AT THE SAME EPOCH --
-# its corrected-data evals start at ep0400.
-#
-# MUST BE FRESH: the transform changes the meaning of every cond channel, so a
-# warm start would feed old weights a differently-scaled input. The mode is
-# persisted per checkpoint as COND_TRANSFORM and re-injected at eval.
-# PER-CHANNEL: cond_transform also takes a spec, e.g.
-#   COND_TRANSFORM="CO2=v1,SUL=asinh,BC=asinh"
-# CO2 is CUMULATIVE, so its field only grows and asinh's ceiling saturates it
-# harder every decade (93.7% of E China's carbon mass pinned by 2100, up from
-# 52.6% at 2014), while SUL and BC are per-year and improve through the century.
-# That spec leaves CO2 exactly as the precip-bc branch had it and confines the
-# new transform to the two channels it helps.
+# MUST BE FRESH when the anchors change: they define the meaning of every cond
+# channel, so a warm start would feed old weights a differently-scaled input.
+# The anchors in force are persisted per checkpoint as COND_PROCESSED_NORM and
+# re-injected at eval.
 #
 # Fire:  FRESH=1 CHAIN_REMAINING=6 sbatch run_asinh.sh
-#        FRESH=1 RUN_TAG=asinh99 COND_TRANSFORM=asinh_aero sbatch run_asinh.sh
 #
-# COND_TRANSFORM=asinh_aero is the ALIAS for "CO2=v1,SUL=asinh,BC=asinh". Pass
-# the alias, never the spec: Hydra's override grammar rejects a value carrying
-# "=" and ",", which is what killed job 21896489 before its first step.
 # RUN_TAG keeps a new arm off the previous one's checkpoints; it is sticky down
 # the chain, so set it on the first submit only.
 #
@@ -354,9 +321,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         --main_process_ip=${MAIN_PROCESS_IP} \
         main_aero.py \
         data_config="${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
-        trainer.hyperparameters.cond_transform="${COND_TRANSFORM:-asinh}" \
-        trainer.hyperparameters.cond_order="${COND_ORDER:-normalize_first}" \
-        trainer.hyperparameters.anchor_scenarios="${ANCHOR_SCENARIOS:-all4}" \
+        trainer.hyperparameters.anchor_scenarios="${ANCHOR_SCENARIOS:-hist_ssp370}" \
         model.in_channels=2 \
         model.out_channels=2 \
         model.cond_channels=3 \

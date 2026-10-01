@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from ema_pytorch import EMA
 
 from data.climate_dataset import (ClimateDataset, ClimateDataLoader,
-                                  get_active_minmax, set_minmax_override)
+                                  set_processed_minmax_override)
 from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
@@ -227,21 +227,14 @@ class UNetTrainer:
         if self.sampled_gain_loss_scale > 0:
             self._init_sampled_gain()
 
-        # Cond-normalisation ranges actually in effect for this run — persisted
-        # into every checkpoint (COND_NORM) so eval re-injects them instead of
-        # recomputing with possibly-different module defaults (bc_clip_mode).
+        # Which scenarios the anchors were fitted on — persisted so eval
+        # cannot refit them on a different pool.
         try:
-            self._cond_norm_state = get_active_minmax()
-            from data.climate_dataset import (get_active_cond_transform,
-                                              get_cond_order,
-                                              get_anchor_scenarios)
-            self._cond_transform_state = get_active_cond_transform()
-            self._cond_order_state = get_cond_order()
+            from data.climate_dataset import get_anchor_scenarios
             self._cond_anchors_state = get_anchor_scenarios()
         except Exception as e:
-            print(f"[TRAINER] WARNING: could not capture cond-norm state: {e}")
-            self._cond_norm_state = None
-            self._cond_transform_state = None
+            print(f"[TRAINER] WARNING: could not capture cond-anchor state: {e}")
+            self._cond_anchors_state = None
 
     # ── __init__ helpers ─────────────────────────────────────────────────────
 
@@ -1854,23 +1847,11 @@ class UNetTrainer:
             "Unet":        self.accelerator.unwrap_model(self.model).state_dict(),
             "Optimizer":   self.optimizer.state_dict(),
             "Global Step": self.global_step,
-            # Per-scenario PCA bases (cond + target). Eval consumes the flat
-            # "cond"/"target" keys (eval_aero.py:1656); restored on resume in
-            # load() so a chained run keeps a stable basis instead of re-fitting.
-            "PCA":         self.train_set.get_pca_state(),
-            # Per-channel cond clip ranges (lo, hi) in effect for this run —
-            # eval re-injects them (set_minmax_override) so cond normalisation
-            # always matches training, regardless of bc_clip_mode defaults.
-            "COND_NORM":   self._cond_norm_state,
-            # Without this a checkpoint trained with asinh would be evaluated
-            # with the v1 affine map and silently produce nonsense.
-            "COND_TRANSFORM": getattr(self, "_cond_transform_state", None),
-            # Pipeline order, so eval cannot silently normalise in the
-            # other order and score a different input than training saw.
-            "COND_ORDER":     getattr(self, "_cond_order_state", None),
             "COND_ANCHORS":   getattr(self, "_cond_anchors_state", None),
-            # The anchors normalize_last actually used. COND_NORM covers
-            # the raw path only, so without this eval REFITS them.
+            # The min/max anchors this run actually normalised with. Without
+            # this eval REFITS them and trusts the two to agree -- which is
+            # exactly how the first normalize_last evals normalised SUL ~6x
+            # off in silence.
             "COND_PROCESSED_NORM": _cd_processed_state(),
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
@@ -2057,45 +2038,14 @@ class UNetTrainer:
               f"tcre_loss_scaling={self.tcre_loss_scaling:.4f}  "
               f"tcre_slope={self.tcre_slope}")
 
-        # Restore PCA projection BEFORE any load_data call (realizations are
-        # loaded later, during training/precompute), so a resumed/chained run
-        # keeps the basis it was trained with instead of re-fitting on the first
-        # realization — re-fitting would drift the cond projection and reintroduce
-        # the train↔eval mismatch this persistence fixes.
-        if checkpoint.get("PCA") is not None:
-            self.train_set.set_pca_state(checkpoint["PCA"])
-            print("[INFO] Restored PCA state from checkpoint")
-
-        # Restore cond-normalisation clip ranges BEFORE any load_data call, for
-        # the same reason as PCA above: cond fields are normalised lazily in
-        # load_data, so injecting the checkpoint's COND_NORM here keeps a
-        # resumed/chained run on the exact (lo, hi) it was trained with even if
-        # this launch forgot the bc_clip_mode flag. The checkpoint wins; a
-        # config↔checkpoint mismatch is loud. (The end-of-__init__
-        # _cond_norm_state capture runs after load(), so descendants re-persist
-        # these restored ranges, not the module default.)
-        cond_norm = checkpoint.get("COND_NORM")
-        if cond_norm:
-            try:
-                current = get_active_minmax()
-            except Exception:
-                current = None
-            if current is not None:
-                drift = {
-                    k: {"config": current[k], "checkpoint": tuple(v)}
-                    for k, v in cond_norm.items()
-                    if k in current and any(
-                        abs(a - b) > 1e-9 * max(abs(a), abs(b), 1e-30)
-                        for a, b in zip(current[k], v)
-                    )
-                }
-                if drift:
-                    print(f"[WARN] COND_NORM mismatch — this launch's config "
-                          f"would normalise cond differently than the "
-                          f"checkpoint was trained with (bc_clip_mode flag "
-                          f"missing?): {drift}. Using the CHECKPOINT ranges.")
-            set_minmax_override({k: tuple(v) for k, v in cond_norm.items()})
-            print("[INFO] Restored cond-norm clip ranges (COND_NORM) from checkpoint")
+        # Restore the cond anchors BEFORE any load_data call: cond fields are
+        # normalised lazily in load_data, so injecting the checkpoint's
+        # COND_PROCESSED_NORM here keeps a resumed run on the exact anchors it
+        # was trained with rather than refitting them.
+        pnorm = checkpoint.get("COND_PROCESSED_NORM")
+        if pnorm:
+            set_processed_minmax_override({k: tuple(v) for k, v in pnorm.items()})
+            print("[INFO] Restored cond anchors (COND_PROCESSED_NORM) from checkpoint")
 
         # Restore best val skill so a resumed run doesn't overwrite a better checkpoint
         if "best_val_skill" in checkpoint:
