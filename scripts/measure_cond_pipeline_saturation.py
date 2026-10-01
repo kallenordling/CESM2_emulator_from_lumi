@@ -56,10 +56,19 @@ from sweep_asinh_cond_params import load_record
 SMOOTH_SIGMA = {"CO2": 0, "SUL": 2, "BC": 2}
 N_COMPONENTS = {"CO2": 30, "SUL": 5, "BC": 5}
 
+# Each config is {modes per species} plus an optional per-species sigma override
+# of SMOOTH_SIGMA. The two v1_noclip rows are the arms that removed the clip:
+# v1noclip keeps the shipped sigma (CO2 unsmoothed, which is what speckles), and
+# co2smooth smooths CO2 too. The point of running them here is that smoothing is
+# what buys the speckle fix, and smoothing is also what destroys regional
+# amplitude -- these rows say whether co2smooth can have both.
 CONFIGS = {
-    "v1 (precip-bc)":   {"CO2": "v1",    "SUL": "v1",    "BC": "v1"},
-    "asinh (arm)":      {"CO2": "asinh", "SUL": "asinh", "BC": "asinh"},
-    "CO2=v1 + asinh":   {"CO2": "v1",    "SUL": "asinh", "BC": "asinh"},
+    "v1 (precip-bc)":   dict(modes={"CO2": "v1",    "SUL": "v1",    "BC": "v1"}),
+    "asinh (arm)":      dict(modes={"CO2": "asinh", "SUL": "asinh", "BC": "asinh"}),
+    "CO2=v1 + asinh":   dict(modes={"CO2": "v1",    "SUL": "asinh", "BC": "asinh"}),
+    "v1noclip (CO2 s=0)": dict(modes={k: "v1_noclip" for k in SPECIES}),
+    "co2smooth (CO2 s=2)": dict(modes={k: "v1_noclip" for k in SPECIES},
+                                sigma={"CO2": 2}),
 }
 
 
@@ -68,6 +77,9 @@ def normalise(field, species, mode, params):
         s, top = params[species]["asinh"]
         return apply_asinh(field, s, top)
     lo, hi = params[species]["v1"]
+    if mode == "v1_noclip":
+        mid, half = (lo + hi) / 2.0, (hi - lo) / 2.0
+        return np.zeros_like(field) if half == 0 else (field - mid) / half
     return apply_v1(field, lo, hi)
 
 
@@ -110,12 +122,13 @@ def main():
         masks = {n: region_mask(lat, lon, REGIONS[n]) for n in args.regions}
         truth = {n: region_series(field, m) for n, m in masks.items()}
         for cfg_name, cfg in CONFIGS.items():
-            mode = cfg[v]
+            mode = cfg["modes"][v]
+            sigma = cfg.get("sigma", {}).get(v, SMOOTH_SIGMA[v])
             z = normalise(field, v, mode, params)
             pin = z >= 1.0 - 1e-9
             stages = [("normalise", z)]
-            zs = smooth(z, SMOOTH_SIGMA[v])
-            stages.append((f"+smooth s={SMOOTH_SIGMA[v]}", zs))
+            zs = smooth(z, sigma)
+            stages.append((f"+smooth s={sigma}", zs))
             if not args.no_pca:
                 zp, var_kept = pca_truncate(zs, N_COMPONENTS[v])
                 stages.append((f"+PCA {N_COMPONENTS[v]} ({var_kept*100:.1f}% var)", zp))

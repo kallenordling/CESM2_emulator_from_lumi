@@ -105,10 +105,19 @@ def read_emulator_gmean(nc_path: Path):
     names = [v for v in ds.data_vars
              if v.startswith(f"{VAR}_model_gmean_m") and not v.endswith("_anom")
              and not v.startswith(f"{VAR}_model_gmean_mean")]
-    if not names:
-        raise KeyError(f"{nc_path}: no per-member {VAR}_model_gmean_m* fields")
-    M = np.stack([ds[n].values for n in
-                  sorted(names, key=lambda x: int(x.rsplit("_m", 1)[1]))])
+    if names:
+        M = np.stack([ds[n].values for n in
+                      sorted(names, key=lambda x: int(x.rsplit("_m", 1)[1]))])
+    elif f"{VAR}_model" in ds:
+        # Current eval schema: one (member, year, lat, lon) array and no
+        # precomputed global means (eval_aero.py:1325). Weight here instead.
+        da = ds[f"{VAR}_model"]
+        w = np.cos(np.deg2rad(da["lat"]))
+        g = da.weighted(w).mean(("lat", "lon"))
+        M = (g.transpose("member", "year").values if "member" in da.dims
+             else g.values[None])
+    else:
+        raise KeyError(f"{nc_path}: neither {VAR}_model_gmean_m* nor {VAR}_model")
     ds.close()
     return years, M                      # (members, years)
 
@@ -368,6 +377,12 @@ def main() -> int:
     fig.tight_layout()
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)
     fig.savefig(args.out, bbox_inches="tight")
+    # Both formats, as paper_fig_timeseries.py does: PNG to look at, PDF for the
+    # journal. Passing one extension used to silently give only that one.
+    _twin = (Path(args.out).with_suffix(".pdf") if args.out.endswith(".png")
+             else Path(args.out).with_suffix(".png"))
+    fig.savefig(str(_twin), bbox_inches="tight")
+    print(f"[WROTE] {args.out} and {_twin}")
     fig.savefig(str(Path(args.out).with_suffix(".pdf")), bbox_inches="tight")
     print(f"\nwrote {args.out}")
     print(f"wrote {Path(args.out).with_suffix('.pdf')}")

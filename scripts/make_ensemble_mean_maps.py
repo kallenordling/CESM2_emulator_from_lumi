@@ -268,7 +268,7 @@ def draw_map(ax, data, outline="0.15", **kw):
     return im
 
 
-def draw(var, mode, emu, ref, outdir, stipple_on=True):
+def draw(var, mode, emu, ref, outdir, stipple_on=True, paper_copy=True):
     unit = META[var]["unit"]
     lat, lon = emu["hist"]["lat"], emu["hist"]["lon"]
 
@@ -349,7 +349,7 @@ def draw(var, mode, emu, ref, outdir, stipple_on=True):
     # PNG to look at, PDF to \includegraphics — the paper set is vector.
     path = os.path.join(outdir, f"ensmean_map_{var}_{mode}.png")
     outs = [path, os.path.splitext(path)[0] + ".pdf"]
-    paper = PAPER_NAME.get((var, mode))
+    paper = PAPER_NAME.get((var, mode)) if paper_copy else None
     if paper:
         parent = os.path.dirname(outdir.rstrip("/")) or "plots"
         # Supplement figures share one folder; main-text ones get a folder each
@@ -526,14 +526,28 @@ def main():
     ap.add_argument("--n-years", type=int, default=10,
                     help="final-decade window, matching paper_fig_histograms.py")
     ap.add_argument("--outdir", default="plots/ensmean_maps")
+    ap.add_argument("--eval-dir", default=None,
+                    help="emulator eval directory; default is the paper's "
+                         "25-member ep0860 run. Point it at another arm to "
+                         "rebuild these figures for that arm.")
+    ap.add_argument("--no-paper-copy", action="store_true",
+                    help="do NOT also write plots/figNN.pdf etc. Use this for "
+                         "any arm that is not the paper checkpoint, or the "
+                         "comparison overwrites the paper figure set.")
+    ap.add_argument("--tag", default="",
+                    help="suffix for the cache file, so arms do not share one.")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
+    global EVAL_DIR
+    if args.eval_dir:
+        EVAL_DIR = args.eval_dir
+        print(f"[maps] emulator eval dir overridden: {EVAL_DIR}")
     all_stats = {}
     for var in args.var:
         # v2 keeps the per-member maps the significance test needs. The v1 cache
         # is left in place -- make_arm_comparison_maps.py still reads it.
-        cache = os.path.join(args.outdir, f"cache_{var}_{args.n_years}y_v2.npz")
+        cache = os.path.join(args.outdir, f"cache_{var}_{args.n_years}y_v2{args.tag}.npz")
         members = heldout_members(var)
         n_cap = {k: len(v) for k, v in members.items()}
         if os.path.exists(cache):
@@ -561,7 +575,8 @@ def main():
                 print(f"[skill] {var:6s} {mode:8s} {key:7s} "
                       f"r={st['r']:.4f} rmse={st['rmse']:.3f} bias={st['bias']:+.3f} "
                       f"{META[var]['unit']}")
-            print("wrote", draw(var, mode, emu, ref, args.outdir))
+            print("wrote", draw(var, mode, emu, ref, args.outdir,
+                               paper_copy=not args.no_paper_copy))
         print("wrote", write_table(var, stats, args.outdir))
     if len(args.var) > 1:
         print("wrote", write_correlation_table(all_stats, args.var, args.outdir))

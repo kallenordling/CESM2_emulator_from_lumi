@@ -226,14 +226,30 @@ def qc_ensemble(df: pd.DataFrame, scenario: str, n_sigma: float = 5.0) -> pd.Dat
 
 
 def read_emulated(nc_path: Path):
-    """(ensemble-mean, member matrix, years) absolute global-mean from an eval NetCDF."""
+    """(ensemble-mean, member matrix, years) absolute global-mean from an eval NetCDF.
+
+    TWO SCHEMAS. Older evals stored precomputed global means as separate
+    variables (`{VAR}_model_gmean_mean`, `_gmean_m1`...). The eval code no
+    longer writes those -- it writes one `{VAR}_model` (member, year, lat, lon)
+    array (eval_aero.py:1325) -- so this reads that and does the cos(lat)
+    weighting here. Without this branch the script dies with
+    KeyError: '<VAR>_model_gmean_mean' on every evaluation produced since.
+    """
     ds = xr.open_dataset(nc_path)
     years = ds["year"].values.astype(int)
-    mean = ds[f"{VAR}_model_gmean_mean"].values
-    members = [ds[v].values for v in ds.data_vars
-               if v.startswith(f"{VAR}_model_gmean_m")
-               and not v.endswith("_anom")
-               and not v.startswith(f"{VAR}_model_gmean_mean")]
+    if f"{VAR}_model_gmean_mean" in ds:
+        mean = ds[f"{VAR}_model_gmean_mean"].values
+        members = [ds[v].values for v in ds.data_vars
+                   if v.startswith(f"{VAR}_model_gmean_m")
+                   and not v.endswith("_anom")
+                   and not v.startswith(f"{VAR}_model_gmean_mean")]
+    else:
+        da = ds[f"{VAR}_model"]
+        w = np.cos(np.deg2rad(da["lat"]))
+        g = da.weighted(w).mean(("lat", "lon"))          # (member, year)
+        g = g.transpose("member", "year").values if "member" in da.dims else g.values[None]
+        members = list(g)
+        mean = np.nanmean(g, axis=0)
     ds.close()
     return mean, (np.stack(members) if members else None), years
 
