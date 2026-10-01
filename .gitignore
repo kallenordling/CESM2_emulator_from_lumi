@@ -24,3 +24,6 @@ notebook_output/
 # remain in git history at their old plots/ paths. Not re-committed here:
 # ~160 MB of mostly regenerable output.
 plots/archive/
+
+# large numpy caches: never commit (history was stripped of these 2026-10-01)
+*.npz
