@@ -101,7 +101,13 @@ def main():
     import data.climate_dataset as cd
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    # Model stays float32 and bf16 is applied through AUTOCAST only. Casting
+    # the whole model to bf16 crashes with "Input type (float) and bias type
+    # (c10::BFloat16) should be the same" when MIOpen falls back silently --
+    # the failure eval_aero.py:2161 already documents, and which this script
+    # hit on its first run.
+    dtype = torch.float32
+    autocast_dt = torch.bfloat16 if device.type == "cuda" else None
     model, _ = EA.load_model(args.checkpoint, args.model_config, device)
     model = model.to(dtype)
     cfg = L.resolve_cfg(OmegaConf.load(args.model_config))
@@ -163,6 +169,7 @@ def main():
             y = EA.generate_timeseries(
                 model, scheduler, ct[:, sl], device, dtype,
                 sample_steps=args.sample_steps, batch_size=1, seed=1000 + m,
+                autocast_dtype=autocast_dt,
                 out_channels=int(cfg.model.get("out_channels", 1)),
                 target_channel=0)
             mem.append(np.asarray(y, float))
