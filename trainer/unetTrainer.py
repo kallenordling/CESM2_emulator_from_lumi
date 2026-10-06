@@ -232,6 +232,10 @@ class UNetTrainer:
         try:
             from data.climate_dataset import get_anchor_scenarios
             self._cond_anchors_state = get_anchor_scenarios()
+            ds0 = getattr(self.train_set, "datasets", [self.train_set])[0]
+            sig = getattr(ds0, "cond_smooth_sigma", None)
+            self._cond_sigma_state = (None if sig is None
+                                      else [float(x) for x in sig])
         except Exception as e:
             print(f"[TRAINER] WARNING: could not capture cond-anchor state: {e}")
             self._cond_anchors_state = None
@@ -1848,6 +1852,11 @@ class UNetTrainer:
             "Optimizer":   self.optimizer.state_dict(),
             "Global Step": self.global_step,
             "COND_ANCHORS":   getattr(self, "_cond_anchors_state", None),
+            # The per-channel smoothing actually used. Eval needs it to verify
+            # the data config it was handed matches training; without it the
+            # check can only be a uniformity heuristic, which wrongly rejects
+            # deliberate PER-CHANNEL sigma (e.g. CO2=0, SUL=BC=4).
+            "COND_SIGMA":     getattr(self, "_cond_sigma_state", None),
             # The min/max anchors this run actually normalised with. Without
             # this eval REFITS them and trusts the two to agree -- which is
             # exactly how the first normalize_last evals normalised SUL ~6x

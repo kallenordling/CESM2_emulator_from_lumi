@@ -429,6 +429,16 @@ def extract_years(coord_vals) -> np.ndarray:
     return np.asarray(coord_vals, dtype=int)
 
 
+def _ckpt_sigma(path):
+    """cond_smooth_sigma persisted by training, or None for older checkpoints."""
+    try:
+        ck = torch.load(path, map_location="cpu", weights_only=False)
+        v = ck.get("COND_SIGMA")
+        return None if v is None else [float(x) for x in v]
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
 def build_cond_tensor(cond_file: str, cond_vars: list, time_dim: str,
                       cond_smooth_sigma=None, cond_smooth_method="gaussian"):
     """Load, smooth and min/max normalise the conditioning data.
@@ -2170,10 +2180,26 @@ def main():
     # RMSE 6269 mm/day. Fail loudly instead.
     _sig = data_cfg.get("cond_smooth_sigma", None)
     _sig = OmegaConf.to_container(_sig, resolve=True) if _sig is not None else None
-    if _sig is not None and len(set(map(float, _sig))) != 1:
+    _ck_sig = _ckpt_sigma(ckpt_path)
+    if _ck_sig is not None:
+        # Authoritative: compare against what training actually used. This is
+        # what makes a deliberate PER-CHANNEL sigma (CO2=0, SUL=BC=4) legal
+        # while still catching the wrong data config.
+        if _sig is None or [float(x) for x in _sig] != [float(x) for x in _ck_sig]:
+            raise SystemExit(
+                f"[COND-GUARD] the checkpoint trained with "
+                f"cond_smooth_sigma={_ck_sig} but the data config says {_sig}. "
+                f"Pass the config this arm was trained with "
+                f"(note: DATA_CONFIG, not EVAL_DATA_CONFIG)."
+            )
+        print(f"[COND] cond_smooth_sigma={_ck_sig} (matches checkpoint)")
+    elif _sig is not None and len(set(map(float, _sig))) != 1:
+        # Pre-COND_SIGMA checkpoint: fall back to the uniformity heuristic,
+        # which is all those arms allow. They were all trained uniform.
         raise SystemExit(
             f"[COND-GUARD] the data config has cond_smooth_sigma={_sig}, but "
-            f"these arms train with a UNIFORM sigma. Pass "
+            f"this checkpoint predates COND_SIGMA and those arms trained with "
+            f"a UNIFORM sigma. Pass "
             f"DATA_CONFIG=configs/config_data_ybias_BCprect_nopca.yaml "
             f"(note: DATA_CONFIG, not EVAL_DATA_CONFIG)."
         )
