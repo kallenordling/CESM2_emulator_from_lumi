@@ -180,7 +180,13 @@ def main():
     # Per-member spread of the paired difference: the noise floor this test
     # actually has, which is what decides whether the signal is real.
     per_member = out["pert"][:, 0] - out["base"][:, 0]
-    noise = float(per_member.std(0).mean())
+    # std ACROSS members is a property of the sampler and does NOT shrink as
+    # members are added -- it barely moved from 5 members (0.0028) to 25
+    # (0.0030). The yardstick for the MEAN response is the standard error,
+    # std/sqrt(M). Reporting the per-member std as "noise" understated the
+    # significance of every region in the first 25-member run.
+    spread = float(per_member.std(0).mean())
+    noise = spread / max(len(per_member), 1) ** 0.5
 
     w = np.cos(np.deg2rad(lat))[:, None]
     # Halving a region's aerosols causes REAL global-mean warming, and that
@@ -208,12 +214,15 @@ def main():
           f"({args.year}, {args.members} paired members)")
     print(f"  mean |response|          {np.abs(resp).mean():.4f} degC")
     # (locality numbers below are on the PATTERN, global mean removed)
-    print(f"  paired-member noise      {noise:.4f} degC   "
-          f"(signal/noise {np.abs(resp).mean()/max(noise,1e-9):.2f})")
+    print(f"  per-member spread        {spread:.4f} degC  (sampler, does not "
+          f"shrink with M)")
+    print(f"  standard error of mean   {noise:.5f} degC  (spread/sqrt({len(per_member)}))")
     print(f"  inside the box           {inside:.1f}% of |response|")
     for k, v in rings.items():
         print(f"  within {k:<8s}          {v:.1f}%")
     print(f"  radius holding 50%       {r50:.0f} km")
+    print(f"  pattern / SE             {np.abs(pattern).mean()/max(noise,1e-9):.1f}"
+          f"   (is the PATTERN resolved?)")
     # A uniform response would put this fraction inside the box; anything near
     # it means the model is NOT responding locally.
     unif = (w * np.ones_like(resp))[mask].sum() / (w * np.ones_like(resp)).sum() * 100
