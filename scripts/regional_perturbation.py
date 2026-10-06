@@ -183,7 +183,17 @@ def main():
     noise = float(per_member.std(0).mean())
 
     w = np.cos(np.deg2rad(lat))[:, None]
-    amag = np.abs(resp) * w
+    # Halving a region's aerosols causes REAL global-mean warming, and that
+    # component is spatially uniform. Left in, it inflates |response|
+    # everywhere and buries any regional pattern -- the locality metric would
+    # then mostly measure the global-mean shift. So locality is measured on the
+    # PATTERN (response minus its area-weighted global mean) and the global
+    # mean is reported separately, since it is a real part of the answer.
+    gmean = float(np.average(resp, weights=np.broadcast_to(w, resp.shape)))
+    pattern = resp - gmean
+    print(f"  global-mean shift        {gmean:+.4f} degC  (uniform component)")
+    print(f"  pattern amplitude        {np.abs(pattern).mean():.4f} degC")
+    amag = np.abs(pattern) * w
     tot = amag.sum()
     clat = 0.5 * (box[0] + box[1]); clon = 0.5 * (box[2] + box[3])
     dist = great_circle_km(clat, clon, lat[:, None], lon180[None, :])
@@ -197,6 +207,7 @@ def main():
     print(f"\n[perturb] RESPONSE to {args.region} aerosols x{args.scale} "
           f"({args.year}, {args.members} paired members)")
     print(f"  mean |response|          {np.abs(resp).mean():.4f} degC")
+    # (locality numbers below are on the PATTERN, global mean removed)
     print(f"  paired-member noise      {noise:.4f} degC   "
           f"(signal/noise {np.abs(resp).mean()/max(noise,1e-9):.2f})")
     print(f"  inside the box           {inside:.1f}% of |response|")
@@ -211,7 +222,8 @@ def main():
 
     np.savez_compressed(
         os.path.join(args.out, f"resp_{args.region}_x{args.scale}_{args.year}.npz"),
-        response=resp, lat=lat, lon=lon, box=np.array(box), inside=inside,
+        response=resp, pattern=pattern, gmean=gmean,
+        lat=lat, lon=lon, box=np.array(box), inside=inside,
         r50=r50, noise=noise, rings=np.array(list(rings.values())),
         ring_names=np.array(list(rings), dtype=object))
     print(f"[perturb] wrote {args.out}/resp_{args.region}_x{args.scale}_{args.year}.npz")
