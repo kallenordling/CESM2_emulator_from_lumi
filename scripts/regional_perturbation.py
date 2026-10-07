@@ -221,6 +221,16 @@ def main():
     for k, v in rings.items():
         print(f"  within {k:<8s}          {v:.1f}%")
     print(f"  radius holding 50%       {r50:.0f} km")
+    # WHERE the response peaks. The inside-box fraction cannot see
+    # DISPLACEMENT: a response centred thousands of km away still scores above
+    # the uniform null, which is exactly what East China did (peak 3800 km
+    # away over northern India while the fraction said 2.3x "local").
+    pi, pj = np.unravel_index(np.argmax(np.abs(pattern)), pattern.shape)
+    pk_d = float(great_circle_km(clat, clon, lat[pi], lon180[pj]))
+    print(f"  pattern peaks at         {lat[pi]:+.1f}N {lon180[pj]:+.1f}E "
+          f"= {pk_d:.0f} km from the box centre  ({pattern[pi, pj]:+.4f} degC)")
+    print(f"  mean inside the box      {float(np.average(pattern[mask], weights=np.broadcast_to(w, pattern.shape)[mask])):+.5f} degC "
+          f"(sign: halving aerosols should WARM)")
     print(f"  pattern / SE             {np.abs(pattern).mean()/max(noise,1e-9):.1f}"
           f"   (is the PATTERN resolved?)")
     # A uniform response would put this fraction inside the box; anything near
@@ -233,6 +243,7 @@ def main():
         os.path.join(args.out, f"resp_{args.region}_x{args.scale}_{args.year}.npz"),
         response=resp, pattern=pattern, gmean=gmean,
         lat=lat, lon=lon, box=np.array(box), inside=inside,
+        peak_lat=lat[pi], peak_lon=lon180[pj], peak_dist_km=pk_d,
         r50=r50, noise=noise, rings=np.array(list(rings.values())),
         ring_names=np.array(list(rings), dtype=object))
     print(f"[perturb] wrote {args.out}/resp_{args.region}_x{args.scale}_{args.year}.npz")
