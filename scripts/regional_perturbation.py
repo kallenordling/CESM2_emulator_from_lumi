@@ -48,6 +48,18 @@ import torch
 import xarray as xr
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# generate_timeseries returns NORMALISED model space -- it never denormalises
+# (eval_aero.py does that separately at its call site, DENORM_FN["TREFHT"] =
+# x*21+4.5). Reporting its output as degC understated every magnitude here by
+# 21x. For a DIFFERENCE the +4.5 offset cancels, so the scale alone applies.
+TREFHT_SCALE = 21.0      # DENORM_FN["TREFHT"] slope
+
+
+def to_degC_diff(x):
+    """Normalised-space difference -> degC. Offset cancels in a difference."""
+    return x * TREFHT_SCALE
+
+
 sys.path.insert(0, os.path.dirname(_HERE))
 
 # lat0, lat1, lon0, lon1  (lon in -180..180)
@@ -176,10 +188,10 @@ def main():
             print(f"  [{tag}] member {m+1}/{args.members}", flush=True)
         out[tag] = np.stack(mem)                       # (M, T, H, W)
 
-    resp = out["pert"].mean(0)[0] - out["base"].mean(0)[0]        # (H, W)
+    resp = to_degC_diff(out["pert"].mean(0)[0] - out["base"].mean(0)[0])   # (H, W) degC
     # Per-member spread of the paired difference: the noise floor this test
     # actually has, which is what decides whether the signal is real.
-    per_member = out["pert"][:, 0] - out["base"][:, 0]
+    per_member = to_degC_diff(out["pert"][:, 0] - out["base"][:, 0])
     # std ACROSS members is a property of the sampler and does NOT shrink as
     # members are added -- it barely moved from 5 members (0.0028) to 25
     # (0.0030). The yardstick for the MEAN response is the standard error,
