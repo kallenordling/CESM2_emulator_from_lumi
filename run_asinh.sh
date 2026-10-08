@@ -39,6 +39,28 @@
 # ── mseyb + BC/PRECT A/B (2026-08-03) — completes the 2×2 factorial ─────────
 # ssp370 warm+wet bias investigation (see memory gainfix_ssp370_persistent_bias.md).
 # Four cells:
+# Training is pure denoising MSE. The cond / TCRE / EBM / interaction /
+# global-mean / sampled-gain losses were REMOVED in the release cleanup: every
+# run this launcher produced held them at zero via mse_only, so the total loss
+# was already identical to the MSE term.
+#
+# Fire:  FRESH=1 CHAIN_REMAINING=6 sbatch run_asinh.sh
+#
+# RUN_TAG keeps a new arm off the previous one's checkpoints; it is sticky down
+# the chain, so set it on the first submit only.
+#
+# SAVE_DIR: config_aero.yaml writes checkpoints to runs/ RELATIVE to the submit
+# directory, i.e. onto /projappl. That filled up (55G of 54G on 462001328), and
+# a full projappl is the likeliest cause of the TRUNCATED run_asinh_co2fix_9.pt
+# that ended the first asinh arm -- 335 MB where epoch 4 was 784 MB. Point
+# SAVE_DIR at scratch, which has terabytes free:
+#   SAVE_DIR=/scratch/project_462001112/runs_asinh99
+# -----------------------------------------------------------------------------
+#SBATCH --job-name=asinh
+#
+# ── mseyb + BC/PRECT A/B (2026-08-03) — completes the 2×2 factorial ─────────
+# ssp370 warm+wet bias investigation (see memory gainfix_ssp370_persistent_bias.md).
+# Four cells:
 #   run_mseyb              : mse_only=true, year_bias=1.0, 2 cond / 1 target — CLEAN
 #   run_gainfix             : full aux losses+SGAIN+LR decay, 3 cond / 2 target — BIASED
 #   run_gainfix_noBCprect   : full aux losses+SGAIN+LR decay, 2 cond / 1 target — pending
@@ -328,7 +350,6 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.save_name=${SAVE_NAME} \
         trainer.hyperparameters.save_dir="${SAVE_DIR:-runs/}" \
         ${LOAD_OVERRIDE} \
-        trainer.hyperparameters.mse_only=true \
         trainer.hyperparameters.eval_data_config="configs/${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
         hydra.run.dir="${HYDRA_RUN_DIR}"
 '"

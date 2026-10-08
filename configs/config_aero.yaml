@@ -47,10 +47,6 @@ trainer:
     # otherwise stop once it plateaus). Keeps TCRE/bias tracked past the skill
     # peak. 0 = off (only best-skill evals).
     force_eval_every: 25
-    # Diagnostic: when true, hold cond_loss_scaling=0 so ALL aux losses
-    # (cond/TCRE/low-t/EBM/interaction) + the null pass are skipped → pure
-    # denoising MSE. Used by the run_mseyb A/B arm (run2_mseyb.sh). Default off.
-    mse_only: false
     batch_size: 8        # must match batch_size in config_data.yaml
     save_dir: ${oc.env:LUMI_RUNS_DIR,/scratch/project_462001112/runs}
     save_name: run_bcprect.pt  # FRESH bundle for BC 3rd cond channel + PRECT 2nd output channel. Channel counts change (in/out 1→2, cond 2→3) so v0.1.0 TREFHT checkpoints will NOT load (conv shapes differ) — fresh name → starts from epoch 0.
@@ -73,73 +69,6 @@ trainer:
     # PRECT is noisier → downweight to 0.5 so it can't dominate / destabilise the
     # shared backbone. Default [1.0, 1.0] (or absent) = unchanged equal weighting.
     target_var_weights: [1.0, 0.5]
-    adaptive_loss_scaling: true  # auto-tune cond/tcre scalings to fixed fractions of MSE loss
-    cond_target_fraction: 0.30   # general conditioning loss target = 30% of MSE loss (bounded [0.1, 0.4])
-    # ── TCRE regularization (physics prior) ──────────────────────────────
-    # Slope precomputed from hist + ssp370 ΔT vs cumCO2 (matches eval).
-    # Applied to the model's full predicted anomaly on hist + ssp370 samples.
-    tcre_loss_scaling: 0.01      # initial value; adaptive scaling overrides once EMA warms
-    tcre_target_fraction: 0.12   # (C) raised 0.05→0.12 to pull harder on the ~+13% TCRE overshoot
-    # Quantity the slope-match scores: false = CFG decomposition (cond − null);
-    # true = FULL anomaly (cond − climatology, what eval measures). The target
-    # slopes are CESM2 full anomaly, so the decomposition form mismatches when
-    # pred_x0_null drifts above the 1850-1900 baseline → eval ΔT-vs-cumCO2 too
-    # steep (ssp370 b≈1.33). A/B-tested via run_tcrefulltest.sh; default off.
-    tcre_full_anomaly: false
-    # (B) Low-t TCRE: score the sensitivity constraint on an extra conditioned
-    # forward at fixed low noise (one-step x0 ≈ true sample) instead of the
-    # random-t one-step proxy that lets the sampled sensitivity overshoot ~+13%
-    # (ssp370 whole-run warm, ghg tail/polar). Adds 1 fwd/optimizer-step on the
-    # sync iter; uses full-anomaly scoring. See unified_sensitivity_overshoot.
-    tcre_lowt: true
-    tcre_lowt_level: 0.05
-    # ── Energy-balance constraint  N = F + λ·ΔT  — DROPPED (disabled) ─────
-    # Was: 3 learnable scalars (α_ghg, α_aero, λ) penalizing the squared
-    # global-mean residual. Found near-inactive and TCRE-redundant: it drove
-    # residual→0 (equilibrium N=0, not N_cesm=N_model), the coeffs are
-    # scale-degenerate, and without CESM2 TOA flux the constraint reduces to a
-    # λ-weighted ΔT match. Published feedbacks (Zelinka: CESM2 λ=-0.634, ECS=5.15)
-    # only bound EQUILIBRIUM — far too loose for the transient sensitivity bias
-    # (would need ~+170% over-warming to bind). Transient sensitivity is handled
-    # by TCRE (low-t B+C). See memory ebm_term_near_inactive. Set to 0 to drop.
-    ebm_loss_scaling: 0.0
-    ebm_target_fraction: 0.05
-    # ── Superposition (interaction) penalty  (strategy #2, ssp126 fix) ────
-    # Enforces additive CO2+aerosol composition on hist (low-forcing) so the
-    # model composes unseen low-forcing scenarios (ssp126) from its marginals
-    # instead of over-warming when aerosols decline. 2 extra no-grad marginal
-    # passes on the hist subset each sync step. Scaling adapts via EMA.
-    interaction_loss_scaling: 0.01      # initial; adaptive scaling overrides once EMA warms
-    interaction_target_fraction: 0.05
-    # Also apply the interaction loss to ssp370, matching the model's global-mean
-    # interaction to CESM2's MEASURED interaction (ssp370−ghg−aaer vs cumCO2)
-    # rather than forcing additivity →0 (which is wrong at high forcing — the
-    # joint response is genuinely sub-additive). Goal: a compositional operator
-    # that generalizes to the unseen ssp126. Off by default; run_intssp A/B arm.
-    interaction_match_ssp370: false
-    # ── Global-mean supervision (direct, FIXED weight; default OFF) ──────────
-    # Pins the predicted field's area-weighted global mean to the target's, per
-    # sample, for ALL scenarios. Ordinary MSE under-weights the global mean, so
-    # high-forcing scenarios over-warm beyond CESM2's envelope (ssp370 ~7σ, ghg
-    # ~3σ, ssp126 ~20σ). Unlike TCRE (hist+ssp370, weak/adaptive), this is all-
-    # scenario and a FIXED strong weight. A/B-tested via run_gmeantest.sh.
-    gmean_loss_scaling: 0.0
-    # ── Sampled-gain constraint (multiplicative TCRE on SAMPLED output) ──────
-    # Every `sampled_gain_every_steps` optimizer steps: short-sample fixed probe
-    # years (hist+ssp370 cond, full conditioning) with no_grad down to low noise,
-    # then ONE grad-enabled denoise; penalize (sampled ΔT-vs-cumCO2 slope /
-    # CESM2 slope − 1)² per scenario. Unlike tcre_lowt (noised GROUND TRUTH →
-    # input already carries the answer → nearly vacuous), the low-t input here
-    # comes from the model's own sampling chain, so the penalty sees the actual
-    # sampled overshoot (~+29% hist at ep1000+, invisible to the one-step proxy).
-    # FIXED weight (not adaptive). 0.0 = fully off (default; keeps live runs
-    # unchanged). A/B fork: run2_gainfix.sh (scale 0.05).
-    # Cost per invocation ≈ (steps−1) no-grad + 1 grad forward of ~2·probe_years
-    # samples → ~+7%/epoch at every_steps=50.
-    sampled_gain_loss_scale: 0.0
-    sampled_gain_every_steps: 50
-    sampled_gain_steps: 6
-    sampled_gain_probe_years: 5
 
 
     # Which scenarios the cond ANCHORS are fitted on. null/"all4" = the shipped
