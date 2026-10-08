@@ -233,7 +233,7 @@ class UNetTrainer:
         # ── Held-out validation bookkeeping ──
         self.val_loader     = None        # set externally in main_aero.py
         self.val_every      = 10          # eval every N epochs
-        self.best_val_skill = -float("inf")
+        self.best_val_mse = float("inf")
         # Periodic force-eval (bypasses the best-skill gate so evals keep firing
         # past the VAL/Skill plateau). 0 = off. Set via config force_eval_every.
         self.force_eval_every       = int(getattr(self, "force_eval_every", 0))
@@ -468,7 +468,7 @@ class UNetTrainer:
 
         self.ema_model.ema_model.eval()
 
-        accum = {"mse": [], "cond": [], "signal": [], "error": [], "disc": []}
+        accum = {"mse": []}
 
         for batch_tuple in self.val_loader.generate():
             if len(batch_tuple) == 3:
@@ -493,9 +493,14 @@ class UNetTrainer:
             self.accelerator.print(log_dict, {"Epoch": epoch, "HELD_OUT_VAL": True})
 
         # ── Auto-save best checkpoint & trigger evaluation ────────────────
-        # Guard against degenerate epoch-0 skill=1.0 (avg_sig≈0 during warm-up)
-        if avg_sig > 1e-4 and val_skill > self.best_val_skill and self.accelerator.is_main_process:
-            self.best_val_skill = val_skill
+        # Gated on VAL/MSE (lower is better) now that VAL/Skill is gone. Skill
+        # was a poor gate anyway -- a single-realization target made it noisy,
+        # and with the aux branch off it read a constant 1.0, so it selected
+        # essentially the first checkpoint and then never fired again.
+        val_mse = float(log_dict["VAL/MSE"])
+        improved = val_mse < self.best_val_mse
+        if improved and self.accelerator.is_main_process:
+            self.best_val_mse = val_mse
             if self.save_name is not None:
                 base = self.save_name.split(".pt")[0]
                 os.makedirs(self.save_dir, exist_ok=True)
@@ -504,13 +509,13 @@ class UNetTrainer:
                 )
                 torch.save(
                     self._build_save_dict(
-                        extra={"best_val_skill": val_skill, "best_epoch": epoch}
+                        extra={"best_val_mse": val_mse, "best_epoch": epoch}
                     ),
                     best_path,
                     _use_new_zipfile_serialization=False,
                 )
                 self.accelerator.print(
-                    f"  [BEST] New best VAL/Skill={val_skill:.4f} at epoch {epoch} → {best_path}"
+                    f"  [BEST] New best VAL/MSE={val_mse:.5f} at epoch {epoch} → {best_path}"
                 )
                 self._spawn_eval(best_path, epoch)
                 self._last_eval_epoch = epoch
@@ -767,49 +772,12 @@ class UNetTrainer:
         )
 
     @torch.inference_mode()
-    def sample(self) -> None:
-        """Samples a batch of images from the model."""
-
-        self.ema_model.eval()
-        # Grab a random sample from validation set
-        batch = random.choice(self.val_set).unsqueeze(0).to(self.accelerator.device)
-
-        clean_samples = batch.to(self.weight_dtype)
-
-        # Generate the samples
-        gen_sample = generate_samples(
-            clean_samples, self.scheduler, self.sample_steps, self.ema_model
-        )
-
-        # Turn the samples into xr datasets
-        gen_ds = self.val_set.convert_tensor_to_xarray(gen_sample[0])
-        val_ds = self.val_set.convert_tensor_to_xarray(clean_samples[0])
-
-        # Create a gif of the samples
-        gen_frames = create_gif(gen_ds)
-        val_frames = create_gif(val_ds)
-
-        # Log the gif to wandb
-        for var, gif in gen_frames.items():
-            self.accelerator.log(
-                {f"Generated {var}": wandb.Video(gif, fps=4)}, step=self.global_step
-            )
-
-        for var, gif in val_frames.items():
-            self.accelerator.log(
-                {f"Original {var}": wandb.Video(gif, fps=4)}, step=self.global_step
-            )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Checkpoint I/O: shared state-dict builder + restore helper
-    # ─────────────────────────────────────────────────────────────────────────
-
     def _build_save_dict(self, extra: dict | None = None) -> dict:
         """Assemble the on-disk checkpoint payload.
 
         Always includes EMA / Unet / Optimizer / Global Step and every entry
         from `_PERSISTED_FIELDS`. `extra` is merged in last for site-specific
-        keys (e.g. best_val_skill / best_epoch in the held-out best-save).
+        keys (e.g. best_val_mse / best_epoch in the held-out best-save).
         """
         sd = {
             "EMA":         self.ema_model.ema_model.state_dict(),
@@ -1021,9 +989,14 @@ class UNetTrainer:
             print("[INFO] Restored cond anchors (COND_PROCESSED_NORM) from checkpoint")
 
         # Restore best val skill so a resumed run doesn't overwrite a better checkpoint
-        if "best_val_skill" in checkpoint:
-            self.best_val_skill = checkpoint["best_val_skill"]
-            print(f"[INFO] Restored best_val_skill={self.best_val_skill:.4f} (epoch {checkpoint.get('best_epoch', '?')})")
+        # best_val_mse replaced best_val_skill when VAL/Skill was removed. A
+        # pre-cleanup checkpoint carries only best_val_skill, which is not
+        # comparable to an MSE, so it is ignored and the gate simply re-arms
+        # from inf -- the next validation sets a fresh baseline.
+        if "best_val_mse" in checkpoint:
+            self.best_val_mse = checkpoint["best_val_mse"]
+            print(f"[INFO] Restored best_val_mse={self.best_val_mse:.5f} "
+                  f"(epoch {checkpoint.get('best_epoch', '?')})")
 
         # Avoid ZeroDivisionError if dataloader not yet initialized
         steps_per_epoch_accum = self.num_steps_per_epoch * self.accelerator.gradient_accumulation_steps
