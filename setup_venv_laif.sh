@@ -13,7 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lumi_env.sh"
 # Example:
 #   bash setup_venv_laif.sh ${LUMI_ACCOUNT}
 #
-# After this script finishes, update VENV in run2_aero.sh to:
+# After this script finishes, update VENV in run_asinh.sh to:
 #   VENV=/projappl/<project_id>/venvs/diffesm_laif/bin/activate
 
 set -euo pipefail
@@ -70,5 +70,5 @@ singularity exec "${SIF}" bash -c "
 echo ""
 echo "=== Done ==="
 echo ""
-echo "Now update VENV in run2_aero.sh:"
+echo "Now update VENV in run_asinh.sh:"
 echo "  VENV=${VENV_DIR}/bin/activate"
