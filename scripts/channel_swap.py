@@ -32,6 +32,18 @@ import torch
 import xarray as xr
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# generate_timeseries returns NORMALISED model space -- it never denormalises
+# (eval_aero.py does that separately at its call site, DENORM_FN["TREFHT"] =
+# x*21+4.5). Reporting its output as degC understated every magnitude here by
+# 21x. For a DIFFERENCE the +4.5 offset cancels, so the scale alone applies.
+TREFHT_SCALE = 21.0      # DENORM_FN["TREFHT"] slope
+
+
+def to_degC_diff(x):
+    """Normalised-space difference -> degC. Offset cancels in a difference."""
+    return x * TREFHT_SCALE
+
+
 sys.path.insert(0, os.path.dirname(_HERE))
 
 SCEN_FILE = {
@@ -138,10 +150,10 @@ def main():
     w = np.cos(np.deg2rad(lat))[:, None]
     gm = lambda a: float(np.average(a, weights=np.broadcast_to(w, a.shape)))
     ref = sampled["reference"].mean(0)
-    full = sampled["full"].mean(0) - ref
-    parts = {v: sampled[f"swap_{v}"].mean(0) - ref for v in changed}
+    full = to_degC_diff(sampled["full"].mean(0) - ref)
+    parts = {v: to_degC_diff(sampled[f"swap_{v}"].mean(0) - ref) for v in changed}
     resid = full - sum(parts.values())
-    spread = float((sampled["full"][:, ] - sampled["reference"]).std(0).mean())
+    spread = float(to_degC_diff(sampled["full"] - sampled["reference"]).std(0).mean())
     se = spread / np.sqrt(args.members)
 
     print(f"\n[swap] RESPONSE of {args.scenario} relative to {args.reference}")

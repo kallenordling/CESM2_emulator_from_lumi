@@ -169,7 +169,7 @@ def main() -> int:
         for m in missing:
             print(f"  {m}")
         print("\nBuild them first:  bash run_make_cmip7_cond.sh"
-              "   (local: bash run_cmip7_local.sh cond)")
+              "   (local: see run_make_cmip7_cond.sh)")
         return 1
 
     # ── model ───────────────────────────────────────────────────────────────

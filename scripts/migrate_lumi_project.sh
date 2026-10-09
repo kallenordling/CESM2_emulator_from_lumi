@@ -144,7 +144,7 @@ Run these ON LUMI, as the new project, in this order:
    lists EMPTY rather than erroring.
 
 8. SMOKE TEST before trusting anything long:
-     sbatch run_debug_aero.sh        # bounded dev-g run
+     sbatch run_asinh.sh             # the current training launcher
    Check the log's first lines for the resolved account and paths.
 ────────────────────────────────────────────────────────────────────────────
 EOF
