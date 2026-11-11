@@ -1,0 +1,4 @@
+# the export output: weights + data, published to the Hugging Face Hub, never to git
+bundle/
+# assembled Space (space/ + vendored model code), produced by build_space.sh
+_build/

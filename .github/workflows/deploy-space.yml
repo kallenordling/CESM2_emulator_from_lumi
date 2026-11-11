@@ -1,0 +1,58 @@
+# Deploy the web app (webapp/space + the model code it imports) to a Hugging
+# Face Space whenever any of it changes on main or release-mse-minmax, or on demand.
+#
+# One-time setup in the GitHub repo (Settings -> Secrets and variables -> Actions):
+#   secret   HF_TOKEN   a Hugging Face token with WRITE access
+#   variable HF_SPACE   the Space id, e.g. <hf-user>/cesm2-emulator
+#
+# The weights are NOT deployed from here: they live in a Hugging Face MODEL repo
+# (uploaded once from webapp/bundle, see webapp/README.md) that the Space reads
+# through its EMULATOR_BUNDLE_REPO variable.
+name: Deploy web app to Hugging Face Space
+
+on:
+  push:
+    branches: [main, release-mse-minmax]
+    paths:
+      - "webapp/space/**"
+      - "webapp/build_space.sh"
+      - "models/video_net.py"
+      - "models/rotary_embedding.py"
+      - "custom_diffusers/continuous_ddpm.py"
+      - ".github/workflows/deploy-space.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ vars.HF_SPACE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Assemble the Space
+        run: bash webapp/build_space.sh "$RUNNER_TEMP/space"
+
+      - name: Upload to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          pip install --quiet huggingface_hub
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          space = os.environ["HF_SPACE"]
+          api.create_repo(space, repo_type="space", space_sdk="gradio", exist_ok=True)
+          api.upload_folder(
+              folder_path=os.path.join(os.environ["RUNNER_TEMP"], "space"),
+              repo_id=space, repo_type="space",
+              commit_message=f"Deploy {os.environ['GITHUB_SHA'][:7]} from GitHub",
+              delete_patterns=["*.py", "models/*", "custom_diffusers/*"],
+          )
+          print(f"deployed to https://huggingface.co/spaces/{space}")
+          EOF

@@ -1,0 +1,13 @@
+# gradio itself is installed by the Space from sdk_version in README.md
+torch>=2.1
+numpy
+scipy
+einops
+einops-exts
+beartype
+diffusers          # only for DDPMSchedulerOutput in custom_diffusers/continuous_ddpm.py
+matplotlib
+cartopy
+xarray
+netCDF4
+huggingface_hub
