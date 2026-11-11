@@ -50,8 +50,16 @@ TRIGGER_DIR: str = os.environ.get(
     "LUMI_TRIGGER_DIR", f"/scratch/project_{EVAL_PROJECT}/eval_triggers"
 )
 
-#: Container-internal view of projappl (singularity bind mount).
-REPO_PFS: str = f"/pfs/lustrep1/projappl/project_{LUMI_PROJECT}/CESM2_emulator_from_lumi"
+#: Container-internal view of projappl (singularity bind mount). ``/projappl/
+#: project_<id>`` is a symlink into ``/pfs/lustrep<N>`` and N differs per
+#: project (462001112 and 462001328 on lustrep1, 462001765 on lustrep2), so
+#: resolve it rather than hardcoding lustrep1, which would point at a path that
+#: does not exist for the newer project. Off-LUMI the symlink is absent and the
+#: literal form is kept, where this value is only informational anyway.
+_PFS: str = os.path.realpath(PROJAPPL) if os.path.islink(PROJAPPL) else (
+    f"/pfs/lustrep1/projappl/project_{LUMI_PROJECT}"
+)
+REPO_PFS: str = f"{_PFS}/CESM2_emulator_from_lumi"
 
 # Export for child processes and for OmegaConf's ${oc.env:...} resolver, so a
 # config loaded by a script that only imported this module still resolves.

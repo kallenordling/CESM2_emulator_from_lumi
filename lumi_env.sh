@@ -53,7 +53,16 @@ export LUMI_TRIGGER_DIR="${LUMI_TRIGGER_DIR:-/scratch/project_${LUMI_EVAL_PROJEC
 
 # Container-internal view of projappl. Some launchers need this exact prefix
 # because the bind mount inside the singularity image resolves differently.
-export LUMI_REPO_PFS="/pfs/lustrep1/projappl/project_${LUMI_PROJECT}/CESM2_emulator_from_lumi"
+# /projappl/project_<id> is a SYMLINK into /pfs/lustrep<N>, and N differs per
+# project: 462001112 and 462001328 are on lustrep1, 462001765 on lustrep2. A
+# hardcoded lustrep1 therefore silently points at a path that does not exist
+# for the new project, and the singularity bind then fails mid-job. Resolve the
+# symlink instead; fall back to the old literal off-LUMI, where this value is
+# only ever echoed.
+_lumi_pfs="$(readlink -f "${LUMI_PROJAPPL}" 2>/dev/null || true)"
+[ -n "${_lumi_pfs}" ] || _lumi_pfs="/pfs/lustrep1/projappl/project_${LUMI_PROJECT}"
+export LUMI_REPO_PFS="${_lumi_pfs}/CESM2_emulator_from_lumi"
+unset _lumi_pfs
 
 # Make `sbatch` default to the right account even when called bare.
 export SBATCH_ACCOUNT="${LUMI_ACCOUNT}"
