@@ -81,7 +81,7 @@ Re-running `deploy.sh` is safe: it applies any changes and rebuilds.
 requests 0.5 core and 3 GiB, about 3,900 BU/month while running. Scale to zero
 with `oc scale deployment/cesm2-emulator --replicas=0` when it isn't needed.
 
-**Speed.** Two CPU cores: about 2 min per member at the default 25 steps. The
+**Speed.** Two CPU cores: about 2.5 min per member at the default 25 steps (a paired run with 1 member took 310 s). The
 unmodified run behind "compare" is cached.
 
 ## Scientific guard rails built into the app

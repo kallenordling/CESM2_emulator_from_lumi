@@ -72,7 +72,7 @@ spec:
             - name: OMP_NUM_THREADS     # = the CPU limit; torch would otherwise
               value: "2"                # spawn one thread per NODE core
             - name: SEC_PER_STEP
-              value: "4.5"
+              value: "6.2"      # measured on Rahti 2026-11-11 (2 cores)
           envFrom:
             - secretRef:
                 name: hf-token          # HF_TOKEN, to read the private bundle
