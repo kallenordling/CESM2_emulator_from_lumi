@@ -1,21 +1,25 @@
 # Web app: edit emissions, generate climate maps
 
-A Gradio app, hosted as a Hugging Face Space, where anyone can pick a scenario
-and year, scale CO₂ / SO₂ / black-carbon emissions (globally or in one region),
-and get emulated annual-mean temperature and precipitation maps. They can also
-download the result as NetCDF.
+A Gradio app, hosted on CSC Rahti, where anyone can pick a scenario and year,
+scale CO₂ / SO₂ / black-carbon emissions (globally or in one region), and get
+emulated annual-mean temperature and precipitation maps. They can also download
+the result as NetCDF.
 
 ```
-GitHub (this repo)                    Hugging Face
-──────────────────                    ────────────
-webapp/space/  ──GitHub Action──▶     Space  (app.py, runs the sampler)
-models/, custom_diffusers/ (copied)          │ reads EMULATOR_BUNDLE_REPO
-                                             ▼
-webapp/bundle/ ──upload once─────▶    Model repo (weights + emission maps)
+GitHub (this repo)                         CSC Rahti (OpenShift)
+──────────────────                         ─────────────────────
+push to release-mse-minmax ──webhook──▶    BuildConfig: docker build webapp/Dockerfile
+                                                 │ new image
+                                                 ▼
+                                           Deployment: app.py, 2 CPU / 4 GiB
+                                                 │ reads at startup
+Hugging Face (private model repo) ◀──────────────┘ EMULATOR_BUNDLE_REPO + HF_TOKEN
+nordlin1/cesm2-emulator-bundle: weights + emission maps (from webapp/bundle)
 ```
 
-The code is deployed from GitHub. The 200 MB bundle goes to the Hub instead,
-because large binaries are kept out of this repo's history on purpose.
+The code deploys from GitHub. The 245 MB bundle sits in a private Hugging
+Face model repo instead, because large binaries are kept out of this repo's
+history on purpose.
 
 ## Files
 
@@ -24,8 +28,11 @@ because large binaries are kept out of this repo's history on purpose.
 | `export_bundle.py` | checkpoint → `bundle/` (EMA weights, cond anchors, σ, raw emission maps, baseline + 25-member reference maps). Refuses non-minmax / PCA checkpoints and checks the app's cond normalisation against `data/climate_dataset.py` |
 | `space/emulator.py` | inference core: edit → smooth → min/max → 50-step sampling → denorm, with paired noise |
 | `space/app.py` | the Gradio UI |
-| `build_space.sh` | assembles the Space: `space/` plus `models/video_net.py`, `models/rotary_embedding.py`, `custom_diffusers/continuous_ddpm.py` |
-| `../.github/workflows/deploy-space.yml` | pushes the assembled Space on every change to `main` |
+| `Dockerfile` | the container (context = repo root; copies the real `models/` + scheduler code). Runs as Rahti's random non-root UID |
+| `rahti/rahti.yaml` | ImageStream, BuildConfig (GitHub, Docker strategy), Deployment, Service, Route (edge TLS) |
+| `rahti/deploy.sh` | one-command deploy/update on Rahti, optionally registers the GitHub webhook |
+| `build_space.sh` | assembles `space/` + model code into one folder, for a local run (or a Hugging Face Space, which now needs PRO) |
+| `smoke_test.py` | CPU check: unmodified sample vs the 25-member reference |
 
 ## 1. Build the bundle (once per checkpoint)
 
@@ -49,26 +56,33 @@ bash webapp/build_space.sh webapp/_build/space --with-bundle
 cd webapp/_build/space && pip install gradio -r requirements.txt && python app.py
 ```
 
-## 3. Publish
+## 3. Publish on CSC Rahti
+
+Once only:
 
 ```bash
-# a) weights + data -> a model repo (once per checkpoint)
-hf upload <hf-user>/cesm2-emulator-bundle webapp/bundle . --repo-type model
+# a) weights + data -> a private Hugging Face model repo (once per checkpoint)
+hf auth login
+hf upload nordlin1/cesm2-emulator-bundle webapp/bundle . --repo-type model --private
 
-# b) the Space: create it once on huggingface.co (SDK: Gradio), then in its
-#    Settings set the variable EMULATOR_BUNDLE_REPO=<hf-user>/cesm2-emulator-bundle
-#    (plus a secret HF_TOKEN if the model repo is private).
-#    Hardware: free "CPU basic" (2 vCPU, 16 GB) — about 4 min per member at
-#    50 steps; the unmodified run behind "compare" is cached. ZeroGPU (PRO)
-#    would cut that to seconds with no code change.
+# b) Rahti access: https://my.csc.fi -> your CSC project -> Rahti -> "Apply for access"
+#    then: https://console.rahti.csc.fi -> your name -> "Copy Login Command"
+oc login https://api.2.rahti.csc.fi:6443 --token=...
 
-# c) GitHub: Settings -> Secrets and variables -> Actions
-#    secret HF_TOKEN (write), variable HF_SPACE=<hf-user>/cesm2-emulator
-#    Then push to main, or run the workflow by hand ("Run workflow").
+# c) deploy: namespace name (globally unique), CSC project number, and hook up GitHub
+bash webapp/rahti/deploy.sh cesm2-emulator <csc-project-number> --github-webhook
 ```
 
-To link it from GitHub, add a badge to the top-level README:
-`[![Open in Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-md.svg)](https://huggingface.co/spaces/<hf-user>/cesm2-emulator)`
+After that, every push to `release-mse-minmax` rebuilds the image on Rahti and
+redeploys it. To deploy from another branch, change `ref:` in `rahti/rahti.yaml`.
+Re-running `deploy.sh` is safe: it applies any changes and rebuilds.
+
+**Cost.** Rahti bills Cloud Billing Units on max(requested, used). The app
+requests 0.5 core and 3 GiB, about 3,900 BU/month while running. Scale to zero
+with `oc scale deployment/cesm2-emulator --replicas=0` when it isn't needed.
+
+**Speed.** Two CPU cores: about 2 min per member at the default 25 steps. The
+unmodified run behind "compare" is cached.
 
 ## Scientific guard rails built into the app
 

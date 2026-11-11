@@ -1,0 +1,119 @@
+# CSC Rahti (OpenShift) objects for the web app. Applied by deploy.sh, which
+# substitutes __NAMESPACE__; do not `oc apply` this file directly.
+#
+#   ImageStream + BuildConfig   build webapp/Dockerfile from GitHub on Rahti
+#                               (a GitHub webhook rebuilds on every push to the branch)
+#   Deployment                  the app; redeploys when a new image lands
+#   Service + Route             public HTTPS URL (edge TLS)
+#
+# Sizing: Rahti's per-CSC-project quota is 4 cores / 16 GiB. App (2) + one
+# build (2) = 4 cores, and the Deployment uses Recreate so a redeploy never
+# runs two app pods at once. Billing counts max(requested, used): requests are
+# kept low, memory is what the model actually needs (peak RSS ~2.3 GB).
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: cesm2-emulator
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: cesm2-emulator
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/kallenordling/CESM2_emulator_from_lumi.git
+      ref: release-mse-minmax
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: webapp/Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: cesm2-emulator:latest
+  resources:
+    requests: {cpu: 500m, memory: 2Gi}
+    limits: {cpu: "2", memory: 4Gi}
+  runPolicy: SerialLatestOnly
+  triggers:
+    - type: GitHub
+      github:
+        secretReference:
+          name: github-webhook
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cesm2-emulator
+  annotations:
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"cesm2-emulator:latest"},
+        "fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: cesm2-emulator}
+  template:
+    metadata:
+      labels: {app: cesm2-emulator}
+    spec:
+      containers:
+        - name: app
+          image: image-registry.openshift-image-registry.svc:5000/__NAMESPACE__/cesm2-emulator:latest
+          ports:
+            - containerPort: 7860
+          env:
+            - name: EMULATOR_BUNDLE_REPO
+              value: nordlin1/cesm2-emulator-bundle
+            - name: OMP_NUM_THREADS     # = the CPU limit; torch would otherwise
+              value: "2"                # spawn one thread per NODE core
+            - name: SEC_PER_STEP
+              value: "4.5"
+          envFrom:
+            - secretRef:
+                name: hf-token          # HF_TOKEN, to read the private bundle
+          resources:
+            requests: {cpu: 500m, memory: 3Gi}
+            limits: {cpu: "2", memory: 4Gi}
+          startupProbe:                 # first start downloads ~245 MB + loads the model
+            httpGet: {path: /, port: 7860}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /, port: 7860}
+            periodSeconds: 20
+          livenessProbe:                # generous: one generation pins both cores for minutes
+            httpGet: {path: /, port: 7860}
+            periodSeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cesm2-emulator
+spec:
+  selector: {app: cesm2-emulator}
+  ports:
+    - port: 7860
+      targetPort: 7860
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: cesm2-emulator
+  annotations:
+    haproxy.router.openshift.io/timeout: 15m
+spec:
+  to:
+    kind: Service
+    name: cesm2-emulator
+  port:
+    targetPort: 7860
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
