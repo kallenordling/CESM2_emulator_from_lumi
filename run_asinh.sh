@@ -34,7 +34,7 @@
 # SAVE_DIR at scratch, which has terabytes free:
 #   SAVE_DIR=/scratch/project_462001112/runs_asinh99
 # -----------------------------------------------------------------------------
-#SBATCH --job-name=asinh
+#SBATCH --job-name=diffesm_paper
 #
 # ── mseyb + BC/PRECT A/B (2026-08-03) — completes the 2×2 factorial ─────────
 # ssp370 warm+wet bias investigation (see memory gainfix_ssp370_persistent_bias.md).
@@ -56,7 +56,7 @@
 # SAVE_DIR at scratch, which has terabytes free:
 #   SAVE_DIR=/scratch/project_462001112/runs_asinh99
 # -----------------------------------------------------------------------------
-#SBATCH --job-name=asinh
+#SBATCH --job-name=diffesm_paper
 #
 # ── mseyb + BC/PRECT A/B (2026-08-03) — completes the 2×2 factorial ─────────
 # ssp370 warm+wet bias investigation (see memory gainfix_ssp370_persistent_bias.md).
@@ -106,7 +106,11 @@
 # which is at quota: a failed log write trips set -e and kills the job.
 # That is what ended link 4 of the asinh99 chain 1:50 in, having queued
 # no successor. Scratch has terabytes free.
-#SBATCH --output=/scratch/project_462001112/logs/%x_%j.out
+# BEING LITERAL, IT DOES NOT FOLLOW LUMI_PROJECT -- edit it by hand when
+# moving projects. It stayed on 462001112 through the 2026-10-28 move, so
+# job 23239126 ran on 462001765 and wrote its log to the old project's
+# scratch, which is 92 days from data removal. Repointed for links 3+.
+#SBATCH --output=/scratch/project_462001765/logs/%x_%j.out
 
 # Single source of truth for the LUMI project id and its paths.
 # Under sbatch, BASH_SOURCE points at /var/spool/slurmd/job<N>/slurm_script —
@@ -350,6 +354,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.save_name=${SAVE_NAME} \
         trainer.hyperparameters.save_dir="${SAVE_DIR:-runs/}" \
         ${LOAD_OVERRIDE} \
+        ${EXTRA_TRAIN_OVERRIDES:-} \
         trainer.hyperparameters.eval_data_config="configs/${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
         hydra.run.dir="${HYDRA_RUN_DIR}"
 '"
