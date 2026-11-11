@@ -69,6 +69,16 @@ trainer:
     # PRECT is noisier → downweight to 0.5 so it can't dominate / destabilise the
     # shared backbone. Default [1.0, 1.0] (or absent) = unchanged equal weighting.
     target_var_weights: [1.0, 0.5]
+    # ── Training objective (trainer/losses.py; branch loss-functions) ──
+    # Defaults = the plain cos-lat v-MSE of every released run. Quote string
+    # values: a bare `off`/`no` is a YAML BOOL.
+    loss_type: "mse"            # "mse" | "pseudo_huber"
+    huber_c: 0.05               # pseudo_huber transition, normalised v units (RMS residual ~0.1)
+    snr_weighting: "none"       # "none" | "min_snr"
+    min_snr_gamma: 5.0
+    multiscale_weight: 0.0      # >0 adds the MSE of k x k area-weighted block means
+    multiscale_pools: [4, 16, 48]   # must divide 96 x 144
+    allow_loss_change: false    # resume guard: refuse a checkpoint trained with another objective
 
 
     # Which scenarios the cond ANCHORS are fitted on. null/"all4" = the shipped

@@ -17,6 +17,7 @@ from data.climate_dataset import (ClimateDataset, ClimateDataLoader,
 from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
+from trainer.losses import LossConfig, denoising_loss
 
 
 # =============================================================================
@@ -260,6 +261,17 @@ class UNetTrainer:
         self._target_var_weights = _tvw
         self._target_weight_tensor = None   # lazily built (1, C, 1, 1, 1)
 
+        # ── Training objective (trainer/losses.py) ──
+        # Default = the cos-lat-weighted v-MSE every released run used, and
+        # that path still goes through calc_mse_loss unchanged.
+        self.loss_cfg = LossConfig.from_trainer(self)
+        self._lat_weight = None             # lazily built (H,) on device
+        if (self.loss_cfg.snr_weighting != "none"
+                and not isinstance(self.scheduler, ContinuousDDPM)):
+            raise ValueError("snr_weighting needs the continuous scheduler: the "
+                             "discrete one passes integer timesteps, not log-SNR")
+        print(f"[TRAINER] Loss: {self.loss_cfg.describe()}")
+
     def _init_climatology_buffer(self) -> None:
         """Move the dataset-side 1850-1900 climatology mean to `self.device`.
 
@@ -404,6 +416,10 @@ class UNetTrainer:
                         "MSE LOSS":       avg_mse_loss.detach().item(),
                         "LR":             self.optimizer.param_groups[0]["lr"],
                     }
+                    # Per-term breakdown of a non-MSE objective (this rank only:
+                    # diagnostics, not worth another collective).
+                    for _k, _v in (getattr(self, "_loss_components", None) or {}).items():
+                        log_dict[_k] = float(_v)
 
                     # Per-scenario sample counts — useful for verifying mix is working
                     if scenario_ids is not None and self.accelerator.is_main_process:
@@ -726,14 +742,33 @@ class UNetTrainer:
                 else:
                     self._target_var_weights = None   # all 1 → no-op path
 
-            # Pure denoising MSE. This IS the training objective: the cond /
-            # TCRE / EBM / interaction / global-mean / sampled-gain terms were
-            # removed for the release, having been held at zero throughout by
-            # mse_only, so `loss` was already identical to `mse_loss`.
-            loss = calc_mse_loss(
-                model_output, target, self._ref_ds.lats,
-                channel_weights=self._target_weight_tensor,
-            )
+            # Default: pure denoising MSE, exactly as in every released run
+            # (the cond / TCRE / EBM / interaction / global-mean / sampled-gain
+            # terms were removed, having been held at zero by mse_only).
+            # The loss-function arms swap in trainer/losses.denoising_loss and
+            # still report the plain MSE, so "MSE LOSS" compares across arms.
+            if self.loss_cfg.is_plain_mse:
+                loss = calc_mse_loss(
+                    model_output, target, self._ref_ds.lats,
+                    channel_weights=self._target_weight_tensor,
+                )
+                plain_mse = loss.detach()
+                self._loss_components = None
+            else:
+                if self._lat_weight is None:
+                    lat = torch.as_tensor(self._ref_ds.lats.values,
+                                          dtype=torch.float32, device=self.device)
+                    self._lat_weight = torch.cos(torch.deg2rad(lat)).clamp(min=0.2)
+                loss, self._loss_components = denoising_loss(
+                    model_output, target, timesteps, self._lat_weight, self.loss_cfg,
+                    prediction_type=self.scheduler.config.prediction_type,
+                    channel_weights=self._target_weight_tensor,
+                )
+                with torch.no_grad():
+                    plain_mse = calc_mse_loss(
+                        model_output.detach(), target, self._ref_ds.lats,
+                        channel_weights=self._target_weight_tensor,
+                    )
 
             self.accelerator.backward(loss)
 
@@ -749,7 +784,7 @@ class UNetTrainer:
                     g["lr"] = _lr
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return loss, loss.detach()
+        return loss.detach(), plain_mse
 
     def validation_loop(self, sanity_check=False) -> None:
         """Runs a single epoch of validation.
@@ -795,6 +830,10 @@ class UNetTrainer:
             # exactly how the first normalize_last evals normalised SUL ~6x
             # off in silence.
             "COND_PROCESSED_NORM": _cd_processed_state(),
+            # Which objective trained these weights. A resume checks it, so a
+            # chain link that lost its EXTRA_TRAIN_OVERRIDES cannot quietly
+            # turn a loss arm back into plain MSE.
+            "LOSS_CONFIG":    self.loss_cfg.as_dict(),
         }
         for ckpt_key, attr, _ in self._PERSISTED_FIELDS:
             sd[ckpt_key] = getattr(self, attr)
@@ -978,6 +1017,25 @@ class UNetTrainer:
         # the call is kept so an older checkpoint carrying those keys loads
         # without error (they are simply ignored).
         self._restore_persisted_fields(checkpoint)
+
+        # The objective must not change across a resume unless asked to.
+        saved = checkpoint.get("LOSS_CONFIG")
+        current = self.loss_cfg.as_dict()
+        if saved is None:
+            if not self.loss_cfg.is_plain_mse:
+                print(f"[WARN] {os.path.basename(path)} predates LOSS_CONFIG (trained "
+                      f"with plain MSE); continuing it with {self.loss_cfg.describe()} "
+                      f"makes this a warm-started fork, not a fresh loss arm")
+        elif saved != current:
+            msg = (f"checkpoint {os.path.basename(path)} was trained with loss "
+                   f"{saved}, but this run is configured with {current}")
+            if getattr(self, "allow_loss_change", False):
+                print(f"[WARN] {msg} -- allow_loss_change=true, continuing")
+            else:
+                raise RuntimeError(
+                    f"{msg}. A resumed loss arm must keep its EXTRA_TRAIN_OVERRIDES; "
+                    f"set trainer.hyperparameters.allow_loss_change=true to switch "
+                    f"objective on purpose.")
 
         # Restore the cond anchors BEFORE any load_data call: cond fields are
         # normalised lazily in load_data, so injecting the checkpoint's
