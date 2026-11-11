@@ -17,7 +17,7 @@ from data.climate_dataset import (ClimateDataset, ClimateDataLoader,
 from data.multi_experiment_dataset import MultiExperimentDataset, MultiExperimentDataLoader
 from models.video_net import UNetModel3D
 from custom_diffusers.continuous_ddpm import ContinuousDDPM
-from trainer.losses import LossConfig, denoising_loss
+from trainer.losses import LossConfig, denoising_loss, sample_elbo_log_snr
 
 
 # =============================================================================
@@ -270,7 +270,13 @@ class UNetTrainer:
                 and not isinstance(self.scheduler, ContinuousDDPM)):
             raise ValueError("snr_weighting needs the continuous scheduler: the "
                              "discrete one passes integer timesteps, not log-SNR")
-        print(f"[TRAINER] Loss: {self.loss_cfg.describe()}")
+        self._log_snr_range = None
+        if isinstance(self.scheduler, ContinuousDDPM):
+            _ends = self.scheduler.log_snr(torch.tensor([1.0, 0.0]))
+            self._log_snr_range = (float(_ends[0]), float(_ends[1]))
+        print(f"[TRAINER] Loss: {self.loss_cfg.describe()}"
+              + (f"  log-SNR range {self._log_snr_range[0]:.2f}..{self._log_snr_range[1]:.2f}"
+                 if self.loss_cfg.snr_weighting == "elbo" else ""))
 
     def _init_climatology_buffer(self) -> None:
         """Move the dataset-side 1850-1900 climatology mean to `self.device`.
@@ -441,6 +447,20 @@ class UNetTrainer:
             if epoch % self.val_every == 0:
                 self.eval_held_out(epoch)
             torch.cuda.empty_cache()
+
+        # ── Reached max_epochs: save the final state and evaluate it ─────────
+        # Without this a run stopped by max_epochs (STOP_EPOCH in run_asinh.sh)
+        # ends on whatever step-based checkpoint came last, and the final epoch
+        # is evaluated only if the VAL/MSE or force-eval gate happens to fire.
+        if (self.first_epoch < self.max_epochs and self.accelerator.is_main_process
+                and self.save_name is not None):
+            last = self.max_epochs - 1
+            self.save(last)
+            if getattr(self, "_last_eval_epoch", -1) != last:
+                base = self.save_name.split(".pt")[0]
+                self._spawn_eval(os.path.abspath(
+                    os.path.join(self.save_dir, f"{base}_{last}.pt")), last)
+            self.accelerator.print(f"[TRAINER] max_epochs reached: final checkpoint epoch {last}")
 
     @torch.no_grad()
     def _compute_val_metrics(self, batch, cond_map, scenario_ids=None):
@@ -634,7 +654,12 @@ class UNetTrainer:
         noise = torch.randn_like(clean_samples)
 
         # If we are doing continuous diffusion, timesteps need to be from 0 - 1
-        if isinstance(self.scheduler, ContinuousDDPM):
+        if isinstance(self.scheduler, ContinuousDDPM) and self.loss_cfg.snr_weighting == "elbo":
+            # ELBO arm: log-SNR drawn from the likelihood weighting itself.
+            timesteps = sample_elbo_log_snr(
+                clean_samples.shape[0], *self._log_snr_range, device=self.device,
+            )
+        elif isinstance(self.scheduler, ContinuousDDPM):
             timesteps = torch.rand(clean_samples.shape[0], device=self.device)
             timesteps = self.scheduler.log_snr(timesteps)
         else:

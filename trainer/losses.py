@@ -26,6 +26,18 @@ exactly the cos-latitude-weighted MSE every released run used:
                       (log-SNR ~ -2..+2). Note that the noisy steps are where
                       the forced large-scale mean E[x0 | cond] is learned, so
                       this arm tests whether that band is over- or under-served.
+    ``elbo``          maximum likelihood: the continuous-time ELBO (Kingma et
+                      al. 2021), i.e. the cross-entropy between CESM2 and the
+                      emulator up to a constant. As an epsilon loss it is
+                      uniform in log-SNR; as a v loss its density is
+                      sigmoid(log-SNR). Rather than weighting uniform-t samples
+                      by -dlambda/dt * sigmoid(lambda), which spans ~5 orders
+                      of magnitude and makes the gradient noisy, log-SNR is
+                      SAMPLED from that density (importance sampling, see
+                      sample_elbo_log_snr) and every sample is weighted 1.
+                      Only ~7.5% of samples then land at log-SNR < 0: the
+                      opposite emphasis to min_snr. Rewards a calibrated
+                      ensemble spread rather than sharp large-scale means.
 
 ``multiscale_weight`` (+ ``multiscale_pools``)
     Adds, for each pooling size k, the MSE of the area-weighted k x k block
@@ -48,7 +60,7 @@ import torch
 import torch.nn.functional as F
 
 LOSS_TYPES = ("mse", "pseudo_huber")
-SNR_WEIGHTINGS = ("none", "min_snr")
+SNR_WEIGHTINGS = ("none", "min_snr", "elbo")
 
 
 @dataclass(frozen=True)
@@ -97,7 +109,7 @@ class LossConfig:
             raise ValueError(f"multiscale_pools must be >= 2, got {self.multiscale_pools}")
 
     @property
-    def is_plain_mse(self) -> bool:
+    def is_plain_mse(self) -> bool:  # elbo changes the SAMPLER, so it is not plain
         return (self.loss_type == "mse" and self.snr_weighting == "none"
                 and self.multiscale_weight == 0)
 
@@ -110,14 +122,34 @@ class LossConfig:
         parts = [self.loss_type + (f"(c={self.huber_c:g})" if self.loss_type == "pseudo_huber" else "")]
         if self.snr_weighting == "min_snr":
             parts.append(f"min_snr(gamma={self.min_snr_gamma:g})")
+        if self.snr_weighting == "elbo":
+            parts.append("elbo(log-SNR ~ sigmoid)")
         if self.multiscale_weight > 0:
             parts.append(f"multiscale(w={self.multiscale_weight:g}, pools={list(self.multiscale_pools)})")
         return " + ".join(parts)
 
 
+def sample_elbo_log_snr(n: int, log_snr_min: float, log_snr_max: float,
+                        *, device=None, generator=None) -> torch.Tensor:
+    """Draw log-SNR with density proportional to sigmoid(lambda) on [min, max].
+
+    That is the v-loss ELBO weight after the change of variable t -> lambda:
+    -dlambda/dt * sigmoid(lambda) dt = sigmoid(lambda) dlambda, independent of
+    the noise schedule. The CDF is softplus, so invert it: lambda =
+    log(expm1(y)) with y uniform between softplus(min) and softplus(max).
+    """
+    lo = F.softplus(torch.tensor(float(log_snr_min), dtype=torch.float64))
+    hi = F.softplus(torch.tensor(float(log_snr_max), dtype=torch.float64))
+    u = torch.rand(n, dtype=torch.float64, device=device, generator=generator)
+    y = lo.to(u.device) + u * (hi - lo).to(u.device)
+    return torch.log(torch.expm1(y)).float()
+
+
 def snr_weights(log_snr: torch.Tensor, cfg: LossConfig, prediction_type: str) -> torch.Tensor | None:
     """Per-sample weight (B,) from the noise level, or None for uniform."""
-    if cfg.snr_weighting == "none":
+    if cfg.snr_weighting in ("none", "elbo"):   # elbo: importance-sampled, weight 1
+        if cfg.snr_weighting == "elbo" and prediction_type != "v_prediction":
+            raise ValueError("elbo sampling is derived for v_prediction")
         return None
     snr = torch.exp(log_snr.float())
     clipped = torch.clamp(snr, max=cfg.min_snr_gamma)

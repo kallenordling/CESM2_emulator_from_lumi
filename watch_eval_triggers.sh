@@ -51,6 +51,8 @@ echo "[watcher] Started. Watching ${TRIGGER_DIR} every ${POLL_INTERVAL}s"
 PROD_RUN="${PROD_RUN:-run_slope-tcre}"
 STALE_TRIGGER_SECS="${STALE_TRIGGER_SECS:-7200}"
 _now=$(date +%s)
+# A one-shot pass (WATCH_ONCE=1) must not purge other arms' triggers.
+[[ "${WATCH_ONCE:-0}" == "1" ]] && STALE_TRIGGER_SECS=999999999
 for trigger in "${TRIGGER_DIR}"/eval_request_*.json; do
     [[ -f "$trigger" ]] || continue
     keep=""
@@ -130,5 +132,8 @@ while true; do
         mv "$trigger" "${DONE_DIR}/$(basename $trigger).submitted"
     done
 
+    # WATCH_ONCE=1: one pass, used by a training link that just finished its
+    # arm (run_asinh.sh STOP_EPOCH) so the final trigger is not stranded.
+    [[ "${WATCH_ONCE:-0}" == "1" ]] && break
     sleep "$POLL_INTERVAL"
 done

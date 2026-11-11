@@ -228,6 +228,32 @@ SAVE_DIR="${SAVE_DIR:-runs/}"
 TRAIN_DATA_CONFIG="${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}"
 export RUN_TAG SAVE_DIR TRAIN_DATA_CONFIG
 
+# ── STOP_EPOCH: train to a fixed epoch, then end the chain ───────────────────
+# Sticky down the chain (--export=ALL). Sets max_epochs=STOP_EPOCH+1; the
+# trainer then saves run_<tag>_co2fix_<STOP_EPOCH>.pt and triggers its eval.
+# A link that starts with that checkpoint already on disk exits at once
+# without queueing another, so CHAIN_REMAINING can be generous.
+STOP_EPOCH="${STOP_EPOCH:-}"
+export STOP_EPOCH
+_newest_epoch() {
+    local base="run_${RUN_TAG}"
+    [[ "${CO2FIX:-0}" == "1" || "${FRESH:-0}" == "1" ]] && base="${base}_co2fix"
+    ls "${SAVE_DIR%/}/${base}"_*.pt 2>/dev/null \
+        | sed -n "s|.*/${base}_\([0-9]\+\)\.pt$|\1|p" | sort -n | tail -1
+}
+STOP_OVERRIDE=""
+if [[ -n "${STOP_EPOCH}" ]]; then
+    STOP_OVERRIDE="trainer.hyperparameters.max_epochs=$(( STOP_EPOCH + 1 ))"
+    _ne="$(_newest_epoch)"
+    if [[ "${FRESH:-0}" != "1" && -n "${_ne}" && "${_ne}" -ge "${STOP_EPOCH}" ]]; then
+        echo "[stop] ${RUN_TAG} already at epoch ${_ne} >= STOP_EPOCH=${STOP_EPOCH}: done, not training or chaining"
+        srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
+            bash -c "rm -rf ${LOCAL_DATA_ROOT} 2>/dev/null || true" || true
+        exit 0
+    fi
+    echo "[stop] STOP_EPOCH=${STOP_EPOCH} (newest checkpoint epoch: ${_ne:-none})"
+fi
+
 # ── Launch eval watcher as a background SLURM job ────────────────────────────
 WATCHER_TIME=$(squeue -h -j "${SLURM_JOB_ID}" -o '%l' 2>/dev/null | tr -d '[:space:]' || true)
 [[ -z "${WATCHER_TIME}" || "${WATCHER_TIME}" == "UNLIMITED" ]] && WATCHER_TIME="06:00:00"
@@ -355,6 +381,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.save_dir="${SAVE_DIR:-runs/}" \
         ${LOAD_OVERRIDE} \
         ${EXTRA_TRAIN_OVERRIDES:-} \
+        ${STOP_OVERRIDE} \
         trainer.hyperparameters.eval_data_config="configs/${TRAIN_DATA_CONFIG:-config_data_ybias_BCprect.yaml}" \
         hydra.run.dir="${HYDRA_RUN_DIR}"
 '"
@@ -368,6 +395,21 @@ cp /tmp/miopen_${SLURM_JOB_ID}/*.db     "${PERSISTENT_CACHE}/" 2>/dev/null || tr
 # ── Clean up staged training data from each node's /tmp ──────────────────────
 srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 \
     bash -c "rm -rf ${LOCAL_DATA_ROOT} 2>/dev/null || true" || true
+
+# ── Arm finished? Submit its last eval and stop the chain ─────────────────────
+if [[ -n "${STOP_EPOCH}" ]]; then
+    _ne="$(_newest_epoch)"
+    if [[ -n "${_ne}" && "${_ne}" -ge "${STOP_EPOCH}" ]]; then
+        echo "[stop] reached epoch ${_ne} >= STOP_EPOCH=${STOP_EPOCH}"
+        if [[ -n "${NEXT_JOB:-}" ]]; then
+            scancel "${NEXT_JOB}" 2>/dev/null || true
+            echo "[stop] cancelled queued link ${NEXT_JOB}"
+        fi
+        # The final eval trigger was written seconds ago; the watcher job is
+        # about to be cancelled below, so hand it to one pass here.
+        PROD_RUN="run_${RUN_TAG}" WATCH_ONCE=1 bash "${SLURM_SUBMIT_DIR}/watch_eval_triggers.sh" || true
+    fi
+fi
 
 # ── Cancel watcher when training finishes ─────────────────────────────────────
 if [[ -n "${WATCHER_JOB}" ]]; then
