@@ -45,6 +45,10 @@ def _sym_lim(*fields, q=99.0, floor=0.1):
     return max(float(v), floor)
 
 
+# Every difference shown in the app is edited minus unmodified; say so on the plot.
+DIFF_TITLE = "Difference: your scenario − unmodified"
+
+
 def _map_panels(fields, titles, cmap, units, lims, suptitle):
     n = len(fields)
     fig = plt.figure(figsize=(5.2 * n, 4.0), layout="constrained")
@@ -98,7 +102,7 @@ def _cond_fig(cond_mod, cond_base, edited):
                                rasterized=True)
             ax.coastlines(linewidth=0.4, color="0.5")
             ax.set_global()
-            ax.set_title(f"{COND_NAMES.get(var, var)} — your change", fontsize=10)
+            ax.set_title(f"{COND_NAMES.get(var, var)} — edited − unmodified", fontsize=10)
             fig.colorbar(im, ax=ax, orientation="horizontal",
                          shrink=0.8).set_label("normalised units", fontsize=8)
     fig.suptitle("What the model sees (after smoothing and normalisation). "
@@ -205,12 +209,12 @@ def generate(scen_label, year, co2, sul, bc, region, n_members, seed, steps, pai
         dT, dP = aT - bT, aP - bP
         limT, limP = _sym_lim(aT, bT), _sym_lim(aP, bP)
         figT = _map_panels([aT, bT, dT],
-                           ["Your scenario", "Unmodified scenario", "Your change (difference)"],
+                           ["Your scenario", "Unmodified scenario", DIFF_TITLE],
                            "RdBu_r", "°C", [limT, limT, _sym_lim(dT, floor=0.05)],
                            f"Surface air temperature anomaly vs 1850–1900 — {tag}, "
                            f"{n_members}-member mean")
         figP = _map_panels([aP, bP, dP],
-                           ["Your scenario", "Unmodified scenario", "Your change (difference)"],
+                           ["Your scenario", "Unmodified scenario", DIFF_TITLE],
                            "BrBG", "mm/day", [limP, limP, _sym_lim(dP, floor=0.02)],
                            f"Precipitation anomaly vs 1850–1900 — {tag}, "
                            f"{n_members}-member mean")
@@ -246,7 +250,7 @@ def generate(scen_label, year, co2, sul, bc, region, n_members, seed, steps, pai
         dmT, dseT = _stats([a - b for a, b in zip(mod, base)], iT)
         dmP, dseP = _stats([100 * (a[iP] - b[iP])[None] / gP for a, b in zip(mod, base)], 0)
         lines += [f"| Unmodified scenario | {_fmt(bmT, bseT, '°C')} | {_fmt(bmP, bseP, '%')} |",
-                  f"| **Effect of your change** | **{_fmt(dmT, dseT, '°C')}** | "
+                  f"| **Effect of your change** (yours − unmodified) | **{_fmt(dmT, dseT, '°C')}** | "
                   f"**{_fmt(dmP, dseP, '%')}** |"]
     ref = EMU.ref.get(("TREFHT", scen))
     if ref is not None and year in ref[0]:
