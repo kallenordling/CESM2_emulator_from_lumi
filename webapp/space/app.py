@@ -71,7 +71,7 @@ def _map_panels(fields, titles, cmap, units, lims, suptitle):
 def _cond_fig(cond_mod, cond_base, edited):
     rows = 2 if edited else 1
     nc = len(EMU.cond_vars)
-    fig = plt.figure(figsize=(5.2 * nc, 3.9 * rows), layout="constrained")
+    fig = plt.figure(figsize=(5.2 * nc, 4.2 * rows), layout="constrained")
     for c, var in enumerate(EMU.cond_vars):
         ax = fig.add_subplot(rows, nc, c + 1, projection=ccrs.Robinson())
         fc, lonc = add_cyclic_point(cond_mod[c], coord=EMU.lon)
@@ -83,7 +83,8 @@ def _cond_fig(cond_mod, cond_base, edited):
                        linewidths=0.8, transform=ccrs.PlateCarree())
         ax.coastlines(linewidth=0.4, color="0.6")
         ax.set_global()
-        ax.set_title(f"{COND_NAMES.get(var, var)} — model input", fontsize=10)
+        ax.set_title(f"{COND_NAMES.get(var, var)} — model input, your scenario",
+                     fontsize=10)
         fig.colorbar(im, ax=ax, orientation="horizontal", shrink=0.8,
                      extend="max").set_label("normalised (training range −1 to 1)",
                                              fontsize=8)
@@ -93,7 +94,8 @@ def _cond_fig(cond_mod, cond_base, edited):
             if not np.any(np.abs(d) > 1e-6):
                 ax.coastlines(linewidth=0.4, color="0.6")
                 ax.set_global()
-                ax.set_title(f"{COND_NAMES.get(var, var)} — unchanged", fontsize=10)
+                ax.set_title(f"{COND_NAMES.get(var, var)} — not changed by your edit",
+                             fontsize=10)
                 continue
             fc, lonc = add_cyclic_point(d, coord=EMU.lon)
             lim = max(float(np.abs(d).max()), 1e-3)
@@ -102,11 +104,15 @@ def _cond_fig(cond_mod, cond_base, edited):
                                rasterized=True)
             ax.coastlines(linewidth=0.4, color="0.5")
             ax.set_global()
-            ax.set_title(f"{COND_NAMES.get(var, var)} — edited − unmodified", fontsize=10)
+            ax.set_title(f"{COND_NAMES.get(var, var)} — where your edit changed it "
+                         "(edited − unmodified)", fontsize=10)
             fig.colorbar(im, ax=ax, orientation="horizontal",
-                         shrink=0.8).set_label("normalised units", fontsize=8)
+                         shrink=0.8).set_label("change in normalised input "
+                                                "(own scale per panel)", fontsize=8)
     fig.suptitle("What the model sees (after smoothing and normalisation). "
-                 "Cyan contour = beyond the training range.", fontsize=10)
+                 "Cyan contour = beyond the training range."
+                 + ("\nTop: your scenario. Bottom: where and how much your edit "
+                    "changed it." if edited else ""), fontsize=10)
     return fig
 
 
