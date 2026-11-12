@@ -239,7 +239,9 @@ _newest_epoch() {
     local base="run_${RUN_TAG}"
     [[ "${CO2FIX:-0}" == "1" || "${FRESH:-0}" == "1" ]] && base="${base}_co2fix"
     ls "${SAVE_DIR%/}/${base}"_*.pt 2>/dev/null \
-        | sed -n "s|.*/${base}_\([0-9]\+\)\.pt$|\1|p" | sort -n | tail -1
+        | sed -n "s|.*/${base}_\([0-9]\+\)\.pt$|\1|p" | sort -n | tail -1 || true
+    # ^ `|| true`: with no checkpoint yet (every FRESH arm) ls exits 2, pipefail
+    # passes that up, and set -e killed the job right after staging (23644949-52).
 }
 STOP_OVERRIDE=""
 if [[ -n "${STOP_EPOCH}" ]]; then
