@@ -71,11 +71,15 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 # launch at the first batch with FileNotFoundError while every RESUMED run kept
 # working, the persisted COND_NORM short-circuiting the lookup before it opened
 # anything.
+#
+# Branch train-openburning: the _bb set, whose SUL/BC are anthro + open
+# burning (data/add_openburning_cond.py). Anchors fitted on these differ from
+# the shipped ones, so a checkpoint from another branch must be evaluated with
+# its persisted COND_PROCESSED_NORM (it is), never refitted here.
+COND_SET_SUFFIX = "_bc_co2fix_bb"
 EMISSIONS_PATHS = [
-    f"{L.DATA}/emissions_hist_only_timefixed_bc_co2fix.nc",
-    f"{L.DATA}/emissions_ssp370_only_timefixed_bc_co2fix.nc",
-    f"{L.DATA}/emissions_aaer_only_timefixed_bc_co2fix.nc",
-    f"{L.DATA}/emissions_ghg_only_timefixed_bc_co2fix.nc",
+    f"{L.DATA}/emissions_{s}_only_timefixed{COND_SET_SUFFIX}.nc"
+    for s in ("hist", "ssp370", "aaer", "ghg")
 ]
 
 # Which of those files the ANCHORS are fitted on (the files the DATASET reads

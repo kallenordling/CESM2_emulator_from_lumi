@@ -202,6 +202,9 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/ssp370  ${LOCAL_DATA_ROOT}/training_data/\${var}/
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/AAER    ${LOCAL_DATA_ROOT}/training_data/\${var}/
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/GHG     ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        # train-openburning: CESM2-SF biomass-burning-only + all-but-anthro-aerosol
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/BMB     ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/xAER    ${LOCAL_DATA_ROOT}/training_data/\${var}/
     done
     # The _co2fix set. The plain *_bc.nc files these lines used to name were
     # DELETED 2026-09-07, and every launcher in the repo still names them: the
@@ -213,6 +216,13 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     cp ${SRC_DATA_ROOT}/emissions_ssp370_only_timefixed_bc_co2fix.nc  ${LOCAL_DATA_ROOT}/
     cp ${SRC_DATA_ROOT}/emissions_aaer_only_timefixed_bc_co2fix.nc    ${LOCAL_DATA_ROOT}/
     cp ${SRC_DATA_ROOT}/emissions_ghg_only_timefixed_bc_co2fix.nc     ${LOCAL_DATA_ROOT}/
+    # train-openburning: the _bb set (SUL/BC = anthro + open burning) that
+    # config_data_ybias_BCprect_nopca_bb.yaml and the anchor fit read. The
+    # bind below HIDES everything not staged, so a missing file here is a
+    # FileNotFoundError at the first batch.
+    for s in hist ssp370 aaer ghg bmb xaer; do
+        cp ${SRC_DATA_ROOT}/emissions_\${s}_only_timefixed_bc_co2fix_bb.nc ${LOCAL_DATA_ROOT}/
+    done
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
 

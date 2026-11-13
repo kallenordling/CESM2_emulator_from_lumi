@@ -64,7 +64,7 @@ EXPERIMENTS = [
         # cmip6/; load_cesm2_ensemble reads all members at once (realizations
         # ignored). historical.nc = 11 members, 1850-2014.
         data_dir     = os.path.join(SCRATCH, "cmip6", "historical.nc"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc_co2fix_bb.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -75,7 +75,7 @@ EXPERIMENTS = [
     dict(
         name         = "ssp370",
         data_dir     = os.path.join(SCRATCH, "cmip6", "ssp370.nc"),  # 3-member annual ref
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc_co2fix_bb.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -97,7 +97,7 @@ EXPERIMENTS = [
         # "+ hist_endpoint" ramp so cumulative CO2 plateaus ~2070 (late slope
         # +6.7→−0.5 /yr) instead of climbing to 2100. See
         # ssp126_co2_cond_construction_bug. Old file: emissions_ssp126_only_timefixed.nc
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_bc_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_bc_co2fix_bb.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -115,7 +115,7 @@ EXPERIMENTS = [
         # ssp245-only cond file (2015–2100), CO2-FIXED build (no spurious ramp;
         # concat_and_regrid_ssp126.py --scenarios ssp245). Cumulative CO2 still
         # integrated from 1850 so magnitudes match the training distribution.
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc_co2fix_bb.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1", "r11i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -141,6 +141,9 @@ EXPERIMENTS = [
         name         = "h_cmip7",
         data_dir     = None,                 # no CESM2 reference exists
         model_only   = True,
+        # train-openburning: NO _bb version exists for CMIP7 (its SUL/BC are
+        # anthro only), so this model sees CMIP7 with burning missing.
+        # Build one before trusting h/vl results from this branch.
         cond_file    = os.path.join(EMIS_DIR, "emissions_h_cmip7_only_timefixed_bc.nc"),
         realizations = [],
         time_dim     = "time",
@@ -193,7 +196,7 @@ EXPERIMENTS = [
         # comparison with a 261 Gt CO2 offset growing to 471 Gt by 2079.
         # Old file: emissions_ssp370co2_ssp126aer_bc_2015-2079.nc
         cond_file    = os.path.join(
-            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079_co2fix.nc"),
+            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079_co2fix_bb.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",
@@ -204,7 +207,7 @@ EXPERIMENTS = [
     dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc_co2fix_bb.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
@@ -215,13 +218,49 @@ EXPERIMENTS = [
     dict(
         name         = "ghg",
         data_dir     = os.path.join(DATA_ROOT, "GHG"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc_co2fix.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc_co2fix_bb.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
         map_years    = [1900, 2000, 2050],
         gen_cost     = 201,                  # ~year span; for shard load-balancing
         color        = "#2ca02c",
+    ),
+    # ── CESM2-SF experiments added with the open-burning cond set ─────────────
+    # bmb and xaer are TRAINING scenarios on this branch (members 001-012 and
+    # 001-008); the reference here is the full ensemble, as for aaer/ghg.
+    # ee is eval-only: land use/ozone/solar/volcanic are not in any cond
+    # channel, so the emulator sees EE as constant 1850 (incl. 1850 burning).
+    # Cond files: data/add_openburning_cond.py.
+    dict(
+        name         = "bmb",
+        data_dir     = os.path.join(DATA_ROOT, "BMB"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_bmb_only_timefixed_bc_co2fix_bb.nc"),
+        realizations = [f"{i:03d}" for i in range(1, 16)],
+        time_dim     = "time",
+        map_years    = [1900, 2000, 2050],
+        gen_cost     = 201,
+        color        = "#a0522d",
+    ),
+    dict(
+        name         = "ee",
+        data_dir     = os.path.join(DATA_ROOT, "EE"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_pi1850_const_bc_co2fix_bb.nc"),
+        realizations = [f"{i}" for i in range(101, 116)],
+        time_dim     = "time",
+        map_years    = [1900, 2000, 2050],
+        gen_cost     = 201,
+        color        = "#7f7f7f",
+    ),
+    dict(
+        name         = "xaer",
+        data_dir     = os.path.join(DATA_ROOT, "xAER"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_xaer_only_timefixed_bc_co2fix_bb.nc"),
+        realizations = [f"{i:03d}" for i in range(1, 11)],
+        time_dim     = "time",
+        map_years    = [1950, 2000, 2050],
+        gen_cost     = 131,                  # 1920-2050
+        color        = "#17becf",
     ),
 ]
 
@@ -250,6 +289,12 @@ PRECT_REFS = {
                    realizations=["001", "002", "003", "004", "005",
                                  "006", "007", "008", "009", "010"],
                    time_dim="time"),
+    "bmb":    dict(data_dir=os.path.join(PRECT_ROOT, "BMB"),
+                   realizations=[f"{i:03d}" for i in range(1, 16)], time_dim="time"),
+    "ee":     dict(data_dir=os.path.join(PRECT_ROOT, "EE"),
+                   realizations=[f"{i}" for i in range(101, 116)], time_dim="time"),
+    "xaer":   dict(data_dir=os.path.join(PRECT_ROOT, "xAER"),
+                   realizations=[f"{i:03d}" for i in range(1, 11)], time_dim="time"),
 }
 # Precip anomaly map colour ranges (mm/day). Regional 10-yr-mean precip
 # anomalies are O(1) mm/day even under strong forcing.
