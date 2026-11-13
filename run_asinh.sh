@@ -205,6 +205,7 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
         # train-openburning: CESM2-SF biomass-burning-only + all-but-anthro-aerosol
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/BMB     ${LOCAL_DATA_ROOT}/training_data/\${var}/
         cp -r ${SRC_DATA_ROOT}/training_data/\${var}/xAER    ${LOCAL_DATA_ROOT}/training_data/\${var}/
+        cp -r ${SRC_DATA_ROOT}/training_data/\${var}/EE      ${LOCAL_DATA_ROOT}/training_data/\${var}/
     done
     # The _co2fix set. The plain *_bc.nc files these lines used to name were
     # DELETED 2026-09-07, and every launcher in the repo still names them: the
@@ -222,6 +223,10 @@ srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 bash -c "
     # FileNotFoundError at the first batch.
     for s in hist ssp370 aaer ghg bmb xaer; do
         cp ${SRC_DATA_ROOT}/emissions_\${s}_only_timefixed_bc_co2fix_bb.nc ${LOCAL_DATA_ROOT}/
+    done
+    # _bbv: the _bb set + VOLC channel, + ee (config_data_ybias_BCprect_nopca_bbv.yaml)
+    for s in hist ssp370 aaer ghg bmb xaer ee; do
+        cp ${SRC_DATA_ROOT}/emissions_\${s}_only_timefixed_bc_co2fix_bbv.nc ${LOCAL_DATA_ROOT}/
     done
     echo \"[stage] node \$(hostname): done in \$((\$(date +%s)-t0))s, size=\$(du -sh ${LOCAL_DATA_ROOT} | awk '{print \$1}')\"
 "
@@ -360,7 +365,7 @@ RUN_CMD="singularity exec --bind ${LOCAL_DATA_ROOT}:${SRC_DATA_ROOT} ${SIF} bash
         trainer.hyperparameters.anchor_scenarios="${ANCHOR_SCENARIOS:-hist_ssp370}" \
         model.in_channels=2 \
         model.out_channels=2 \
-        model.cond_channels=3 \
+        model.cond_channels=${COND_CHANNELS:-4} \
         trainer.hyperparameters.save_name=${SAVE_NAME} \
         trainer.hyperparameters.save_dir="${SAVE_DIR:-runs/}" \
         ${LOAD_OVERRIDE} \

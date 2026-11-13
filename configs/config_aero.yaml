@@ -18,7 +18,7 @@ model:
     _target_: models.video_net.UNetModel3D
     in_channels: 2        # was 1 — (TREFHT, PRECT) joint-denoised target
     out_channels: 2       # was 1
-    cond_channels: 3      # was 2 — (CO2, SUL, BC)
+    cond_channels: 4      # train-openburning: (CO2, SUL, BC, VOLC)
     dim_mults: [1, 2, 3, 4]
     resnet_groups: 8
     attn_dim_head: 32

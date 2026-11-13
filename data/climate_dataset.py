@@ -72,11 +72,11 @@ def preprocess(ds: xr.DataArray) -> xr.DataArray:
 # working, the persisted COND_NORM short-circuiting the lookup before it opened
 # anything.
 #
-# Branch train-openburning: the _bb set, whose SUL/BC are anthro + open
-# burning (data/add_openburning_cond.py). Anchors fitted on these differ from
+# Branch train-openburning: the _bbv set, whose SUL/BC are anthro + open
+# burning (data/add_openburning_cond.py) and which carries VOLC. Anchors fitted on these differ from
 # the shipped ones, so a checkpoint from another branch must be evaluated with
 # its persisted COND_PROCESSED_NORM (it is), never refitted here.
-COND_SET_SUFFIX = "_bc_co2fix_bb"
+COND_SET_SUFFIX = "_bc_co2fix_bbv"   # _bb + VOLC channel (add_volcanic_channel.py)
 EMISSIONS_PATHS = [
     f"{L.DATA}/emissions_{s}_only_timefixed{COND_SET_SUFFIX}.nc"
     for s in ("hist", "ssp370", "aaer", "ghg")

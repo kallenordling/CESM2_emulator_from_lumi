@@ -64,7 +64,7 @@ EXPERIMENTS = [
         # cmip6/; load_cesm2_ensemble reads all members at once (realizations
         # ignored). historical.nc = 11 members, 1850-2014.
         data_dir     = os.path.join(SCRATCH, "cmip6", "historical.nc"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_hist_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -75,7 +75,7 @@ EXPERIMENTS = [
     dict(
         name         = "ssp370",
         data_dir     = os.path.join(SCRATCH, "cmip6", "ssp370.nc"),  # 3-member annual ref
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp370_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",                # cmip6 ref files store 'tas' (not TREFHT)
@@ -97,7 +97,7 @@ EXPERIMENTS = [
         # "+ hist_endpoint" ramp so cumulative CO2 plateaus ~2070 (late slope
         # +6.7→−0.5 /yr) instead of climbing to 2100. See
         # ssp126_co2_cond_construction_bug. Old file: emissions_ssp126_only_timefixed.nc
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp126_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -115,7 +115,7 @@ EXPERIMENTS = [
         # ssp245-only cond file (2015–2100), CO2-FIXED build (no spurious ramp;
         # concat_and_regrid_ssp126.py --scenarios ssp245). Cumulative CO2 still
         # integrated from 1850 so magnitudes match the training distribution.
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ssp245_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = ["r4i1p1f1", "r10i1p1f1", "r11i1p1f1"],
         time_dim     = "time",
         target_var   = "tas",
@@ -196,7 +196,7 @@ EXPERIMENTS = [
         # comparison with a 261 Gt CO2 offset growing to 471 Gt by 2079.
         # Old file: emissions_ssp370co2_ssp126aer_bc_2015-2079.nc
         cond_file    = os.path.join(
-            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079_co2fix_bb.nc"),
+            EMIS_DIR, "emissions_ssp370co2_ssp126aer_bc_2015-2079_co2fix_bbv.nc"),
         realizations = [],                   # ignored: single-file ensemble
         time_dim     = "time",
         target_var   = "tas",
@@ -207,7 +207,7 @@ EXPERIMENTS = [
     dict(
         name         = "aaer",
         data_dir     = os.path.join(DATA_ROOT, "AAER"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_aaer_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
@@ -218,7 +218,7 @@ EXPERIMENTS = [
     dict(
         name         = "ghg",
         data_dir     = os.path.join(DATA_ROOT, "GHG"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ghg_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = ["001", "002", "003", "004", "005",
                         "006", "007", "008", "009", "010"],
         time_dim     = "time",
@@ -229,13 +229,13 @@ EXPERIMENTS = [
     # ── CESM2-SF experiments added with the open-burning cond set ─────────────
     # bmb and xaer are TRAINING scenarios on this branch (members 001-012 and
     # 001-008); the reference here is the full ensemble, as for aaer/ghg.
-    # ee is eval-only: land use/ozone/solar/volcanic are not in any cond
-    # channel, so the emulator sees EE as constant 1850 (incl. 1850 burning).
+    # ee is ALSO a training scenario (101-112) since the VOLC channel; its
+    # solar/land use/ozone forcing is still invisible to the cond.
     # Cond files: data/add_openburning_cond.py.
     dict(
         name         = "bmb",
         data_dir     = os.path.join(DATA_ROOT, "BMB"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_bmb_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_bmb_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = [f"{i:03d}" for i in range(1, 16)],
         time_dim     = "time",
         map_years    = [1900, 2000, 2050],
@@ -245,7 +245,7 @@ EXPERIMENTS = [
     dict(
         name         = "ee",
         data_dir     = os.path.join(DATA_ROOT, "EE"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_pi1850_const_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_ee_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = [f"{i}" for i in range(101, 116)],
         time_dim     = "time",
         map_years    = [1900, 2000, 2050],
@@ -255,7 +255,7 @@ EXPERIMENTS = [
     dict(
         name         = "xaer",
         data_dir     = os.path.join(DATA_ROOT, "xAER"),
-        cond_file    = os.path.join(EMIS_DIR, "emissions_xaer_only_timefixed_bc_co2fix_bb.nc"),
+        cond_file    = os.path.join(EMIS_DIR, "emissions_xaer_only_timefixed_bc_co2fix_bbv.nc"),
         realizations = [f"{i:03d}" for i in range(1, 11)],
         time_dim     = "time",
         map_years    = [1950, 2000, 2050],
@@ -617,8 +617,17 @@ def generate_timeseries(
             if n_cond >= 3:
                 cond_bc_only = cond_b.clone()
                 cond_bc_only[:, 0:2] = NULL_COND     # keep only BC (ch2)
+                cond_bc_only[:, 3:] = NULL_COND      # (null VOLC too)
                 cfg_conds.append(cond_bc_only)
                 cfg_weights.append(guidance_bc)
+            if n_cond >= 4:
+                # VOLC (ch3) has no guidance knob: weight 1 keeps its plain
+                # conditional contribution in the additive decomposition,
+                # which would otherwise drop the channel whenever CFG is on.
+                cond_volc_only = cond_b.clone()
+                cond_volc_only[:, 0:3] = NULL_COND
+                cfg_conds.append(cond_volc_only)
+                cfg_weights.append(1.0)
             cond_null = torch.full_like(cond_b, NULL_COND)
             n_pass = len(cfg_conds) + 1              # + the null pass
 
